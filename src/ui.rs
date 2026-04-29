@@ -15,7 +15,7 @@
 
 use crate::cli::Args;
 use crate::collector::Collector;
-use crate::format::{bytes, dur, pct, project_basename, shorten, shorten_left, tildeify};
+use crate::format::{bytes, dur, pct, project_basename, shorten};
 use crate::model::{ActivityKind, Agent, Snapshot, Status};
 use crate::theme;
 
@@ -27,7 +27,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     symbols,
     text::{Line, Span},
@@ -232,17 +232,19 @@ fn draw(f: &mut Frame, app: &mut App) {
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),    // CPU chart
-            Constraint::Length(7),    // MEM chart
-            Constraint::Min(6),       // active vs busy + sessions
+            Constraint::Length(8),     // CPU panel: chart + stats sidebar
+            Constraint::Length(11),    // Memory by agent (top-N) + system gauge
+            Constraint::Length(9),     // Status distribution bars
+            Constraint::Min(6),        // Claude sessions panel
         ])
         .split(body[1]);
 
     draw_agents(f, left[0], app);
     draw_left_bottom(f, left[1], &app.snap);
-    draw_cpu_chart(f, right[0], &app.snap);
-    draw_mem_chart(f, right[1], &app.snap);
-    draw_right_bottom(f, right[2], &app.snap);
+    draw_cpu_panel(f, right[0], &app.snap);
+    draw_memory_panel(f, right[1], &app.snap);
+    draw_status_distribution(f, right[2], &app.snap);
+    draw_sessions(f, right[3], &app.snap);
 
     draw_footer(f, chunks[2], app);
 
@@ -412,9 +414,16 @@ fn agent_row<'a>(a: &'a Agent, selected: bool) -> Row<'a> {
     spans.push(Span::styled(format!("{:>7}", a.pid),
                             Style::default().fg(theme::FG)));
     spans.push(Span::raw(" "));
-    // CPU
+    // CPU% with an inline mini-bar so relative load reads at a glance.
+    let bar_cells = (a.cpu / 100.0 * 6.0).round().clamp(0.0, 6.0) as usize;
+    let cpu_color = theme::cpu_color(a.cpu);
     spans.push(Span::styled(format!("{:>6}", pct(a.cpu)),
-                            Style::default().fg(theme::cpu_color(a.cpu)).add_modifier(Modifier::BOLD)));
+                            Style::default().fg(cpu_color).add_modifier(Modifier::BOLD)));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled("█".repeat(bar_cells),
+                            Style::default().fg(cpu_color).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled("·".repeat(6 - bar_cells),
+                            Style::default().fg(theme::BORDER_DIM)));
     spans.push(Span::raw(" "));
     // MEM
     spans.push(Span::styled(format!("{:>7}", bytes(a.rss)),
@@ -575,13 +584,43 @@ fn draw_activity(f: &mut Frame, area: Rect, snap: &Snapshot) {
     f.render_widget(list, inner);
 }
 
-fn draw_cpu_chart(f: &mut Frame, area: Rect, snap: &Snapshot) {
+// CPU panel: area-filled chart on the left, big-number stats sidebar on the
+// right. The fill is a dim Bar-marker dataset rendered underneath a bright
+// Braille line — gives the visual weight of an area chart in pure ratatui.
+fn draw_cpu_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::BORDER))
+        .title(Line::from(vec![
+            Span::styled(" CPU ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("system · {} core{}", snap.sys_cpus, if snap.sys_cpus == 1 {""} else {"s"}),
+                Style::default().fg(theme::FG_DIM)),
+        ]));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Split: chart | stats
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(20), Constraint::Length(16)])
+        .split(inner);
+
+    // Chart with area fill.
     let data: Vec<(f64, f64)> = snap.history.cpu.iter().enumerate()
         .map(|(i, v)| (i as f64, *v)).collect();
-    let max_y = data.iter().map(|(_, y)| *y).fold(10.0_f64, f64::max);
-    let max_y = (max_y / 10.0).ceil() * 10.0;
+    let peak = data.iter().map(|(_, y)| *y).fold(0.0_f64, f64::max);
+    let avg = if !data.is_empty() {
+        data.iter().map(|(_, y)| *y).sum::<f64>() / data.len() as f64
+    } else { 0.0 };
+    let max_y = ((peak.max(snap.aggregates.cpu) / 10.0).ceil() * 10.0).max(20.0);
 
     let datasets = vec![
+        Dataset::default()
+            .marker(symbols::Marker::Bar)
+            .graph_type(GraphType::Bar)
+            .style(Style::default().fg(theme::C_CHART_CPU_FILL))
+            .data(&data),
         Dataset::default()
             .name("CPU%")
             .marker(symbols::Marker::Braille)
@@ -589,132 +628,218 @@ fn draw_cpu_chart(f: &mut Frame, area: Rect, snap: &Snapshot) {
             .style(Style::default().fg(theme::C_CHART_CPU))
             .data(&data),
     ];
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
-        .title(Line::from(vec![
-            Span::styled(" CPU% ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("now {}  peak {}",
-                pct(snap.aggregates.cpu),
-                pct(data.iter().map(|(_, y)| *y).fold(0.0_f64, f64::max))),
-                Style::default().fg(theme::FG_DIM)),
-        ]));
     let chart = Chart::new(datasets)
-        .block(block)
-        .x_axis(Axis::default()
-            .style(Style::default().fg(theme::BORDER_DIM))
-            .bounds([0.0, data.len().max(1) as f64 - 1.0]))
-        .y_axis(Axis::default()
-            .style(Style::default().fg(theme::BORDER_DIM))
-            .bounds([0.0, max_y])
-            .labels(vec![Span::raw("0"), Span::raw(format!("{:.0}", max_y / 2.0)), Span::raw(format!("{:.0}", max_y))]));
-    f.render_widget(chart, area);
-}
-
-fn draw_mem_chart(f: &mut Frame, area: Rect, snap: &Snapshot) {
-    let data: Vec<(f64, f64)> = snap.history.mem.iter().enumerate()
-        .map(|(i, v)| (i as f64, *v)).collect();
-    let max_y = data.iter().map(|(_, y)| *y).fold(64.0_f64, f64::max);
-    let datasets = vec![
-        Dataset::default()
-            .name("MB")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(theme::C_CHART_MEM))
-            .data(&data),
-    ];
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
-        .title(Line::from(vec![
-            Span::styled(" MEM ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("now {}", bytes(snap.aggregates.mem_bytes)),
-                Style::default().fg(theme::FG_DIM)),
-        ]));
-    let chart = Chart::new(datasets)
-        .block(block)
-        .x_axis(Axis::default()
-            .style(Style::default().fg(theme::BORDER_DIM))
-            .bounds([0.0, data.len().max(1) as f64 - 1.0]))
-        .y_axis(Axis::default()
-            .style(Style::default().fg(theme::BORDER_DIM))
-            .bounds([0.0, max_y])
-            .labels(vec![Span::raw("0"),
-                Span::raw(format!("{:.0}", max_y / 2.0)),
-                Span::raw(format!("{:.0} MB", max_y))]));
-    f.render_widget(chart, area);
-}
-
-fn draw_right_bottom(f: &mut Frame, area: Rect, snap: &Snapshot) {
-    // Active vs Busy stacked-line chart on top, sessions panel underneath.
-    let split = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(area);
-
-    // Active vs busy chart.
-    let active: Vec<(f64, f64)> = snap.history.active.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect();
-    let busy:   Vec<(f64, f64)> = snap.history.busy.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect();
-    let max_y = active.iter().chain(busy.iter()).map(|(_, y)| *y).fold(2.0_f64, f64::max);
-    let datasets = vec![
-        Dataset::default().name("active").marker(symbols::Marker::Braille).graph_type(GraphType::Line)
-            .style(Style::default().fg(theme::C_CHART_ACTIVE)).data(&active),
-        Dataset::default().name("busy").marker(symbols::Marker::Braille).graph_type(GraphType::Line)
-            .style(Style::default().fg(theme::C_CHART_BUSY)).data(&busy),
-    ];
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
-        .title(Span::styled(" Active vs Busy ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
-    let chart = Chart::new(datasets)
-        .block(block)
         .x_axis(Axis::default().style(Style::default().fg(theme::BORDER_DIM))
-            .bounds([0.0, active.len().max(1) as f64 - 1.0]))
+            .bounds([0.0, data.len().max(1) as f64 - 1.0]))
         .y_axis(Axis::default().style(Style::default().fg(theme::BORDER_DIM))
             .bounds([0.0, max_y])
-            .labels(vec![Span::raw("0"), Span::raw(format!("{:.0}", max_y))]));
-    f.render_widget(chart, split[0]);
+            .labels(vec![
+                Span::styled("0",   Style::default().fg(theme::FG_DIM)),
+                Span::styled(format!("{:.0}", max_y / 2.0), Style::default().fg(theme::FG_DIM)),
+                Span::styled(format!("{:.0}%", max_y), Style::default().fg(theme::FG_DIM)),
+            ]));
+    f.render_widget(chart, cols[0]);
 
-    // Sessions panel.
+    // Big-number stats sidebar.
+    let stat = |label: &str, value: String, color: ratatui::style::Color| Line::from(vec![
+        Span::styled(format!(" {} ", label), Style::default().fg(theme::FG_DIM)),
+        Span::styled(value, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+    ]);
+    let stats = vec![
+        stat("now", pct(snap.aggregates.cpu), theme::cpu_color(snap.aggregates.cpu)),
+        stat("peak", pct(peak), theme::C_CHART_CPU),
+        stat("avg",  pct(avg),  theme::FG),
+        stat("cores used", format!("{:.1}", snap.aggregates.cpu / 100.0), theme::FG_DIM),
+    ];
+    let p = Paragraph::new(stats);
+    f.render_widget(p, cols[1]);
+}
+
+// Memory panel: top-N agents by RSS as horizontal bars, plus a system memory
+// gauge showing free / agent-attributable / other-used.
+fn draw_memory_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::BORDER))
-        .title(Span::styled(" Claude sessions ",
+        .title(Line::from(vec![
+            Span::styled(" Memory by agent ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} across {} agent{}",
+                bytes(snap.aggregates.mem_bytes),
+                snap.aggregates.active,
+                if snap.aggregates.active == 1 {""} else {"s"}),
+                Style::default().fg(theme::FG_DIM)),
+        ]));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Reserve last two rows for the system memory gauge.
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(2)])
+        .split(inner);
+
+    // Sort agents by RSS desc.
+    let mut agents: Vec<&Agent> = snap.agents.iter().collect();
+    agents.sort_by(|a, b| b.rss.cmp(&a.rss));
+
+    let max_rss = agents.iter().map(|a| a.rss).max().unwrap_or(1).max(1);
+    let bar_width = (split[0].width as usize).saturating_sub(34).max(8);
+
+    let mut items: Vec<ListItem> = Vec::new();
+    let take = (split[0].height as usize).saturating_sub(0);
+    for a in agents.iter().take(take) {
+        let frac = a.rss as f64 / max_rss as f64;
+        let filled = (frac * bar_width as f64).round() as usize;
+        let filled = filled.min(bar_width);
+        let bar_full  = "█".repeat(filled);
+        let bar_empty = "·".repeat(bar_width - filled);
+        let mut spans: Vec<Span> = Vec::new();
+        spans.push(Span::styled(format!("{} ", a.status.glyph()), theme::status_style(a.status)));
+        spans.push(Span::styled(format!("{:<10}", shorten(&a.project, 10)),
+            Style::default().fg(theme::FG)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!("{:<8}", shorten(&a.label, 8)),
+            Style::default().fg(theme::agent_color(&a.label))));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(bar_full,  Style::default().fg(theme::C_CHART_MEM).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(bar_empty, Style::default().fg(theme::C_CHART_MEM_FILL)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!("{:>7}", bytes(a.rss)),
+            Style::default().fg(theme::C_CHART_MEM)));
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  (no agents)", Style::default().fg(theme::FG_DIM)))));
+    }
+    f.render_widget(List::new(items), split[0]);
+
+    // System memory gauge — three-segment horizontal bar:
+    //   used-by-agents | other-used | available
+    let total = snap.mem_total.max(1);
+    let avail = snap.mem_available;
+    let used  = total.saturating_sub(avail);
+    let agent_mem = snap.aggregates.mem_bytes.min(used);
+    let other = used.saturating_sub(agent_mem);
+    let w = split[1].width as usize;
+    if w > 4 {
+        let cells = (w as i64) - 2;
+        let agent_cells = ((agent_mem as f64 / total as f64) * cells as f64).round() as i64;
+        let other_cells = ((other as f64     / total as f64) * cells as f64).round() as i64;
+        let free_cells  = (cells - agent_cells - other_cells).max(0);
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled("█".repeat(agent_cells.max(0) as usize),
+                Style::default().fg(theme::C_GAUGE_AGENT)),
+            Span::styled("█".repeat(other_cells.max(0) as usize),
+                Style::default().fg(theme::C_GAUGE_USED)),
+            Span::styled("░".repeat(free_cells.max(0) as usize),
+                Style::default().fg(theme::C_GAUGE_FREE)),
+        ]);
+        let label = Line::from(vec![
+            Span::styled(" agents ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(bytes(agent_mem),
+                Style::default().fg(theme::C_GAUGE_AGENT).add_modifier(Modifier::BOLD)),
+            Span::styled("  other ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(bytes(other),
+                Style::default().fg(theme::C_GAUGE_USED).add_modifier(Modifier::BOLD)),
+            Span::styled("  free ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(bytes(avail),
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" / {}", bytes(total)),
+                Style::default().fg(theme::FG_DIM)),
+        ]);
+        f.render_widget(Paragraph::new(vec![line, label]), split[1]);
+    }
+}
+
+// Status distribution: htop-style horizontal segment bars, one per status.
+fn draw_status_distribution(f: &mut Frame, area: Rect, snap: &Snapshot) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::BORDER))
+        .title(Line::from(vec![
+            Span::styled(" Status distribution ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} live agent{} · {} session{}",
+                snap.aggregates.active,
+                if snap.aggregates.active == 1 {""} else {"s"},
+                snap.sessions.waiting + snap.sessions.completed + snap.sessions.active,
+                ""),
+                Style::default().fg(theme::FG_DIM)),
+        ]));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let live = snap.aggregates.active;
+    let waiting = snap.sessions.waiting;
+    let done = snap.sessions.completed;
+    let total = (live + waiting + done).max(1);
+
+    // Count per process status across live agents.
+    let mut counts: std::collections::HashMap<&'static str, u32> = std::collections::HashMap::new();
+    for a in &snap.agents {
+        *counts.entry(status_key(a.status)).or_insert(0) += 1;
+    }
+    let row = |name: &str, count: u32, status: Status| {
+        let bar_w = (inner.width as usize).saturating_sub(28).max(8);
+        let frac = count as f64 / total as f64;
+        let filled = (frac * bar_w as f64).round() as usize;
+        let filled = filled.min(bar_w);
+        let pct_v = frac * 100.0;
+        let mut spans: Vec<Span> = Vec::new();
+        spans.push(Span::styled(format!("  {} {:<6} ", status.glyph(), name),
+            theme::status_style(status)));
+        spans.push(Span::styled(format!("{:>3} ", count),
             Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
-    let inner = block.inner(split[1]);
-    f.render_widget(block, split[1]);
+        spans.push(Span::styled("█".repeat(filled),
+            Style::default().fg(theme::status_color(status)).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled("·".repeat(bar_w - filled),
+            Style::default().fg(theme::BORDER_DIM)));
+        spans.push(Span::styled(format!(" {:>4.1}%", pct_v),
+            Style::default().fg(theme::FG_DIM)));
+        Line::from(spans)
+    };
+    let lines = vec![
+        row("BUSY",   *counts.get("busy").unwrap_or(&0),     Status::Busy),
+        row("SPWN",   *counts.get("spawning").unwrap_or(&0), Status::Spawning),
+        row("ACTV",   *counts.get("active").unwrap_or(&0),   Status::Active),
+        row("idle",   *counts.get("idle").unwrap_or(&0),     Status::Idle),
+        row("WAIT",   waiting,                               Status::Waiting),
+        row("DONE",   done,                                  Status::Completed),
+    ];
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_sessions(f: &mut Frame, area: Rect, snap: &Snapshot) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::BORDER))
+        .title(Span::styled(" Claude sessions — recent tasks ",
+            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
     let s = &snap.sessions;
     let a = &snap.aggregates;
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled(format!(" {} ", a.busy), Style::default().fg(theme::C_BUSY).add_modifier(Modifier::BOLD)),
-        Span::styled("busy   ", Style::default().fg(theme::FG_DIM)),
-        Span::styled(format!("{} ", s.active.saturating_sub(a.busy)), Style::default().fg(theme::C_ACTIVE)),
-        Span::styled("active   ", Style::default().fg(theme::FG_DIM)),
-        Span::styled(format!("{} ", s.waiting), Style::default().fg(theme::C_WAIT)),
-        Span::styled("waiting   ", Style::default().fg(theme::FG_DIM)),
-        Span::styled(format!("{} ", s.completed), Style::default().fg(theme::C_DONE)),
-        Span::styled("done", Style::default().fg(theme::FG_DIM)),
-    ]));
     if a.subagents > 0 {
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", a.subagents), Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("Task subagent{} in flight",
+            Span::styled(format!(" {} ", a.subagents),
+                Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("Task subagent{} in flight ",
                 if a.subagents == 1 {""} else {"s"}),
                 Style::default().fg(theme::FG_DIM)),
         ]));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(" Recent tasks", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD))));
     if s.recent_tasks.is_empty() {
-        lines.push(Line::from(Span::styled("  (none in last 24h)", Style::default().fg(theme::FG_DIM))));
+        lines.push(Line::from(Span::styled("  (no tasks in last 24h)",
+            Style::default().fg(theme::FG_DIM))));
     }
-    for t in s.recent_tasks.iter().take((inner.height as usize).saturating_sub(4)) {
+    let cap = (inner.height as usize).saturating_sub(if a.subagents > 0 { 1 } else { 0 });
+    for t in s.recent_tasks.iter().take(cap) {
         lines.push(Line::from(vec![
             Span::raw(" "),
             Span::styled(t.status.glyph().to_string(), theme::status_style(t.status)),
@@ -728,6 +853,18 @@ fn draw_right_bottom(f: &mut Frame, area: Rect, snap: &Snapshot) {
     }
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(p, inner);
+}
+
+fn status_key(s: Status) -> &'static str {
+    match s {
+        Status::Busy => "busy",
+        Status::Spawning => "spawning",
+        Status::Active => "active",
+        Status::Idle => "idle",
+        Status::Waiting => "waiting",
+        Status::Completed => "completed",
+        Status::Stale => "stale",
+    }
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {

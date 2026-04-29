@@ -21,11 +21,17 @@ pub const C_WAIT: Color = Color::Rgb(240, 200, 90);
 pub const C_DONE: Color = Color::Rgb(200, 130, 220);
 pub const C_STALE: Color = Color::Rgb(110, 110, 120);
 
-// Chart colors — distinct hue for each series.
+// Chart colors — distinct hue for each series, plus a dim "fill" partner for
+// area-style line charts (Bar dataset underneath, bright Braille line on top).
 pub const C_CHART_CPU: Color = Color::Rgb(255, 200, 80);
+pub const C_CHART_CPU_FILL: Color = Color::Rgb(120, 80, 25);
 pub const C_CHART_MEM: Color = Color::Rgb(220, 130, 220);
+pub const C_CHART_MEM_FILL: Color = Color::Rgb(110, 60, 110);
 pub const C_CHART_ACTIVE: Color = Color::Rgb(110, 220, 130);
 pub const C_CHART_BUSY: Color = Color::Rgb(255, 110, 110);
+pub const C_GAUGE_USED: Color = Color::Rgb(110, 220, 130);
+pub const C_GAUGE_AGENT: Color = Color::Rgb(255, 200, 80);
+pub const C_GAUGE_FREE: Color = Color::Rgb(50, 70, 80);
 
 pub fn status_color(s: Status) -> Color {
     match s {
