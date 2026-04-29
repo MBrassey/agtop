@@ -89,7 +89,6 @@ function once(collector, opts) {
 }
 
 function scrubForJson(snap) {
-  // Drop the cyclic-ish or noisy bits; keep the useful structured data.
   return {
     now: snap.now,
     platform: snap.platform,
@@ -101,7 +100,15 @@ function scrubForJson(snap) {
     agents: snap.agents.map(a => ({
       pid: a.pid,
       label: a.label,
+      status: a.status,
+      project: a.project,
+      currentTool: a.currentTool,
+      currentTask: a.currentTask,
+      subagents: a.subagents,
+      sessionId: a.sessionId,
+      sessionAgeMs: a.sessionAgeMs,
       cpu: round(a.cpu, 2),
+      cpuRaw: a.cpuRaw != null ? round(a.cpuRaw, 2) : undefined,
       rss: a.rss,
       vsize: a.vsize,
       threads: a.threads,
@@ -116,7 +123,15 @@ function scrubForJson(snap) {
       writingFiles: a.writingFiles,
       writingDirs: a.writingDirs,
     })),
-    sessions: snap.sessions,
+    projects: snap.projects || [],
+    sessions: snap.sessions ? {
+      active: snap.sessions.active,
+      busy: snap.sessions.busy,
+      waiting: snap.sessions.waiting,
+      completed: snap.sessions.completed,
+      sessions: snap.sessions.sessions,
+      recentTasks: snap.sessions.recentTasks,
+    } : null,
     activity: snap.activity,
     history: snap.history,
   };
