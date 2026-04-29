@@ -207,11 +207,18 @@ def agents_body(width):
         )
         if sub_sum > 0:
             header += f"{SPAWN}  +{sub_sum}{RST}{FG_DIM} sub{RST}"
-        out.append(header)
+        # Per-project bg tint — same project → same tint, hashed off name.
+        TINTS = [(20,26,34),(28,24,32),(20,30,30),(30,28,22),(30,24,24),(22,30,26)]
+        h = 0
+        for b in proj.encode():
+            h = (h * 31 + b) & 0xFFFFFFFF
+        tint = TINTS[h % len(TINTS)]
+        tint_open  = f"\x1b[48;2;{tint[0]};{tint[1]};{tint[2]}m"
+        tint_close = "\x1b[49m"
+        out.append(f"{tint_open}{header}{tint_close}")
         for i, r in enumerate(rows):
             status, label, pid, cpu, mem, up, sub, tok, _, model, doing = r
-            zebra_open  = "\x1b[48;2;22;26;32m" if i % 2 == 1 else ""
-            zebra_close = "\x1b[49m" if i % 2 == 1 else ""
+            zebra_open, zebra_close = tint_open, tint_close
             # Heuristic: any agent with status=busy in the synthetic dataset
             # is treated as god-mode (so the screenshot shows the pulsating
             # GOD tag); real binary uses cmdline regex.
@@ -228,10 +235,10 @@ def agents_body(width):
             sp = f"{cpu_color(cpu)}{per_agent_spark(cpu)}{RST}"
             doing_col = SPAWN if any(t in doing for t in ("Bash:","Edit:","Task:","Write:")) else FG
             doing_clipped = trunc(doing, max(0, inner - 78))
-            # Dangerous-mode agents pulsate the LABEL itself: bright red,
-            # bold, slow-blink, reverse-video — no separate text chip.
+            # Dangerous-mode agents: subtle warning underline + warm amber
+            # bold accent on the label.  No reverse-video, no blink.
             if dangerous:
-                label_styled = f"\x1b[5m\x1b[7m\x1b[1m\x1b[38;2;255;90;90m{label:<10}{RST}"
+                label_styled = f"\x1b[1m\x1b[4m\x1b[38;2;240;175;95m{label:<10}{RST}"
             else:
                 label_styled = f"{acc(label)}{BOLD}{label:<10}{RST}"
             line = (

@@ -11,14 +11,34 @@ pub const BORDER_DIM: Color = Color::Rgb( 70,  85,  95);   // gentle dim
 pub const FG:         Color = Color::Rgb(225, 222, 215);   // warm off-white
 pub const FG_DIM:     Color = Color::Rgb(165, 170, 178);   // neutral mid-gray (>4.8:1 contrast)
 pub const HL_BG:      Color = Color::Rgb( 50,  85, 120);   // bright slate-cyan for selection (high contrast)
-pub const ZEBRA_BG:   Color = Color::Rgb( 22,  26,  32);   // very subtle alternating-row tint
+
+/// Subtle low-saturation background tints used for project grouping.
+/// Same project → same tint; the order in this array is stable so a
+/// given project name always maps to the same swatch via hash.  Tints
+/// are dim enough that text + status colors stay readable.
+pub const GROUP_TINTS: [Color; 6] = [
+    Color::Rgb(20, 26, 34),   // slate-blue
+    Color::Rgb(28, 24, 32),   // plum
+    Color::Rgb(20, 30, 30),   // teal
+    Color::Rgb(30, 28, 22),   // olive
+    Color::Rgb(30, 24, 24),   // rose
+    Color::Rgb(22, 30, 26),   // sage
+];
+
+pub fn project_tint(name: &str) -> Color {
+    let mut h: u32 = 0;
+    for b in name.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u32); }
+    GROUP_TINTS[(h as usize) % GROUP_TINTS.len()]
+}
 
 // ── Status accents (soft pastel, still distinguishable) ────────────────────
-pub const C_BUSY:   Color = Color::Rgb(150, 210, 165);     // pastel sage green
-pub const C_SPAWN:  Color = Color::Rgb(165, 215, 210);     // pastel teal
-pub const C_ACTIVE: Color = Color::Rgb(160, 200, 150);     // muted sage
+// BUSY is held to a deeper sage and ACTV to a warmer yellow-sage so they
+// don't collapse for deuteranopia / protanopia (audit MED).
+pub const C_BUSY:   Color = Color::Rgb(120, 215, 150);     // sage green (deeper)
+pub const C_SPAWN:  Color = Color::Rgb(140, 215, 185);     // teal-sage (shifted warmer for tritanopia)
+pub const C_ACTIVE: Color = Color::Rgb(195, 210, 130);     // yellow-sage (distinct from BUSY)
 pub const C_IDLE:   Color = Color::Rgb(155, 155, 155);     // neutral gray
-pub const C_WAIT:   Color = Color::Rgb(225, 195, 140);     // warm peach
+pub const C_WAIT:   Color = Color::Rgb(225, 175, 110);     // amber (shifted to break tie with cpu_color tier-2)
 pub const C_DONE:   Color = Color::Rgb(200, 175, 215);     // soft lavender
 pub const C_STALE:  Color = Color::Rgb(110, 105, 108);     // dim gray
 
@@ -90,8 +110,9 @@ pub fn agent_color(label: &str) -> Color {
 }
 
 pub fn cpu_color(v: f64) -> Color {
+    if !v.is_finite() || v < 0.0 { return FG_DIM; }   // /proc race / NaN guard
     if v >= 50.0      { Color::Rgb(220, 160, 155) }   // dusty rose
-    else if v >= 10.0 { Color::Rgb(225, 195, 140) }   // peach
+    else if v >= 10.0 { Color::Rgb(235, 180, 110) }   // amber (audit fix: separate from C_WAIT)
     else if v >=  1.0 { Color::Rgb(160, 200, 150) }   // sage
     else              { FG_DIM }
 }

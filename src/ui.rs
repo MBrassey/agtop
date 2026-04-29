@@ -168,6 +168,9 @@ fn main_loop<B: ratatui::backend::Backend + io::Write>(
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // Cap filter length — defuses a 1MB-paste DoS that'd run case-insensitive
+    // contains() against every agent every tick.
+    const FILTER_MAX: usize = 256;
     // Filter prompt is modal — accept input keys, escape closes it.
     if app.typing_filter {
         match key.code {
@@ -183,7 +186,9 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 while matches!(app.filter.chars().last(), Some(c) if c.is_whitespace()) { app.filter.pop(); }
                 while matches!(app.filter.chars().last(), Some(c) if !c.is_whitespace()) { app.filter.pop(); }
             }
-            KeyCode::Char(c) if !c.is_control() => app.filter.push(c),
+            KeyCode::Char(c) if !c.is_control() && app.filter.len() < FILTER_MAX => {
+                app.filter.push(c);
+            }
             _ => {}
         }
         return;
@@ -266,6 +271,17 @@ fn move_sel(app: &mut App, delta: i32) {
 
 fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    // Tiny-terminal guard: below the layout's minimum we can't render the
+    // panel stack without truncation. Show a single instructional line
+    // instead of a broken half-rendered TUI.
+    if area.height < 16 || area.width < 60 {
+        let p = Paragraph::new(format!(
+            "  agtop needs at least 60×16 (have {}×{}).\n  Resize the terminal or use `agtop --once`.",
+            area.width, area.height
+        )).style(Style::default().fg(theme::FG_DIM));
+        f.render_widget(p, area);
+        return;
+    }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -379,6 +395,14 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             ]));
         }
     }
+    // tools-in-flight (Bash/Edit/Read/etc.) — separate from Task subagents
+    // so users distinguish "spawned a subagent" from "running a tool".
+    let tools_in_flight = a.subagents == 0 && a.session_id.is_some()
+        && matches!(a.status, crate::model::Status::Busy);
+    if tools_in_flight {
+        lines.push(Line::from(vec![lab("tools"),
+            val("running".to_string(), theme::C_SPAWN)]));
+    }
     if let Some(sid) = &a.session_id {
         lines.push(Line::from(vec![lab("session"), dim(sid.clone())]));
     }
@@ -427,21 +451,24 @@ fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App) {
                                 Style::default().fg(color).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled(format!("{} ", label), Style::default().fg(theme::FG_DIM)));
     };
-    chip("active",    a.active.to_string(),    theme::C_ACTIVE);
+    // Order calibrated by user-priority on first glance:
+    // busy first (most actionable), then cost / tokens (financial
+    // context), then load / capacity, then breakdown counts.
     chip("busy",      a.busy.to_string(),      theme::C_BUSY);
-    chip("subagents", a.subagents.to_string(), theme::C_SPAWN);
-    chip("waiting",   a.waiting.to_string(),   theme::C_WAIT);
-    chip("done",      a.completed.to_string(), theme::C_DONE);
-    chip("projects",  a.project_count.to_string(), theme::FG);
-    chip("cpu",       pct(a.cpu),              theme::C_CHART_CPU);
-    chip("mem",       format!("{}/{}", bytes(mem_used), bytes(snap.mem_total)),
-                                               theme::C_CHART_MEM);
-    if a.tokens_total > 0 {
-        chip("tokens", si(a.tokens_total),     theme::C_CHART_TOK);
-    }
     if a.cost_usd > 0.0 {
         chip("cost",   format_cost(a.cost_usd), theme::C_WAIT);
     }
+    if a.tokens_total > 0 {
+        chip("tokens", si(a.tokens_total),     theme::C_CHART_TOK);
+    }
+    chip("cpu",       pct(a.cpu),              theme::C_CHART_CPU);
+    chip("mem",       format!("{}/{}", bytes(mem_used), bytes(snap.mem_total)),
+                                               theme::C_CHART_MEM);
+    chip("active",    a.active.to_string(),    theme::C_ACTIVE);
+    chip("waiting",   a.waiting.to_string(),   theme::C_WAIT);
+    chip("done",      a.completed.to_string(), theme::C_DONE);
+    chip("subagents", a.subagents.to_string(), theme::C_SPAWN);
+    chip("projects",  a.project_count.to_string(), theme::FG);
     spans.push(Span::styled(format!(" sort:{}  group:{}  ", app.sort.label(), if app.grouped {"on"} else {"off"}),
                             Style::default().fg(theme::FG_DIM)));
     if !app.filter.is_empty() {
@@ -457,7 +484,7 @@ fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::BORDER));
-    let p = Paragraph::new(Line::from(spans)).block(block);
+    let p = Paragraph::new(Line::from(spans)).block(block).wrap(Wrap { trim: true });
     f.render_widget(p, area);
 }
 
@@ -542,21 +569,30 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
                 header_spans.push(Span::styled(" tok", Style::default().fg(theme::FG_DIM)));
             }
             let header_line = Line::from(header_spans);
-            rows.push(Row::new(vec![header_line]).height(1));
+            // Project header inherits the group's tint so the cluster
+            // visually belongs together.
+            let header_row = Row::new(vec![header_line]).height(1)
+                .style(Style::default().bg(theme::project_tint(&proj)));
+            rows.push(header_row);
 
+            // Per-group bg tint: every agent under the same project header
+            // shares the same subtle tint, hashed off project name so it's
+            // stable across ticks.
+            let tint = Some(theme::project_tint(&proj));
             for a in list {
-                let zebra = pid_order.len() % 2 == 1;
                 pid_order.push(a.pid);
                 agent_row_indices.push(rows.len());
-                rows.push(agent_row(a, app.selected_pid == Some(a.pid), zebra));
+                rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint));
             }
         }
     } else {
+        // Ungrouped: each agent gets the tint of its own project so rows
+        // for the same project still cluster visually.
         for a in agents.iter() {
-            let zebra = pid_order.len() % 2 == 1;
+            let tint = Some(theme::project_tint(&a.project));
             pid_order.push(a.pid);
             agent_row_indices.push(rows.len());
-            rows.push(agent_row(a, app.selected_pid == Some(a.pid), zebra));
+            rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint));
         }
     }
 
@@ -572,11 +608,16 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
     // Empty-state hint when filter matches nothing.
-    if rows.is_empty() && !app.filter.is_empty() {
-        rows.push(Row::new(vec![Line::from(Span::styled(
-            format!("  (no agents match \"{}\" — Esc to clear)", app.filter),
-            Style::default().fg(theme::FG_DIM),
-        ))]).height(1));
+    if rows.is_empty() {
+        let msg = if snap.agents.is_empty() {
+            "  (no agents detected — try `agtop --list-builtins` or set $AGTOP_MATCH)".to_string()
+        } else if !app.filter.is_empty() {
+            format!("  (no agents match \"{}\" — Esc to clear)", app.filter)
+        } else {
+            "  (no rows)".into()
+        };
+        rows.push(Row::new(vec![Line::from(Span::styled(msg,
+            Style::default().fg(theme::FG_DIM)))]).height(1));
     }
 
     // Capture screen-row → pid map for mouse hit-testing in the next event
@@ -597,7 +638,7 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(table, inner);
 }
 
-fn agent_row<'a>(a: &'a Agent, selected: bool, zebra: bool) -> Row<'a> {
+fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratatui::style::Color>) -> Row<'a> {
     // Tight layout: every fixed-width column packs against the next so the
     // DOING field at the end gets the lion's share of the row.  Column
     // widths chosen to hold realistic values without overflow:
@@ -630,13 +671,14 @@ fn agent_row<'a>(a: &'a Agent, selected: bool, zebra: bool) -> Row<'a> {
     spans.push(Span::raw(" "));
 
     // Agent label.  Dangerous-mode (`--dangerously-skip-permissions`,
-    // `--yolo`, `sudo`, …) makes the label itself glow: bright red, bold,
-    // slow-blink, reverse-video.  No text chip — the label *is* the warning.
+    // `--yolo`, `sudo`, …) gives the label a subtle warning underline +
+    // a warm amber accent — no reverse-video, no blink, no big red cell.
+    // The hint is enough to register without yelling.
     let label_text = format!("{:<10}", shorten(&a.label, 10));
     let label_style = if a.dangerous {
         Style::default()
-            .fg(ratatui::style::Color::Rgb(255, 90, 90))
-            .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK | Modifier::REVERSED)
+            .fg(ratatui::style::Color::Rgb(240, 175, 95))
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
         Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)
     };
@@ -697,8 +739,8 @@ fn agent_row<'a>(a: &'a Agent, selected: bool, zebra: bool) -> Row<'a> {
     let mut row = Row::new(vec![line]).height(1);
     if selected {
         row = row.style(Style::default().bg(theme::HL_BG).add_modifier(Modifier::BOLD));
-    } else if zebra {
-        row = row.style(Style::default().bg(theme::ZEBRA_BG));
+    } else if let Some(bg) = group_bg {
+        row = row.style(Style::default().bg(bg));
     }
     row
 }
@@ -1249,7 +1291,9 @@ fn draw_help(f: &mut Frame, area: Rect) {
         .title(Span::styled(" Help ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
     let inner = block.inner(r);
     f.render_widget(ratatui::widgets::Clear, r);
-    f.render_widget(block, r);
+    f.render_widget(block.clone(), r);
+    // Wrap so narrow terminals don't clip the keybinding text.
+    let _ = block;
 
     let line = |spans: Vec<Span<'static>>| Line::from(spans);
     let dim = |s: &str| Span::styled(s.to_string(), Style::default().fg(theme::FG_DIM));
@@ -1283,6 +1327,5 @@ fn draw_help(f: &mut Frame, area: Rect) {
         line(vec![Span::styled("    ✓ DONE ", Style::default().fg(theme::C_DONE)),
                   dim("session ended (stop_reason)")]),
     ];
-    let p = Paragraph::new(lines);
-    f.render_widget(p, inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

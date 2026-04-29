@@ -23,6 +23,9 @@ pub fn pct(v: f64) -> String {
 }
 
 pub fn dur(sec: u64) -> String {
+    // Defensive cap — if /proc gives us a value near u64::MAX (rare clock
+    // glitch) the resulting "X days" string would explode column width.
+    if sec > 10 * 365 * 86_400 { return "10y+".into(); }
     if sec < 60 {
         return format!("{}s", sec);
     }
@@ -141,8 +144,14 @@ pub fn project_basename(cwd: &str) -> String {
 /// Caller-friendly project label.  Falls back through cwd-basename →
 /// `<label> <subcommand>` (for daemons like `ollama serve`) → exe basename
 /// → label so we never display a bare `?`.  Path-aware: works for POSIX,
-/// Windows (`C:\Users\u\code\proj` → `proj`), and root-like cwds.
+/// Windows (`C:\Users\u\code\proj` → `proj`), and root-like cwds.  Result
+/// is always run through `sanitize_control` so a malicious cwd or argv
+/// can't smuggle ANSI escapes into the row label.
 pub fn derive_project(cwd: &str, exe: &str, cmdline: &str, label: &str) -> String {
+    sanitize_control(&derive_project_raw(cwd, exe, cmdline, label))
+}
+
+fn derive_project_raw(cwd: &str, exe: &str, cmdline: &str, label: &str) -> String {
     // Primary: cwd basename, if the cwd actually identifies a project.
     let cwd_basename = project_basename(cwd);
     let cwd_path = std::path::Path::new(cwd);

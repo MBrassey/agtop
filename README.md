@@ -196,15 +196,24 @@ mid-generation (transcript not yet flushed) is not reported as `idle`.
 | DONE   | Session ended (Claude `stop_reason: end_turn` / `stop_sequence`, Codex `session_end`)     |
 | stale  | None of the above; last activity older than 24h                                           |
 
-### Dangerous-mode (god-mode) detection
+### Dangerous-mode detection
 
 Processes invoked with `--dangerously-skip-permissions`, `--no-permissions`,
 `--allow-dangerous`, `--yolo`, or `sudo {claude,codex}` are flagged as
 running with elevated permissions. The TUI renders the **agent label
-itself** in pulsating red (slow-blink + reverse-video + bright red fg) so
-unsafe sessions are impossible to miss at a glance — no separate text
-chip, the label *is* the warning. The flag is also exposed in
-`--json` as `agents[].dangerous: bool`.
+itself** with a subtle warning underline + warm amber bold accent — no
+reverse-video, no blink, no bright red cell. The hint is enough to
+register without yelling. The flag is also exposed in `--json` as
+`agents[].dangerous: bool`.
+
+### Project grouping (visual)
+
+Every agent row picks up a low-saturation background tint hashed off the
+project name. Same project → same tint across ticks, so all rows in a
+cluster (including the project header) share one organised swatch — the
+eye sees groups, not random alternation. Six tints rotate through
+slate-blue / plum / teal / olive / rose / sage; tints are dim enough that
+text + status colors stay readable.
 
 ### Layout
 
