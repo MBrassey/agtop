@@ -57,41 +57,92 @@ process.exit(127);
 SHIM
 chmod +x "$build/bin/agtop"
 
-# postinstall: prefer prebuilt binary from GH Releases (once published);
-# otherwise try `cargo install agtop` and fall back with instructions.
+# postinstall: download the prebuilt binary from the GitHub Release matching
+# the package version, falling back to `cargo install` if download fails.
 cat > "$build/scripts/install.js" <<'POST'
 "use strict";
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const https = require("node:https");
+const os = require("node:os");
 const pkg = require(path.join(__dirname, "..", "package.json"));
+
+const platMap = { linux: "linux", darwin: "macos", win32: "windows" };
+const archMap = { x64: "x86_64", arm64: "aarch64" };
+const platform = platMap[process.platform];
+const arch = archMap[process.arch];
+const ext = process.platform === "win32" ? ".exe" : "";
+
+if (!platform || !arch) {
+  console.warn(`agtop: no prebuilt for ${process.platform}/${process.arch}; trying cargo`);
+  return cargoFallback();
+}
+
+const target = `agtop-${platform}-${arch}`;
+const url = `https://github.com/mbrassey/agtop/releases/download/v${pkg.version}/${target}.tar.gz`;
+const vendorDir = path.join(__dirname, "..", "vendor", `${platform}-${arch}`);
 
 function which(cmd) {
   const probe = spawnSync(process.platform === "win32" ? "where" : "which", [cmd], { stdio: "pipe" });
   return probe.status === 0 ? String(probe.stdout || "").trim().split("\n")[0] : null;
 }
 
-// 1) Prebuilt binary from GitHub Releases would go here once we cut one.
-// const url = `https://github.com/mbrassey/agtop/releases/download/v${pkg.version}/agtop-${process.platform}-${process.arch}`;
-// (left as a TODO — no code that runs without a real release)
-
-// 2) Fall back to `cargo install`.
-if (which("cargo")) {
-  const r = spawnSync("cargo", ["install", "--locked", "agtop"], { stdio: "inherit" });
-  if (r.status === 0) process.exit(0);
+function cargoFallback() {
+  if (which("cargo")) {
+    const r = spawnSync("cargo", ["install", "--locked", "agtop"], { stdio: "inherit" });
+    if (r.status === 0) process.exit(0);
+  }
+  console.error([
+    "",
+    "  agtop: couldn't fetch the prebuilt binary and cargo isn't available.",
+    "  Install Rust (https://rustup.rs) and re-run, or use:",
+    "    sudo pacman -U agtop-*.pkg.tar.zst",
+    "    sudo apt   install ./agtop_*.deb",
+    "    brew install agtop  (after `brew tap mbrassey/tap`)",
+    ""
+  ].join("\n"));
+  // Soft-fail so `npm install` exits 0 instead of breaking the user's setup.
+  process.exit(0);
 }
 
-console.error([
-  "",
-  "  agtop's npm distribution requires either a prebuilt GitHub Release",
-  "  (coming soon) or a working Rust toolchain so it can `cargo install agtop`.",
-  "",
-  "  Install Rust from https://rustup.rs and re-run, or use:",
-  "    pacman -U agtop-*.pkg.tar.zst   (Arch)",
-  "    apt install ./agtop_*.deb       (Debian / Ubuntu)",
-  ""
-].join("\n"));
-process.exit(0); // soft-fail so npm install doesn't error out hard
+function download(u, hops = 0) {
+  if (hops > 5) return cargoFallback();
+  https.get(u, { headers: { "User-Agent": "agtop-npm-installer" } }, (res) => {
+    if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+      res.resume();
+      return download(res.headers.location, hops + 1);
+    }
+    if (res.statusCode !== 200) {
+      console.warn(`agtop: HTTP ${res.statusCode} fetching ${u}`);
+      res.resume();
+      return cargoFallback();
+    }
+    fs.mkdirSync(vendorDir, { recursive: true });
+    const tarPath = path.join(os.tmpdir(), `agtop-${process.pid}.tar.gz`);
+    const w = fs.createWriteStream(tarPath);
+    res.pipe(w);
+    w.on("finish", () => {
+      const r = spawnSync("tar", ["-xzf", tarPath, "-C", vendorDir, "--strip-components=1"], { stdio: "ignore" });
+      try { fs.unlinkSync(tarPath); } catch {}
+      if (r.status !== 0) {
+        console.warn("agtop: tar extraction failed");
+        return cargoFallback();
+      }
+      const bin = path.join(vendorDir, "agtop" + ext);
+      if (!fs.existsSync(bin)) {
+        console.warn("agtop: binary not found at " + bin);
+        return cargoFallback();
+      }
+      try { fs.chmodSync(bin, 0o755); } catch {}
+      console.log(`agtop ${pkg.version} installed at ${bin}`);
+      process.exit(0);
+    });
+    w.on("error", () => cargoFallback());
+  }).on("error", () => cargoFallback());
+}
+
+download(url);
 POST
 
 cp "$root/README.md" "$build/README.md" 2>/dev/null || true
