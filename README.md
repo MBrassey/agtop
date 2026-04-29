@@ -9,7 +9,7 @@ Codex, Goose, Aider, and Gemini, and presents per-agent CPU, memory,
 status, current tool/task, in-flight subagents, token usage, and
 estimated cost in a `top`-style TUI.
 
-[![Crate](https://img.shields.io/badge/version-2.1.3-1f6feb)](https://github.com/MBrassey/agtop/releases)
+[![Crate](https://img.shields.io/badge/version-2.1.4-1f6feb)](https://github.com/MBrassey/agtop/releases)
 [![License](https://img.shields.io/badge/license-MIT-1f6feb)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.74%2B-1f6feb)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-linux%20·%20macOS%20·%20windows-1f6feb)](#platforms)
@@ -27,8 +27,8 @@ estimated cost in a `top`-style TUI.
 
 | Platform           | Command |
 | ------------------ | ------- |
-| **Arch / CachyOS** | `git clone https://github.com/MBrassey/agtop && cd agtop && packages/pacman/build.sh && sudo pacman -U packages/pacman/agtop-2.1.3-1-x86_64.pkg.tar.zst` |
-| **Debian / Ubuntu**| `git clone https://github.com/MBrassey/agtop && cd agtop && packages/deb/build.sh && sudo apt install ./packages/deb/agtop_2.1.3_amd64.deb` |
+| **Arch / CachyOS** | `git clone https://github.com/MBrassey/agtop && cd agtop && packages/pacman/build.sh && sudo pacman -U packages/pacman/agtop-2.1.4-1-x86_64.pkg.tar.zst` |
+| **Debian / Ubuntu**| `git clone https://github.com/MBrassey/agtop && cd agtop && packages/deb/build.sh && sudo apt install ./packages/deb/agtop_2.1.4_amd64.deb` |
 | **macOS / Cargo**  | `cargo install --path .`  *(after `git clone`)* |
 | **npm**            | `npm install -g @blueprint.xyz/agtop` |
 | **From source**    | `cargo build --release && ./target/release/agtop` |
