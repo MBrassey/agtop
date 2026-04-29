@@ -139,9 +139,9 @@ mod tests {
 
     #[test]
     fn project_uses_cwd_basename_when_present() {
-        let p = derive_project("/home/matt/code/xsol", "/usr/bin/claude",
+        let p = derive_project("/home/user/code/zk-rollup-prover", "/usr/bin/claude",
                                "claude --resume", "claude");
-        assert_eq!(p, "xsol");
+        assert_eq!(p, "zk-rollup-prover");
     }
 
     #[test]
