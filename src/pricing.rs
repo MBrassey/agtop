@@ -82,11 +82,16 @@ impl PriceTable {
         self
     }
 
-    /// Suffix-tolerant lookup: walks `-`-separated suffixes off the right.
+    /// Suffix-tolerant lookup: walks up to 4 `-`-separated suffixes off the
+    /// right.  Capped so a user-defined `[models."claude"]` doesn't silently
+    /// shadow every Claude SKU ever released — the lookup still walks past
+    /// dated revisions (`claude-sonnet-4-7-20260101` → `claude-sonnet-4-7`)
+    /// but stops well short of the model family root.
     pub fn lookup(&self, model: &str) -> Option<ModelPrice> {
         if let Some(p) = self.models.get(model) { return Some(*p); }
         let mut s = model;
-        while let Some(i) = s.rfind('-') {
+        for _ in 0..4 {
+            let Some(i) = s.rfind('-') else { break };
             s = &s[..i];
             if let Some(p) = self.models.get(s) { return Some(*p); }
         }

@@ -24,7 +24,7 @@
 // `function_call`/`tool_use` field names — anything that mentions a tool
 // call_id we'll track as in-flight until a matching output arrives.
 
-use crate::format::project_basename;
+use crate::format::{project_basename, sanitize_control};
 use crate::model::{RecentTask, Session, Sessions, Status};
 use crate::sessions::{LiveAgentRef, SessionsResult};
 
@@ -35,8 +35,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const RECENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
-const BUSY_WINDOW_MS: u64 = 5 * 1000;
-const ACTIVE_WINDOW_MS: u64 = 60 * 1000;
+const BUSY_WINDOW_MS: u64 = 30 * 1000;        // 30s — covers mid-turn tool waits
+const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;  // 5 minutes
 const TAIL_BYTES: u64 = 256 * 1024;
 const HEAD_BYTES: u64 = 4 * 1024; // session_meta is at the top of the file
 
@@ -116,7 +116,8 @@ struct AnalysisOut {
     last_assistant: Option<String>,
     last_tool: Option<String>,
     current_tool: Option<String>,
-    in_flight: u32,
+    in_flight: u32,           // task / agent subagents only
+    in_flight_tools: u32,     // any tool, used for busy-status decision
     last_ts: u64,
     finished: bool,
     tokens_input: u64,
@@ -126,7 +127,8 @@ struct AnalysisOut {
 
 fn analyse(records: &[Value]) -> AnalysisOut {
     let mut out = AnalysisOut::default();
-    let mut tool_call_ids: Vec<String> = Vec::new();
+    let mut tool_call_ids: Vec<String> = Vec::new();    // Task / Agent
+    let mut all_tool_ids:  Vec<String> = Vec::new();    // any tool
     let mut completed: HashSet<String> = HashSet::new();
 
     for r in records {
@@ -143,7 +145,10 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                 out.current_tool = Some(name.to_string());
                 if let Some(id) = payload.get("call_id").and_then(|v| v.as_str())
                     .or_else(|| payload.get("id").and_then(|v| v.as_str())) {
-                    tool_call_ids.push(id.to_string());
+                    all_tool_ids.push(id.to_string());
+                    if name == "Task" || name == "Agent" {
+                        tool_call_ids.push(id.to_string());
+                    }
                 }
             }
             "function_call_output" | "tool_result" | "local_shell_call_output" => {
@@ -208,11 +213,8 @@ fn analyse(records: &[Value]) -> AnalysisOut {
         }
     }
 
-    let mut in_flight = 0u32;
-    for id in &tool_call_ids {
-        if !completed.contains(id) { in_flight += 1; }
-    }
-    out.in_flight = in_flight;
+    out.in_flight = tool_call_ids.iter().filter(|id| !completed.contains(*id)).count() as u32;
+    out.in_flight_tools = all_tool_ids.iter().filter(|id| !completed.contains(*id)).count() as u32;
     out
 }
 
@@ -238,9 +240,12 @@ fn extract_text(payload: &Value) -> String {
     String::new()
 }
 
-fn classify_status(is_live: bool, age_ms: u64, finished: bool, has_in_flight: bool) -> Status {
-    if is_live && age_ms < BUSY_WINDOW_MS { return Status::Busy; }
-    if is_live && has_in_flight { return Status::Spawning; }
+fn classify_status(
+    is_live: bool, age_ms: u64, finished: bool,
+    has_in_flight_task: bool, has_in_flight_tool: bool,
+) -> Status {
+    if is_live && has_in_flight_task { return Status::Spawning; }
+    if is_live && (age_ms < BUSY_WINDOW_MS || has_in_flight_tool) { return Status::Busy; }
     if is_live && age_ms < ACTIVE_WINDOW_MS { return Status::Active; }
     if is_live { return Status::Idle; }
     if finished { return Status::Completed; }
@@ -311,6 +316,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 age_ms,
                 info.finished,
                 info.in_flight > 0,
+                info.in_flight_tools > 0,
             );
 
             let last_task = info.last_assistant.clone()
@@ -327,9 +333,9 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 age_ms,
                 status,
                 stop_reason: if info.finished { Some("session_end".to_string()) } else { None },
-                last_task: last_task.clone(),
-                last_tool: info.last_tool.clone(),
-                current_tool: info.current_tool.clone(),
+                last_task:    last_task.as_deref().map(sanitize_control),
+                last_tool:    info.last_tool.as_deref().map(sanitize_control),
+                current_tool: info.current_tool.as_deref().map(sanitize_control),
                 in_flight_tasks: info.in_flight,
                 live_pid: if is_most_recent { live_pid } else { None },
                 is_most_recent,
@@ -337,7 +343,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 tokens_output: info.tokens_output,
                 tokens_total: info.tokens_input + info.tokens_output,
                 cost_usd: 0.0,
-                model: info.model.clone(),
+                model: info.model.as_deref().map(sanitize_control),
             };
 
             if is_most_recent {

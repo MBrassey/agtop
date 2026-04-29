@@ -13,7 +13,7 @@
 // Aider doesn't write structured token usage to disk; cost can still be
 // computed if the user adds aider patterns + a per-model price.
 
-use crate::format::project_basename;
+use crate::format::{project_basename, sanitize_control};
 use crate::model::{RecentTask, Session, Sessions, Status};
 use crate::sessions::{LiveAgentRef, SessionsResult};
 
@@ -23,8 +23,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const RECENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
-const BUSY_WINDOW_MS:   u64 = 5 * 1000;
-const ACTIVE_WINDOW_MS: u64 = 60 * 1000;
+const BUSY_WINDOW_MS:   u64 = 30 * 1000;
+const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;
 const TAIL_BYTES:       u64 = 64 * 1024;
 
 fn read_tail(path: &Path, bytes: u64) -> String {
@@ -121,7 +121,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             age_ms,
             status,
             stop_reason: None,
-            last_task: last_task.clone(),
+            last_task: last_task.as_deref().map(sanitize_control),
             last_tool: None,
             current_tool: None,
             in_flight_tasks: 0,

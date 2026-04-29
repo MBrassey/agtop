@@ -83,6 +83,16 @@ struct App {
 }
 
 pub fn run(collector: Collector, args: Args) -> Result<()> {
+    // Install a panic hook that restores terminal state before unwinding so
+    // a crash in draw / event handling doesn't leave the user in raw mode
+    // on the alternate screen.
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        prev(info);
+    }));
+
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
@@ -517,9 +527,23 @@ fn agent_row<'a>(a: &'a Agent, selected: bool) -> Row<'a> {
     // Status badge.
     spans.push(Span::styled(format!("{} {} ", a.status.glyph(), a.status.label()),
                             theme::status_style(a.status)));
-    // Agent label chip.
-    spans.push(Span::styled(format!("{:<12}", shorten(&a.label, 12)),
-                            Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)));
+    // Agent label chip.  Pulsates with reverse-video + slow-blink when the
+    // agent was launched in "god mode" (--dangerously-skip-permissions etc.)
+    // so unsafe sessions are impossible to miss at a glance.
+    if a.dangerous {
+        spans.push(Span::styled(" GOD ",
+            Style::default()
+                .bg(ratatui::style::Color::Red)
+                .fg(ratatui::style::Color::Black)
+                .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK | Modifier::REVERSED)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!("{:<7}", shorten(&a.label, 7)),
+            Style::default().fg(theme::agent_color(&a.label))
+                .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)));
+    } else {
+        spans.push(Span::styled(format!("{:<12}", shorten(&a.label, 12)),
+            Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)));
+    }
     // PID
     spans.push(Span::styled("pid ", Style::default().fg(theme::FG_DIM)));
     spans.push(Span::styled(format!("{:>7}", a.pid),

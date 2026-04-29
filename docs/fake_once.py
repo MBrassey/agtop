@@ -48,7 +48,7 @@ def row(status, agent, pid, cpu, mem, up, sub, tok, project, doing):
 # rollup sequencers, restaking primitives, account-abstraction bundlers,
 # bridge watchtowers — typical heavy AI-coding-agent workloads.
 agents = [
-    ("busy",     "claude",       28471, "31.4%", "642M", "3h17m",  2, "9.2M",  "zk-rollup",     "Bash: nargo prove --witness witness.tr --srs srs_2_22.bin"),
+    ("busy",     "claude⚡",  28471, "31.4%", "642M", "3h17m",  2, "9.2M",  "zk-rollup",     "Bash: nargo prove --witness witness.tr --srs srs_2_22.bin  GOD MODE"),
     ("busy",     "codex",        31802, "24.6%", "538M", "47m12s", 0, "4.1M",  "mev-searcher",  "Edit: src/searcher/atomic_arb_v3.rs"),
     ("spawning", "claude",       19432, "11.8%", "521M", "3h44m",  1, "6.8M",  "eigen-restake", "Task: prove transcript Fiat-Shamir soundness"),
     ("active",   "aider",        24190,  "5.2%", "478M", "1h08m",  0, "2.4M",  "amm-v4-hooks",  "applying SEARCH/REPLACE: contracts/HookV4.sol"),

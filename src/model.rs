@@ -67,6 +67,10 @@ pub struct Agent {
     pub tokens_output: u64,
     pub cost_usd: f64,
     pub model: Option<String>,
+    /// Process is running with elevated / unsafe permissions
+    /// (e.g. `claude --dangerously-skip-permissions`, `--yolo`, `--no-permissions`).
+    /// The TUI surfaces this as a pulsating "GOD" tag on the row.
+    pub dangerous: bool,
     /// Recent CPU% samples for the inline sparkline (oldest → newest).
     pub cpu_history: Vec<f64>,
     pub cpu: f64,

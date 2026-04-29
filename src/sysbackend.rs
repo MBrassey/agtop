@@ -76,6 +76,7 @@ impl SysBackend {
                 tokens_output: 0,
                 cost_usd: 0.0,
                 model: None,
+                dangerous: crate::collector::is_dangerous_for_cmdline(&cmdline),
                 cpu_history: Vec::new(),
                 cpu,
                 cpu_raw: cpu,

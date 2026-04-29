@@ -123,7 +123,16 @@ function download(u, hops = 0) {
     const w = fs.createWriteStream(tarPath);
     res.pipe(w);
     w.on("finish", () => {
-      const r = spawnSync("tar", ["-xzf", tarPath, "-C", vendorDir, "--strip-components=1"], { stdio: "ignore" });
+      // Defensive tar flags: forbid absolute / parent-traversal entries,
+      // disallow the archive overwriting an existing dir or carrying
+      // suid/owner bits.  --strip-components=1 still applies as expected.
+      const r = spawnSync("tar", [
+        "-xzf", tarPath, "-C", vendorDir,
+        "--strip-components=1",
+        "--no-overwrite-dir",
+        "--no-same-owner",
+        "--no-same-permissions",
+      ], { stdio: "ignore" });
       try { fs.unlinkSync(tarPath); } catch {}
       if (r.status !== 0) {
         console.warn("agtop: tar extraction failed");

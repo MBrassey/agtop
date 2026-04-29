@@ -1,6 +1,6 @@
 [package]
 name = "agtop"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Terminal UI for monitoring AI coding agents (Claude Code, Codex, Aider, Cursor, Gemini, Goose, ...) — like top, but for agents."
@@ -22,9 +22,11 @@ regex      = "1.10"
 anyhow     = "1"
 dirs       = "5"
 chrono     = { version = "0.4", default-features = false, features = ["clock"] }
-libc       = "0.2"
 toml       = { version = "0.8", default-features = false, features = ["parse"] }
 sysinfo    = { version = "0.32", default-features = false, features = ["system"] }
+
+[target.'cfg(unix)'.dependencies]
+libc       = "0.2"
 
 [profile.release]
 lto = "thin"

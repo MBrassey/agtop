@@ -15,8 +15,9 @@ pub struct UserMatcher {
 }
 
 pub fn builtin() -> Vec<Matcher> {
-    // word-boundary prefix: start, slash, or whitespace.
-    const P: &str = r"(^|[\s/])";
+    // word-boundary prefix: start, forward slash, backslash (Windows
+    // paths), or whitespace.
+    const P: &str = r"(^|[\s/\\])";
     let m = |label: &'static str, body: &str| Matcher {
         label,
         re: Regex::new(body).expect("builtin regex"),
@@ -55,7 +56,13 @@ pub fn parse_user_matchers(extra: &[String]) -> Vec<UserMatcher> {
             if label.is_empty() || pat.is_empty() {
                 continue;
             }
-            if let Ok(re) = Regex::new(pat) {
+            // Cap regex size to defuse pathological user patterns; without
+            // these limits a megabyte-NFA `--match` could OOM the binary.
+            let built = regex::RegexBuilder::new(pat)
+                .size_limit(1_000_000)
+                .dfa_size_limit(1_000_000)
+                .build();
+            if let Ok(re) = built {
                 out.push(UserMatcher { label, re });
             }
         }

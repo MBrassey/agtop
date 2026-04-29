@@ -1,7 +1,7 @@
 // Reads ~/.claude/projects/*/<session>.jsonl best-effort to surface live agent
 // status, current tool, in-flight Task subagents, and the last task subject.
 
-use crate::format::project_basename;
+use crate::format::{project_basename, sanitize_control};
 use crate::model::{RecentTask, Session, Status};
 use crate::sessions::{LiveAgentRef, SessionsResult};
 
@@ -12,8 +12,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub const RECENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
-pub const BUSY_WINDOW_MS: u64 = 5 * 1000;
-pub const ACTIVE_WINDOW_MS: u64 = 60 * 1000;
+// 30s captures the typical mid-turn gap where Claude is waiting on a tool
+// result (no JSONL writes for tens of seconds) but is still actively working.
+pub const BUSY_WINDOW_MS: u64 = 30 * 1000;
+pub const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;   // 5 minutes
 pub const TAIL_BYTES: u64 = 256 * 1024;
 
 pub fn root() -> PathBuf {
@@ -46,7 +48,11 @@ struct AnalysisOut {
     last_task: Option<String>,
     last_tool: Option<String>,
     current_tool: Option<String>,
+    /// Task / Agent subagent tool_uses without a matching tool_result.
     in_flight_tasks: u32,
+    /// In-flight count for ANY tool (Bash, Edit, Read, Write, ...) — used by
+    /// the busy-status decision so an agent mid-Bash also reads as busy.
+    in_flight_tools: u32,
     tokens_input: u64,
     tokens_output: u64,
     model: Option<String>,
@@ -55,6 +61,7 @@ struct AnalysisOut {
 fn analyse(records: &[Value]) -> AnalysisOut {
     let mut out = AnalysisOut::default();
     let mut task_use_ids: Vec<String> = Vec::new();
+    let mut all_tool_use_ids: Vec<String> = Vec::new();
     let mut completed: HashMap<String, ()> = HashMap::new();
 
     for r in records {
@@ -93,6 +100,11 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                             if !name.is_empty() {
                                 out.last_tool = Some(name.to_string());
                                 out.current_tool = Some(name.to_string());
+                            }
+                            // Track every tool_use id so we can compute
+                            // generic in-flight (Bash/Edit/Read/...) too.
+                            if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
+                                all_tool_use_ids.push(id.to_string());
                             }
                             if name == "Task" || name == "Agent" {
                                 if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
@@ -147,13 +159,10 @@ fn analyse(records: &[Value]) -> AnalysisOut {
         }
     }
 
-    let mut in_flight = 0;
-    for id in &task_use_ids {
-        if !completed.contains_key(id) {
-            in_flight += 1;
-        }
-    }
-    out.in_flight_tasks = in_flight;
+    out.in_flight_tasks = task_use_ids.iter()
+        .filter(|id| !completed.contains_key(*id)).count() as u32;
+    out.in_flight_tools = all_tool_use_ids.iter()
+        .filter(|id| !completed.contains_key(*id)).count() as u32;
     out
 }
 
@@ -170,9 +179,14 @@ fn decode_project(name: &str) -> String {
     }
 }
 
-fn classify_status(is_live: bool, age_ms: u64, stop_reason: &Option<String>, has_in_flight: bool) -> Status {
-    if is_live && age_ms < BUSY_WINDOW_MS { return Status::Busy; }
-    if is_live && has_in_flight { return Status::Spawning; }
+fn classify_status(
+    is_live: bool, age_ms: u64,
+    stop_reason: &Option<String>,
+    has_in_flight_task: bool,
+    has_in_flight_tool: bool,
+) -> Status {
+    if is_live && has_in_flight_task { return Status::Spawning; }
+    if is_live && (age_ms < BUSY_WINDOW_MS || has_in_flight_tool) { return Status::Busy; }
     if is_live && age_ms < ACTIVE_WINDOW_MS { return Status::Active; }
     if is_live { return Status::Idle; }
     if matches!(stop_reason.as_deref(), Some("end_turn") | Some("stop_sequence")) {
@@ -253,6 +267,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 age_ms,
                 &info.stop_reason,
                 info.in_flight_tasks > 0,
+                info.in_flight_tools > 0,
             );
 
             let sess = Session {
@@ -265,17 +280,17 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 age_ms,
                 status,
                 stop_reason: info.stop_reason.clone(),
-                last_task: info.last_task.clone(),
-                last_tool: info.last_tool.clone(),
-                current_tool: info.current_tool.clone(),
+                last_task:    info.last_task.as_deref().map(sanitize_control),
+                last_tool:    info.last_tool.as_deref().map(sanitize_control),
+                current_tool: info.current_tool.as_deref().map(sanitize_control),
                 in_flight_tasks: info.in_flight_tasks,
                 live_pid,
                 is_most_recent,
                 tokens_input: info.tokens_input,
                 tokens_output: info.tokens_output,
                 tokens_total: info.tokens_input + info.tokens_output,
-                cost_usd: 0.0,   // collector fills this in using the price table
-                model: info.model.clone(),
+                cost_usd: 0.0,
+                model: info.model.as_deref().map(sanitize_control),
             };
 
             if let Some(pid) = live_pid {

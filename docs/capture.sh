@@ -20,14 +20,14 @@ make_page () {
 <!doctype html>
 <html><head><meta charset="utf-8"><style>
   html, body { margin: 0; padding: 0; background: #0c0e12; }
-  body { padding: 24px; font-family: "JetBrains Mono","SF Mono","Menlo","DejaVu Sans Mono",monospace; }
-  .frame { background: #14171c; border-radius: 10px; padding: 16px 20px;
-           box-shadow: 0 8px 30px rgba(0,0,0,0.6); color: #e1ded7;
+  body { padding: 8px; font-family: "JetBrains Mono","SF Mono","Menlo","DejaVu Sans Mono",monospace; }
+  .frame { background: #14171c; border-radius: 8px; padding: 10px 14px;
+           box-shadow: 0 4px 16px rgba(0,0,0,0.6); color: #e1ded7;
            line-height: ${line_height}; font-size: ${font_size}; width: fit-content; }
-  .titlebar { padding-bottom: 12px; display: flex; gap: 8px; align-items: center; }
-  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .titlebar { padding-bottom: 8px; display: flex; gap: 6px; align-items: center; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; }
   .r { background: #ff5f57; } .y { background: #febc2e; } .g { background: #28c840; }
-  .label { margin-left: 12px; color: #7d828e; font-size: 11px; }
+  .label { margin-left: 10px; color: #7d828e; font-size: 11px; }
   pre { margin: 0; white-space: pre; color: inherit; background: transparent; font: inherit; }
 </style></head><body>
 <div class="frame">
@@ -42,20 +42,22 @@ HEAD
 # ── --once snapshot ────────────────────────────────────────────────────────
 python3 "$here/fake_once.py" > /tmp/fake-once.ansi
 aha --black --no-header < /tmp/fake-once.ansi > /tmp/fake-once.html
-make_page "agtop --once --top 15" /tmp/fake-once.html 13px 1.36 /tmp/fake-once-page.html
+make_page "agtop --once --top 15" /tmp/fake-once.html 14px 1.32 /tmp/fake-once-page.html
+# Tight crop: chromium window sized to barely contain the frame so the
+# screenshot is dominated by the terminal, not background.
 chromium --headless --no-sandbox --disable-gpu \
-  --window-size=1820,720 --hide-scrollbars \
-  --force-device-scale-factor=1.5 \
+  --window-size=1280,500 --hide-scrollbars \
+  --force-device-scale-factor=2 \
   --screenshot="$here/screenshot-once.png" \
   "file:///tmp/fake-once-page.html" 2>/dev/null
 
 # ── full TUI snapshot ──────────────────────────────────────────────────────
 python3 "$here/fake_tui.py" > /tmp/fake-tui.ansi
 aha --black --no-header < /tmp/fake-tui.ansi > /tmp/fake-tui.html
-make_page "agtop" /tmp/fake-tui.html 13px 1.18 /tmp/fake-tui-page.html
+make_page "agtop" /tmp/fake-tui.html 12px 1.18 /tmp/fake-tui-page.html
 chromium --headless --no-sandbox --disable-gpu \
-  --window-size=2400,1300 --hide-scrollbars \
-  --force-device-scale-factor=1.5 \
+  --window-size=1720,800 --hide-scrollbars \
+  --force-device-scale-factor=2 \
   --screenshot="$here/screenshot-tui.png" \
   "file:///tmp/fake-tui-page.html" 2>/dev/null
 

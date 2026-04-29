@@ -45,13 +45,16 @@ pub struct Stat {
 }
 
 pub fn parse_stat(text: &str) -> Option<Stat> {
-    // Field 2 is "(comm)" which can itself contain spaces or parens.
+    // Field 2 is "(comm)" which itself can contain spaces or parens
+    // per `man 5 proc`.  Anchor the right paren to the literal sequence
+    // ") " since the kernel always writes a single space between comm
+    // and the state field; this survives `comm`s like "bash) (foo)".
     let lp = text.find('(')?;
-    let rp = text.rfind(')')?;
+    let rp = text.rfind(") ").map(|i| i + 1).or_else(|| text.rfind(')'))?;
     if rp <= lp { return None; }
     let pid: u32 = text[..lp].trim().parse().ok()?;
     let comm = text[lp + 1..rp].to_string();
-    let rest: Vec<&str> = text[rp + 2..].split_whitespace().collect();
+    let rest: Vec<&str> = text[rp + 1..].split_whitespace().collect();
     if rest.len() < 22 { return None; }
     let state = rest[0].chars().next().unwrap_or('?');
     let ppid: u32 = rest[1].parse().ok()?;
@@ -72,11 +75,10 @@ pub fn read_stat(pid: u32) -> Option<Stat> {
 pub fn read_cmdline(pid: u32) -> String {
     match fs::read(format!("/proc/{pid}/cmdline")) {
         Ok(buf) => {
-            let mut s = String::with_capacity(buf.len());
-            for &b in &buf {
-                if b == 0 { s.push(' '); } else { s.push(b as char); }
-            }
-            s.trim().to_string()
+            // NUL-separated argv.  Decode UTF-8 lossily so non-ASCII args
+            // (paths with emoji etc.) survive instead of being byte-cast.
+            let s = String::from_utf8_lossy(&buf);
+            s.replace('\0', " ").trim().to_string()
         }
         Err(_) => String::new(),
     }
@@ -112,7 +114,7 @@ pub fn read_io(pid: u32) -> Option<ProcIo> {
 }
 
 /// Open writable files for a process, filtered to skip /dev/, pipes, sockets,
-/// anonymous inodes. Capped at `limit`.
+/// anon-inode / memfd / dmabuf, and deleted-file stubs. Capped at `limit`.
 pub fn read_writing_files(pid: u32, limit: usize) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let fdinfo_dir = format!("/proc/{pid}/fdinfo");
@@ -142,8 +144,12 @@ pub fn read_writing_files(pid: u32, limit: usize) -> Vec<PathBuf> {
             Err(_) => continue,
         };
         let s = target.to_string_lossy();
-        if s.starts_with("/dev/") || s.starts_with("pipe:") || s.starts_with("socket:")
-            || s.starts_with("anon_inode:") || s == "/dev/null" {
+        if s.starts_with("/dev/")
+            || s.starts_with("pipe:") || s.starts_with("socket:")
+            || s.starts_with("anon_inode:") || s.starts_with("memfd:")
+            || s.starts_with("dmabuf:")
+            || s.ends_with(" (deleted)")
+            || s == "/dev/null" {
             continue;
         }
         out.push(target);
@@ -202,12 +208,8 @@ pub fn read_system_cpu_total() -> u64 {
 }
 
 pub fn num_cpus() -> usize {
-    // Best-effort cheap counter via /proc/cpuinfo. Falls back to 1.
-    let text = match fs::read_to_string("/proc/cpuinfo") {
-        Ok(s) => s,
-        Err(_) => return 1,
-    };
-    let n = text.lines().filter(|l| l.starts_with("processor")).count();
-    if n == 0 { 1 } else { n }
+    // cgroup-aware via std; aarch64-friendly (avoids /proc/cpuinfo "processor"
+    // line quirks on some kernels).
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 

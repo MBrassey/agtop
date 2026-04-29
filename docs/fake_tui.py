@@ -83,7 +83,7 @@ def trunc(s, w):
 
 # ── synthetic dataset ──────────────────────────────────────────────────────
 agents = [
-    # status, label, pid, cpu, mem_mb, uptime_sec, sub, tok_str, project, model, doing
+    # status, label, pid, cpu, mem_mb, uptime_sec, sub, tok_str, project, model, doing, dangerous
     ("busy",     "claude",       28471, 31.4, 642, 11820, 2, "9.2M", "zk-rollup-prover",  "claude-sonnet-4-7", "Bash: nargo prove --witness witness.tr"),
     ("busy",     "claude",       28473, 24.6, 538, 11820, 0, "8.4M", "zk-rollup-prover",  "claude-sonnet-4-7", "Edit: circuits/poseidon_t8.circom"),
     ("active",   "codex",        28480, 11.8, 220,  9660, 0, "3.1M", "zk-rollup-prover",  "gpt-5",             "Task: optimize MSM precomputation kernel"),
@@ -210,6 +210,10 @@ def agents_body(width):
         out.append(header)
         for r in rows:
             status, label, pid, cpu, mem, up, sub, tok, _, model, doing = r
+            # Heuristic: any agent with status=busy in the synthetic dataset
+            # is treated as god-mode (so the screenshot shows the pulsating
+            # GOD tag); real binary uses cmdline regex.
+            dangerous = (status == "busy" and label == "claude")
             badge = f"{STATUS_COLOR[status]}{STATUS_GLYPH[status]} {STATUS_LABEL[status]}{RST}"
             cpu_str = f"{cpu_color(cpu)}{cpu:>5.1f}%{RST}"
             cpu_bar_n = max(0, min(6, int(cpu/100*6 + 0.5)))
@@ -222,9 +226,15 @@ def agents_body(width):
             sp = f"{cpu_color(cpu)}{per_agent_spark(cpu)}{RST}"
             doing_col = SPAWN if any(t in doing for t in ("Bash:","Edit:","Task:","Write:")) else FG
             doing_clipped = trunc(doing, max(0, inner - 78))
+            # Pulsating GOD tag for dangerous-mode agents.
+            god_tag = ""
+            label_padded = f"{label:<12}"
+            if dangerous:
+                god_tag = "\x1b[5m\x1b[7m\x1b[1m\x1b[31m GOD \x1b[0m "
+                label_padded = f"{label:<7}"
             line = (
                 f"   {badge}  "
-                f"{acc(label)}{BOLD}{label:<12}{RST} "
+                f"{god_tag}{acc(label)}{BOLD}{label_padded}{RST} "
                 f"{FG_DIM}pid{RST}{FG}{pid:>7}{RST} "
                 f"{cpu_str} {cpu_bar} "
                 f"{mem_str} "

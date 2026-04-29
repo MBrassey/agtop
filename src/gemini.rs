@@ -9,7 +9,7 @@
 // `metadata.cwd`/`metadata.model`.  Best-effort parsing — if the format
 // drifts we still surface the file's mtime as session activity.
 
-use crate::format::project_basename;
+use crate::format::{project_basename, sanitize_control};
 use crate::model::{RecentTask, Session, Sessions, Status};
 use crate::sessions::{LiveAgentRef, SessionsResult};
 
@@ -20,8 +20,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const RECENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
-const BUSY_WINDOW_MS:   u64 = 5 * 1000;
-const ACTIVE_WINDOW_MS: u64 = 60 * 1000;
+const BUSY_WINDOW_MS:   u64 = 30 * 1000;
+const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;
 
 fn root() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".gemini").join("sessions")
@@ -118,7 +118,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             age_ms,
             status,
             stop_reason: None,
-            last_task: last_task.clone(),
+            last_task: last_task.as_deref().map(sanitize_control),
             last_tool: None,
             current_tool: None,
             in_flight_tasks: 0,
@@ -128,7 +128,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             tokens_output: info.tokens_output,
             tokens_total: info.tokens_input + info.tokens_output,
             cost_usd: 0.0,
-            model: info.model.clone(),
+            model: info.model.as_deref().map(sanitize_control),
         };
         if let Some(pid) = live_pid {
             by_pid.entry(pid).or_insert_with(|| sess.clone());

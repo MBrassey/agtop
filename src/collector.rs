@@ -6,6 +6,25 @@ use crate::{aider, claude, codex, gemini, generic, goose};
 use crate::format::derive_project;
 use crate::pricing::PriceTable;
 use crate::sysbackend::SysBackend;
+
+/// Patterns in a process cmdline that indicate elevated / "god mode" agent
+/// permissions — `--dangerously-skip-permissions`, `--yolo`, `--no-permissions`,
+/// `--allow-dangerously-…`.  The collector flags these so the TUI can pulsate
+/// the row.
+/// Public re-export for sysbackend.rs which needs to compute dangerous-ness
+/// without the collector context.
+pub fn is_dangerous_for_cmdline(s: &str) -> bool { is_dangerous_invocation(s) }
+
+fn is_dangerous_invocation(cmdline: &str) -> bool {
+    let s = cmdline.to_ascii_lowercase();
+    s.contains("--dangerously")
+        || s.contains("--no-permissions")
+        || s.contains("--no-permission-prompt")
+        || s.contains("--allow-dangerous")
+        || s.contains("--yolo")
+        || s.starts_with("sudo claude") || s.contains(" sudo claude")
+        || s.starts_with("sudo codex")  || s.contains(" sudo codex")
+}
 use crate::matchers::{builtin, classify, Matcher, UserMatcher};
 use crate::model::{
     ActivityEvent, ActivityKind, Agent, Aggregates, History, ProjectAgg, Snapshot, Status,
@@ -22,6 +41,11 @@ const MAX_ACTIVITY: usize = 300;
 pub struct Collector {
     builtins: Vec<Matcher>,
     user: Vec<UserMatcher>,
+    /// Cached at construction so the `snapshot` path can't see a different
+    /// answer than the constructor used when deciding whether to set up the
+    /// sysinfo backend.  Without this, a TOCTOU between `is_linux()` calls
+    /// would panic the `expect` on `self.sys` access.
+    use_sysinfo: bool,
     prev: HashMap<u32, PrevCpu>,
     prev_total: u64,
     cpu_smooth: HashMap<u32, f64>,
@@ -50,11 +74,13 @@ struct PrevCpu {
 
 impl Collector {
     pub fn new(user: Vec<UserMatcher>, pricing: PriceTable) -> Self {
-        let sys = if proc_::is_linux() { None } else { Some(SysBackend::new()) };
+        let use_sysinfo = !proc_::is_linux();
+        let sys = if use_sysinfo { Some(SysBackend::new()) } else { None };
         let num_cpus = sys.as_ref().map(|s| s.num_cpus()).unwrap_or_else(proc_::num_cpus);
         Self {
             builtins: builtin(),
             user,
+            use_sysinfo,
             prev: HashMap::new(),
             prev_total: 0,
             cpu_smooth: HashMap::new(),
@@ -78,7 +104,7 @@ impl Collector {
     pub fn snapshot(&mut self) -> Snapshot {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
 
-        if !proc_::is_linux() {
+        if self.use_sysinfo {
             return self.snapshot_via_sysinfo(now);
         }
 
@@ -151,6 +177,7 @@ impl Collector {
                 tokens_output: 0,
                 cost_usd: 0.0,
                 model: None,
+                dangerous: is_dangerous_invocation(&cmdline),
                 cpu_history: Vec::new(),
                 cpu: smoothed,
                 cpu_raw,
@@ -341,11 +368,11 @@ impl Collector {
             } else {
                 a.status = Status::Idle;
             }
-            // Universal CPU% override.
-            if a.cpu >= 20.0 { a.status = Status::Busy; }
+            // Universal CPU% override.  Threshold calibrated against
+            // observed Claude / Codex Node-process CPU during real turns
+            // (5–15% is typical mid-turn on a modern CPU).
+            if a.cpu >= 10.0 { a.status = Status::Busy; }
             else if a.cpu >= 3.0 && matches!(a.status, Status::Idle | Status::Stale) {
-                a.status = Status::Active;
-            } else if a.cpu >= 1.0 && a.status == Status::Idle {
                 a.status = Status::Active;
             }
             // Cost.
@@ -380,7 +407,17 @@ impl Collector {
     /// macOS / *BSD / Windows path: lean on sysinfo for process metadata.
     /// Session enrichment, sorting, charts, and aggregates work identically.
     fn snapshot_via_sysinfo(&mut self, now: u64) -> Snapshot {
-        let sys = self.sys.as_mut().expect("sysinfo backend must exist on non-Linux");
+        // self.use_sysinfo guarantees self.sys is Some by construction; no
+        // unwrap/expect needed because the constructor populates them
+        // together and there's no public API to mutate them apart.
+        let sys = match self.sys.as_mut() {
+            Some(s) => s,
+            None => return Snapshot {
+                now, platform: std::env::consts::OS.into(),
+                note: Some("sysinfo backend not initialised".into()),
+                ..Default::default()
+            },
+        };
         sys.refresh();
         let mut agents = sys.collect_agents(&self.builtins, &self.user);
 

@@ -75,6 +75,41 @@ pub fn sparkline(values: &[f64], max: f64, width: usize) -> String {
     out
 }
 
+/// Strip C0/C1 control bytes (everything <0x20 except `\t`, plus 0x7f, plus
+/// the OSC introducer `\x1b]…(BEL|ST)`).  Used to sanitise session-derived
+/// strings (assistant prose, tool subjects, recent-task text) before they
+/// hit stdout in --once / --json or get passed to ratatui — a malicious or
+/// corrupted JSONL transcript can otherwise hijack the cursor / clipboard /
+/// title via embedded ANSI sequences.
+pub fn sanitize_control(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\t' => out.push(' '),
+            '\x1b' => {
+                // Eat any CSI / OSC parameter run + final byte / terminator.
+                if let Some(&n) = chars.peek() {
+                    if n == '[' || n == ']' || n == '(' || n == ')' || n == 'P' || n == '_' || n == '^' {
+                        chars.next();
+                        for c2 in chars.by_ref() {
+                            if c2 == '\x07' || c2 == '\x1b' { break; }
+                            if c2.is_ascii_alphabetic() || c2 == '\\' { break; }
+                        }
+                    } else {
+                        chars.next();
+                    }
+                }
+            }
+            c if (c as u32) < 0x20 || c == '\x7f' => { /* drop */ }
+            // C1 controls 0x80..=0x9f are dropped.
+            c if (c as u32) >= 0x80 && (c as u32) <= 0x9f => { /* drop */ }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn shorten(s: &str, n: usize) -> String {
     let count = s.chars().count();
     if count <= n {
@@ -86,22 +121,36 @@ pub fn shorten(s: &str, n: usize) -> String {
 }
 
 /// Just the trailing path component of a cwd, or empty if the cwd doesn't
-/// look like a real project directory.  Use `derive_project` for the
+/// look like a real project directory.  Path-aware so it works on Windows
+/// (`C:\Users\u\code\proj` → `proj`) too.  Use `derive_project` for the
 /// caller-friendly name that always returns *something* meaningful.
 pub fn project_basename(cwd: &str) -> String {
-    let p = cwd.trim_end_matches('/');
-    p.rsplit('/').find(|s| !s.is_empty()).unwrap_or("").to_string()
+    let p = std::path::Path::new(cwd);
+    p.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        // Fallback: the manual trim-trailing-sep logic, for paths sysinfo
+        // hands us with a trailing slash.
+        .unwrap_or_else(|| {
+            let trimmed = cwd.trim_end_matches(&['/', '\\'][..]);
+            trimmed.rsplit(|c| c == '/' || c == '\\')
+                .find(|s| !s.is_empty()).unwrap_or("").to_string()
+        })
 }
 
 /// Caller-friendly project label.  Falls back through cwd-basename →
 /// `<label> <subcommand>` (for daemons like `ollama serve`) → exe basename
-/// → label so we never display a bare `?`.
+/// → label so we never display a bare `?`.  Path-aware: works for POSIX,
+/// Windows (`C:\Users\u\code\proj` → `proj`), and root-like cwds.
 pub fn derive_project(cwd: &str, exe: &str, cmdline: &str, label: &str) -> String {
     // Primary: cwd basename, if the cwd actually identifies a project.
     let cwd_basename = project_basename(cwd);
+    let cwd_path = std::path::Path::new(cwd);
+    let is_root = cwd_path.parent().is_none()    // unix root, win drive root
+        || cwd == "/" || cwd == "\\";
     let cwd_bad = cwd_basename.is_empty()
-        || cwd == "/"
-        || cwd.starts_with("/proc")
+        || is_root
+        || (cfg!(target_os = "linux") && cwd.starts_with("/proc"))
         || cwd_basename == "tmp"
         || cwd_basename == "?";
     if !cwd_bad {
