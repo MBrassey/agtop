@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tgz
+*.deb
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.log
+.DS_Store
+packages/*/build/
+packages/deb/build/
+packages/pacman/src/
+packages/pacman/pkg/
