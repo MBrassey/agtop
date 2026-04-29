@@ -4,13 +4,14 @@ version = 3
 
 [[package]]
 name = "agtop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "crossterm",
  "dirs",
+ "libc",
  "ratatui",
  "regex",
  "serde",

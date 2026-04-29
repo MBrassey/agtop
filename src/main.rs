@@ -15,6 +15,11 @@ mod ui;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // Restore default SIGPIPE behavior so `agtop --json | head` exits cleanly
+    // (status 141) instead of panicking inside Rust's stdout writer.
+    #[cfg(unix)]
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL); }
+
     match cli::run() {
         Ok(code) => code,
         Err(e) => {

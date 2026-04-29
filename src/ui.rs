@@ -29,11 +29,9 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
-    symbols,
     text::{Line, Span},
     widgets::{
-        Axis, Block, BorderType, Borders, Chart, Dataset, GraphType, List, ListItem, Paragraph,
-        Row, Table, Wrap,
+        Block, BorderType, Borders, List, ListItem, Paragraph, Row, Sparkline, Table, Wrap,
     },
     Frame, Terminal,
 };
@@ -232,7 +230,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),     // CPU panel: chart + stats sidebar
+            Constraint::Length(11),    // CPU panel: sparkline + per-agent bars
             Constraint::Length(11),    // Memory by agent (top-N) + system gauge
             Constraint::Length(9),     // Status distribution bars
             Constraint::Min(6),        // Claude sessions panel
@@ -584,75 +582,91 @@ fn draw_activity(f: &mut Frame, area: Rect, snap: &Snapshot) {
     f.render_widget(list, inner);
 }
 
-// CPU panel: area-filled chart on the left, big-number stats sidebar on the
-// right. The fill is a dim Bar-marker dataset rendered underneath a bright
-// Braille line — gives the visual weight of an area chart in pure ratatui.
+// CPU panel: smooth braille Sparkline on top showing system trend, then a
+// horizontal-bar list per agent — same visual language as the Memory and
+// Status panels so the right column reads as a single coherent piece.
 fn draw_cpu_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
+    let peak = snap.history.cpu.iter().copied().fold(0.0_f64, f64::max);
+    let avg = if !snap.history.cpu.is_empty() {
+        snap.history.cpu.iter().sum::<f64>() / snap.history.cpu.len() as f64
+    } else { 0.0 };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::BORDER))
         .title(Line::from(vec![
             Span::styled(" CPU ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("system · {} core{}", snap.sys_cpus, if snap.sys_cpus == 1 {""} else {"s"}),
+            Span::styled(format!("{} cores · ", snap.sys_cpus),
                 Style::default().fg(theme::FG_DIM)),
+            Span::styled("now ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(pct(snap.aggregates.cpu),
+                Style::default().fg(theme::cpu_color(snap.aggregates.cpu)).add_modifier(Modifier::BOLD)),
+            Span::styled(" · peak ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(pct(peak),
+                Style::default().fg(theme::C_CHART_CPU).add_modifier(Modifier::BOLD)),
+            Span::styled(" · avg ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(pct(avg),
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(" ", Style::default().fg(theme::FG_DIM)),
         ]));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Split: chart | stats
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(20), Constraint::Length(16)])
+    // Reserve top 2 rows for the system-CPU sparkline trend.
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(inner);
 
-    // Chart with area fill.
-    let data: Vec<(f64, f64)> = snap.history.cpu.iter().enumerate()
-        .map(|(i, v)| (i as f64, *v)).collect();
-    let peak = data.iter().map(|(_, y)| *y).fold(0.0_f64, f64::max);
-    let avg = if !data.is_empty() {
-        data.iter().map(|(_, y)| *y).sum::<f64>() / data.len() as f64
-    } else { 0.0 };
-    let max_y = ((peak.max(snap.aggregates.cpu) / 10.0).ceil() * 10.0).max(20.0);
+    // Sparkline: convert f64 % values to u64 (×10 to keep one decimal of
+    // resolution) so the smooth ▁▂▃▄▅▆▇█ blocks track the real shape.
+    let spark_data: Vec<u64> = snap.history.cpu.iter().map(|v| (v * 10.0) as u64).collect();
+    let spark_max = ((peak.max(snap.aggregates.cpu).max(10.0) / 10.0).ceil() * 10.0 * 10.0) as u64;
+    let sparkline = Sparkline::default()
+        .data(&spark_data)
+        .max(spark_max)
+        .style(Style::default().fg(theme::C_CHART_CPU));
+    f.render_widget(sparkline, split[0]);
 
-    let datasets = vec![
-        Dataset::default()
-            .marker(symbols::Marker::Bar)
-            .graph_type(GraphType::Bar)
-            .style(Style::default().fg(theme::C_CHART_CPU_FILL))
-            .data(&data),
-        Dataset::default()
-            .name("CPU%")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(theme::C_CHART_CPU))
-            .data(&data),
-    ];
-    let chart = Chart::new(datasets)
-        .x_axis(Axis::default().style(Style::default().fg(theme::BORDER_DIM))
-            .bounds([0.0, data.len().max(1) as f64 - 1.0]))
-        .y_axis(Axis::default().style(Style::default().fg(theme::BORDER_DIM))
-            .bounds([0.0, max_y])
-            .labels(vec![
-                Span::styled("0",   Style::default().fg(theme::FG_DIM)),
-                Span::styled(format!("{:.0}", max_y / 2.0), Style::default().fg(theme::FG_DIM)),
-                Span::styled(format!("{:.0}%", max_y), Style::default().fg(theme::FG_DIM)),
-            ]));
-    f.render_widget(chart, cols[0]);
+    // Per-agent CPU bars. Sort by CPU desc (raw collector order is by status,
+    // so we re-sort here for clearest "who's burning the most" reading).
+    let mut agents: Vec<&Agent> = snap.agents.iter().collect();
+    agents.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal));
+    // Bar scales to the max observed agent CPU (or system CPU if higher) so
+    // even single-digit values produce a visible bar.
+    let bar_basis = agents.first().map(|a| a.cpu).unwrap_or(0.0).max(snap.aggregates.cpu).max(1.0);
 
-    // Big-number stats sidebar.
-    let stat = |label: &str, value: String, color: ratatui::style::Color| Line::from(vec![
-        Span::styled(format!(" {} ", label), Style::default().fg(theme::FG_DIM)),
-        Span::styled(value, Style::default().fg(color).add_modifier(Modifier::BOLD)),
-    ]);
-    let stats = vec![
-        stat("now", pct(snap.aggregates.cpu), theme::cpu_color(snap.aggregates.cpu)),
-        stat("peak", pct(peak), theme::C_CHART_CPU),
-        stat("avg",  pct(avg),  theme::FG),
-        stat("cores used", format!("{:.1}", snap.aggregates.cpu / 100.0), theme::FG_DIM),
-    ];
-    let p = Paragraph::new(stats);
-    f.render_widget(p, cols[1]);
+    let bar_width = (split[1].width as usize).saturating_sub(34).max(8);
+    let mut items: Vec<ListItem> = Vec::new();
+    let take = (split[1].height as usize).saturating_sub(0);
+    for a in agents.iter().take(take) {
+        let frac = (a.cpu / bar_basis).max(0.0);
+        let filled = (frac * bar_width as f64).round() as usize;
+        let filled = filled.min(bar_width);
+        let bar_full  = "█".repeat(filled);
+        let bar_empty = "·".repeat(bar_width - filled);
+        let cpu_col = theme::cpu_color(a.cpu);
+        let mut spans: Vec<Span> = Vec::new();
+        spans.push(Span::styled(format!("{} ", a.status.glyph()), theme::status_style(a.status)));
+        spans.push(Span::styled(format!("{:<10}", shorten(&a.project, 10)),
+            Style::default().fg(theme::FG)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!("{:<8}", shorten(&a.label, 8)),
+            Style::default().fg(theme::agent_color(&a.label))));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(bar_full, Style::default().fg(cpu_col).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(bar_empty, Style::default().fg(theme::BORDER_DIM)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!("{:>6}", pct(a.cpu)),
+            Style::default().fg(cpu_col).add_modifier(Modifier::BOLD)));
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  (no agents)", Style::default().fg(theme::FG_DIM)))));
+    }
+    f.render_widget(List::new(items), split[1]);
 }
 
 // Memory panel: top-N agents by RSS as horizontal bars, plus a system memory
