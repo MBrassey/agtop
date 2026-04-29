@@ -10,3 +10,5 @@ packages/*/build/
 packages/deb/build/
 packages/pacman/src/
 packages/pacman/pkg/
+packages/pacman/agtop-*.tar.gz
+packages/pacman/.stage/
