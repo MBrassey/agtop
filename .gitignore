@@ -1,6 +1,9 @@
 target/
 node_modules/
 dist/
+RELEASE_STEPS.md
+PRIVATE_NOTES.md
+dist/
 *.tgz
 *.deb
 *.pkg.tar.zst

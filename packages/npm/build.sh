@@ -18,7 +18,7 @@ mkdir -p "$build"
 
 cat > "$build/package.json" <<EOF
 {
-  "name": "agtop",
+  "name": "@blueprint.xyz/agtop",
   "version": "${version}",
   "description": "Terminal UI for monitoring AI coding agents — like top, but for agents.",
   "keywords": ["agent","ai","monitor","tui","terminal","top","htop","btop","claude","codex","aider","cursor","observability"],
@@ -149,9 +149,15 @@ cp "$root/README.md" "$build/README.md" 2>/dev/null || true
 cp "$root/LICENSE"   "$build/LICENSE"   2>/dev/null || true
 
 cd "$build"
+# Friendly user-facing tarball name regardless of whether the package is
+# scoped (npm pack would write `blueprint.xyz-agtop-X.Y.Z.tgz` for a scoped
+# name).  We capture whatever it actually wrote and rename to a stable name.
 tar_name="agtop-${version}.tgz"
-( cd .. && rm -f "$tar_name" && npm pack "$build" --silent >/dev/null )
-mv "../$tar_name" "$here/$tar_name"
+out_dir="$(mktemp -d)"
+( cd "$out_dir" && npm pack "$build" --silent >/dev/null )
+produced="$(ls -1 "$out_dir"/*.tgz | head -1)"
+mv "$produced" "$here/$tar_name"
+rm -rf "$out_dir"
 
 echo "built $here/$tar_name"
 echo
