@@ -208,8 +208,10 @@ def agents_body(width):
         if sub_sum > 0:
             header += f"{SPAWN}  +{sub_sum}{RST}{FG_DIM} sub{RST}"
         out.append(header)
-        for r in rows:
+        for i, r in enumerate(rows):
             status, label, pid, cpu, mem, up, sub, tok, _, model, doing = r
+            zebra_open  = "\x1b[48;2;22;26;32m" if i % 2 == 1 else ""
+            zebra_close = "\x1b[49m" if i % 2 == 1 else ""
             # Heuristic: any agent with status=busy in the synthetic dataset
             # is treated as god-mode (so the screenshot shows the pulsating
             # GOD tag); real binary uses cmdline regex.
@@ -226,27 +228,27 @@ def agents_body(width):
             sp = f"{cpu_color(cpu)}{per_agent_spark(cpu)}{RST}"
             doing_col = SPAWN if any(t in doing for t in ("Bash:","Edit:","Task:","Write:")) else FG
             doing_clipped = trunc(doing, max(0, inner - 78))
-            # Pulsating GOD tag for dangerous-mode agents.
-            god_tag = ""
-            label_padded = f"{label:<12}"
+            # Dangerous-mode agents pulsate the LABEL itself: bright red,
+            # bold, slow-blink, reverse-video — no separate text chip.
             if dangerous:
-                god_tag = "\x1b[5m\x1b[7m\x1b[1m\x1b[31m GOD \x1b[0m "
-                label_padded = f"{label:<7}"
+                label_styled = f"\x1b[5m\x1b[7m\x1b[1m\x1b[38;2;255;90;90m{label:<10}{RST}"
+            else:
+                label_styled = f"{acc(label)}{BOLD}{label:<10}{RST}"
             line = (
-                f"   {badge}  "
-                f"{god_tag}{acc(label)}{BOLD}{label_padded}{RST} "
-                f"{FG_DIM}pid{RST}{FG}{pid:>7}{RST} "
+                f"{zebra_open}   {badge}  "
+                f"{label_styled} "
+                f"{FG_DIM}{pid:>7}{RST} "
                 f"{cpu_str} {cpu_bar} "
                 f"{mem_str} "
                 f"{up_str} "
                 f"{sub_str} "
                 f"{tok_str:<5} "
                 f"{sp}  "
-                f"{doing_col}{doing_clipped}{RST}"
+                f"{doing_col}{doing_clipped}{RST}{zebra_close}"
             )
             out.append(line)
             if sub > 0:
-                out.append(f"           {FG_DIM}└ +{sub} sub: zk-circuit-reviewer, gas-optimizer{RST}")
+                out.append(f"{zebra_open}           {FG_DIM}└ +{sub} sub: zk-circuit-reviewer, gas-optimizer{RST}{zebra_close}")
         out.append("")
     return out
 

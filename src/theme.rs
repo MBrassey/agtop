@@ -9,8 +9,9 @@ use ratatui::style::{Color, Modifier, Style};
 pub const BORDER:     Color = Color::Rgb(125, 150, 165);   // soft slate-cyan
 pub const BORDER_DIM: Color = Color::Rgb( 70,  85,  95);   // gentle dim
 pub const FG:         Color = Color::Rgb(225, 222, 215);   // warm off-white
-pub const FG_DIM:     Color = Color::Rgb(140, 140, 140);   // neutral mid-gray
-pub const HL_BG:      Color = Color::Rgb( 40,  45,  55);   // subtle warm dark for selection
+pub const FG_DIM:     Color = Color::Rgb(165, 170, 178);   // neutral mid-gray (>4.8:1 contrast)
+pub const HL_BG:      Color = Color::Rgb( 50,  85, 120);   // bright slate-cyan for selection (high contrast)
+pub const ZEBRA_BG:   Color = Color::Rgb( 22,  26,  32);   // very subtle alternating-row tint
 
 // ── Status accents (soft pastel, still distinguishable) ────────────────────
 pub const C_BUSY:   Color = Color::Rgb(150, 210, 165);     // pastel sage green

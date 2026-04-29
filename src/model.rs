@@ -59,6 +59,10 @@ pub struct Agent {
     pub current_tool: Option<String>,
     pub current_task: Option<String>,
     pub subagents: u32,
+    /// Human-readable descriptions of in-flight Task / Agent tool calls
+    /// (e.g. "code-reviewer: review the auth refactor").  Populated by the
+    /// session reader; one entry per element in `subagents`.
+    pub in_flight_subagents: Vec<String>,
     pub session_id: Option<String>,
     pub session_age_ms: Option<u64>,
     /// Sum of input + output (+ cache) tokens charged to this agent's session.
@@ -118,6 +122,7 @@ pub struct Session {
     pub last_tool: Option<String>,
     pub current_tool: Option<String>,
     pub in_flight_tasks: u32,
+    pub in_flight_subagents: Vec<String>,
     pub live_pid: Option<u32>,
     pub is_most_recent: bool,
     pub tokens_total: u64,

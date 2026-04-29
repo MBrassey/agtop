@@ -152,18 +152,22 @@ agtop [OPTIONS]
 
 ### TUI keybindings
 
-| Key                | Action                                                            |
-| ------------------ | ----------------------------------------------------------------- |
-| `q`, `Ctrl-C`      | Quit (or close popup, if open)                                    |
-| `?`, `h`           | Toggle help overlay                                               |
-| `p`                | Pause / resume refresh                                            |
-| `r`                | Refresh now                                                       |
-| `s`                | Cycle sort (`smart` → `cpu` → `mem` → `tokens` → `uptime` → `agent`) |
-| `g`                | Toggle project grouping                                           |
-| `/`, `f`           | Filter by substring                                               |
-| `j` / `k`, ↓ / ↑   | Move selection (tracks the agent's PID across refreshes)          |
-| `Enter`            | Open / close the detail popup for the selected agent              |
-| `Esc`              | Close popup, clear filter, dismiss prompt                         |
+| Key                       | Action                                                            |
+| ------------------------- | ----------------------------------------------------------------- |
+| `q`, `Ctrl-C`             | Quit (closes popup first if open)                                 |
+| `?`, `h`                  | Toggle help overlay                                               |
+| `p`, `Space`              | Pause / resume refresh                                            |
+| `r`                       | Refresh now                                                       |
+| `s`                       | Cycle sort (`smart` → `cpu` → `mem` → `tokens` → `uptime` → `agent`) |
+| `g`                       | Toggle project grouping                                           |
+| `/`, `f`                  | Filter by substring (Ctrl-U clears, Ctrl-W deletes word)          |
+| `j` / `k`, ↓ / ↑          | Move selection (tracks PID across refreshes)                      |
+| `PgUp` / `PgDn`           | Move selection by 10                                              |
+| `Home` / `End`            | First / last agent                                                |
+| `Enter`                   | Open / close detail popup                                         |
+| `Esc`                     | Close popup, clear filter, dismiss prompt                         |
+| **Mouse — left-click**    | Select that agent row (double-click opens detail popup)           |
+| **Mouse — wheel**         | Scroll selection (3 rows per tick)                                |
 
 ### Environment
 
@@ -184,13 +188,23 @@ mid-generation (transcript not yet flushed) is not reported as `idle`.
 
 | Tag    | Trigger                                                                                   |
 | ------ | ----------------------------------------------------------------------------------------- |
-| BUSY   | Live process **and** transcript written in last 5s, **or** CPU% ≥ 20 (universal override) |
-| SPWN   | Live process with one or more in-flight tool calls (subagents currently running)          |
-| ACTV   | Live process with transcript activity in last 60s, **or** CPU% ≥ 3 (override from idle/stale), **or** CPU% ≥ 1 (override from idle) |
-| idle   | Live process up but quiet for >60s and CPU% below threshold                               |
+| BUSY   | Live process **and** transcript written in last **30s**, **or** any tool currently in flight, **or** CPU% ≥ **10** (universal override) |
+| SPWN   | Live process with one or more in-flight `Task` / `Agent` *subagents*                      |
+| ACTV   | Live process with transcript activity in last **5 min**, **or** CPU% ≥ 3 (override from idle/stale) |
+| idle   | Live process up but quiet for >5 min and CPU% below threshold                             |
 | WAIT   | No live process, but session activity in the last 24h                                     |
 | DONE   | Session ended (Claude `stop_reason: end_turn` / `stop_sequence`, Codex `session_end`)     |
 | stale  | None of the above; last activity older than 24h                                           |
+
+### Dangerous-mode (god-mode) detection
+
+Processes invoked with `--dangerously-skip-permissions`, `--no-permissions`,
+`--allow-dangerous`, `--yolo`, or `sudo {claude,codex}` are flagged as
+running with elevated permissions. The TUI renders the **agent label
+itself** in pulsating red (slow-blink + reverse-video + bright red fg) so
+unsafe sessions are impossible to miss at a glance — no separate text
+chip, the label *is* the warning. The flag is also exposed in
+`--json` as `agents[].dangerous: bool`.
 
 ### Layout
 

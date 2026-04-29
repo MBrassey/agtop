@@ -50,6 +50,9 @@ struct AnalysisOut {
     current_tool: Option<String>,
     /// Task / Agent subagent tool_uses without a matching tool_result.
     in_flight_tasks: u32,
+    /// Human-readable descriptions for each in-flight Task subagent
+    /// (`subagent_type: subject`).
+    in_flight_subagents: Vec<String>,
     /// In-flight count for ANY tool (Bash, Edit, Read, Write, ...) — used by
     /// the busy-status decision so an agent mid-Bash also reads as busy.
     in_flight_tools: u32,
@@ -62,6 +65,7 @@ fn analyse(records: &[Value]) -> AnalysisOut {
     let mut out = AnalysisOut::default();
     let mut task_use_ids: Vec<String> = Vec::new();
     let mut all_tool_use_ids: Vec<String> = Vec::new();
+    let mut task_descr: HashMap<String, String> = HashMap::new();
     let mut completed: HashMap<String, ()> = HashMap::new();
 
     for r in records {
@@ -107,16 +111,30 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                                 all_tool_use_ids.push(id.to_string());
                             }
                             if name == "Task" || name == "Agent" {
-                                if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
-                                    task_use_ids.push(id.to_string());
+                                let id_str = c.get("id").and_then(|v| v.as_str()).map(String::from);
+                                if let Some(id) = &id_str {
+                                    task_use_ids.push(id.clone());
                                 }
+                                let mut subj_opt = None::<String>;
+                                let mut kind_opt = None::<String>;
                                 if let Some(input) = c.get("input") {
-                                    let subj = input.get("subject")
+                                    if let Some(s) = input.get("subject")
                                         .or_else(|| input.get("description"))
-                                        .and_then(|v| v.as_str());
-                                    if let Some(s) = subj {
+                                        .and_then(|v| v.as_str()) {
                                         out.last_task = Some(s.to_string());
+                                        subj_opt = Some(s.to_string());
                                     }
+                                    if let Some(k) = input.get("subagent_type").and_then(|v| v.as_str()) {
+                                        kind_opt = Some(k.to_string());
+                                    }
+                                }
+                                if let Some(id) = id_str {
+                                    let kind = kind_opt.unwrap_or_else(|| "agent".into());
+                                    let descr = match subj_opt {
+                                        Some(s) => format!("{}: {}", kind, s),
+                                        None => kind,
+                                    };
+                                    task_descr.insert(id, descr);
                                 }
                             } else if name == "TodoWrite" {
                                 if let Some(todos) = c.get("input").and_then(|i| i.get("todos")).and_then(|v| v.as_array()) {
@@ -161,6 +179,10 @@ fn analyse(records: &[Value]) -> AnalysisOut {
 
     out.in_flight_tasks = task_use_ids.iter()
         .filter(|id| !completed.contains_key(*id)).count() as u32;
+    out.in_flight_subagents = task_use_ids.iter()
+        .filter(|id| !completed.contains_key(*id))
+        .filter_map(|id| task_descr.get(id).cloned())
+        .collect();
     out.in_flight_tools = all_tool_use_ids.iter()
         .filter(|id| !completed.contains_key(*id)).count() as u32;
     out
@@ -284,6 +306,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 last_tool:    info.last_tool.as_deref().map(sanitize_control),
                 current_tool: info.current_tool.as_deref().map(sanitize_control),
                 in_flight_tasks: info.in_flight_tasks,
+                in_flight_subagents: info.in_flight_subagents.iter()
+                    .map(|s| crate::format::sanitize_control(s)).collect(),
                 live_pid,
                 is_most_recent,
                 tokens_input: info.tokens_input,

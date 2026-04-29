@@ -77,6 +77,7 @@ impl SysBackend {
                 cost_usd: 0.0,
                 model: None,
                 dangerous: crate::collector::is_dangerous_for_cmdline(&cmdline),
+                in_flight_subagents: Vec::new(),
                 cpu_history: Vec::new(),
                 cpu,
                 cpu_raw: cpu,

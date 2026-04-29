@@ -22,7 +22,8 @@ use crate::theme;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
+            KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -79,6 +80,10 @@ struct App {
     show_detail: bool,
     selected_pid: Option<u32>,
     visible_pid_order: Vec<u32>,
+    /// `(row_y, pid)` of every clickable agent row in the agents panel,
+    /// captured during the previous draw so mouse clicks can be hit-tested
+    /// without rerendering.
+    clickable_rows: Vec<(u16, u32)>,
     quit: bool,
 }
 
@@ -123,6 +128,7 @@ pub fn run(collector: Collector, args: Args) -> Result<()> {
         show_detail: false,
         selected_pid: None,
         visible_pid_order: Vec::new(),
+        clickable_rows: Vec::new(),
         quit: false,
     };
 
@@ -151,8 +157,10 @@ fn main_loop<B: ratatui::backend::Backend + io::Write>(
         // Poll for input with a short timeout so we don't burn CPU.
         let timeout = Duration::from_millis(100);
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                handle_key(app, key);
+            match event::read()? {
+                Event::Key(key) => handle_key(app, key),
+                Event::Mouse(m) => handle_mouse(app, m),
+                _ => {}
             }
         }
     }
@@ -160,54 +168,86 @@ fn main_loop<B: ratatui::backend::Backend + io::Write>(
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // Filter prompt is modal — accept input keys, escape closes it.
     if app.typing_filter {
         match key.code {
             KeyCode::Esc => {
                 app.typing_filter = false;
                 app.filter.clear();
             }
-            KeyCode::Enter => {
-                app.typing_filter = false;
+            KeyCode::Enter => app.typing_filter = false,
+            KeyCode::Backspace => { app.filter.pop(); }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => app.filter.clear(),
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Strip trailing whitespace then trailing word.
+                while matches!(app.filter.chars().last(), Some(c) if c.is_whitespace()) { app.filter.pop(); }
+                while matches!(app.filter.chars().last(), Some(c) if !c.is_whitespace()) { app.filter.pop(); }
             }
-            KeyCode::Backspace => {
-                app.filter.pop();
-            }
-            KeyCode::Char(c) => {
-                app.filter.push(c);
-            }
+            KeyCode::Char(c) if !c.is_control() => app.filter.push(c),
             _ => {}
         }
         return;
     }
-    match key.code {
-        KeyCode::Char('q') => {
-            if app.show_detail { app.show_detail = false; }
-            else if app.show_help { app.show_help = false; }
-            else { app.quit = true; }
+
+    // Popup-aware gating: when a popup is open, only the dismiss / toggle
+    // keys are honoured — j/k/s/g/f/r/p don't fall through.
+    if app.show_detail || app.show_help {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                app.show_detail = false;
+                app.show_help = false;
+            }
+            KeyCode::Char('?') | KeyCode::Char('h') => app.show_help = !app.show_help,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => app.quit = true,
+            _ => {}
         }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Char('q') => app.quit = true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => app.quit = true,
-        KeyCode::Char('?') | KeyCode::Char('h') => app.show_help = !app.show_help,
-        KeyCode::Enter => app.show_detail = !app.show_detail,
-        KeyCode::Char('p') => app.paused = !app.paused,
+        KeyCode::Char('?') | KeyCode::Char('h') => app.show_help = true,
+        KeyCode::Enter => app.show_detail = true,
+        KeyCode::Char('p') | KeyCode::Char(' ') => app.paused = !app.paused,
         KeyCode::Char('r') => {
             app.snap = app.collector.snapshot();
             app.last_tick = Instant::now();
         }
         KeyCode::Char('s') => app.sort = app.sort.cycle(),
         KeyCode::Char('g') => app.grouped = !app.grouped,
-        KeyCode::Char('/') => {
+        KeyCode::Char('/') | KeyCode::Char('f') => {
             app.typing_filter = true;
             app.filter.clear();
         }
-        KeyCode::Char('f') => {
-            app.typing_filter = true;
-            app.filter.clear();
-        }
-        KeyCode::Esc => {
-            app.filter.clear();
-        }
+        // Esc with no popup open: clear filter as a quick "reset".
+        KeyCode::Esc => app.filter.clear(),
         KeyCode::Down | KeyCode::Char('j') => move_sel(app, 1),
         KeyCode::Up | KeyCode::Char('k') => move_sel(app, -1),
+        KeyCode::PageDown => move_sel(app, 10),
+        KeyCode::PageUp => move_sel(app, -10),
+        KeyCode::Home => move_sel(app, i32::MIN / 2),
+        KeyCode::End => move_sel(app, i32::MAX / 2),
+        _ => {}
+    }
+}
+
+fn handle_mouse(app: &mut App, m: MouseEvent) {
+    match m.kind {
+        // Click an agent row in the agents panel: select it.  Double-click
+        // (handled here as click-on-selected) opens the detail popup.
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some((_, pid)) = app.clickable_rows.iter().find(|(y, _)| *y == m.row) {
+                if app.selected_pid == Some(*pid) {
+                    app.show_detail = true;
+                } else {
+                    app.selected_pid = Some(*pid);
+                }
+            }
+        }
+        // Wheel scrolls the selection.
+        MouseEventKind::ScrollUp   => move_sel(app, -3),
+        MouseEventKind::ScrollDown => move_sel(app,  3),
         _ => {}
     }
 }
@@ -330,6 +370,14 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     if a.subagents > 0 {
         lines.push(Line::from(vec![lab("subagents"),
             val(format!("{} in flight", a.subagents), theme::C_SPAWN)]));
+        for s in a.in_flight_subagents.iter().take(8) {
+            lines.push(Line::from(vec![
+                Span::raw("           "),
+                Span::styled("· ", Style::default().fg(theme::C_SPAWN)),
+                Span::styled(shorten(s, (w as usize).saturating_sub(14)),
+                    Style::default().fg(theme::FG)),
+            ]));
+        }
     }
     if let Some(sid) = &a.session_id {
         lines.push(Line::from(vec![lab("session"), dim(sid.clone())]));
@@ -447,6 +495,8 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
 
     let mut pid_order: Vec<u32> = Vec::new();
     let mut rows: Vec<Row> = Vec::new();
+    // Track which screen row each agent maps to (for mouse hit-testing).
+    let mut agent_row_indices: Vec<usize> = Vec::new();
 
     if app.grouped {
         // Group agents by project, preserving collector ordering.
@@ -495,14 +545,18 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             rows.push(Row::new(vec![header_line]).height(1));
 
             for a in list {
+                let zebra = pid_order.len() % 2 == 1;
                 pid_order.push(a.pid);
-                rows.push(agent_row(a, app.selected_pid == Some(a.pid)));
+                agent_row_indices.push(rows.len());
+                rows.push(agent_row(a, app.selected_pid == Some(a.pid), zebra));
             }
         }
     } else {
         for a in agents.iter() {
+            let zebra = pid_order.len() % 2 == 1;
             pid_order.push(a.pid);
-            rows.push(agent_row(a, app.selected_pid == Some(a.pid)));
+            agent_row_indices.push(rows.len());
+            rows.push(agent_row(a, app.selected_pid == Some(a.pid), zebra));
         }
     }
 
@@ -511,7 +565,29 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
         app.selected_pid = pid_order.first().copied();
     } else if let Some(p) = app.selected_pid {
         if !pid_order.contains(&p) {
+            // Selected agent disappeared — drop the popup if it was open
+            // against the dead pid, snap selection to the first row.
+            if app.show_detail { app.show_detail = false; }
             app.selected_pid = pid_order.first().copied();
+        }
+    }
+    // Empty-state hint when filter matches nothing.
+    if rows.is_empty() && !app.filter.is_empty() {
+        rows.push(Row::new(vec![Line::from(Span::styled(
+            format!("  (no agents match \"{}\" — Esc to clear)", app.filter),
+            Style::default().fg(theme::FG_DIM),
+        ))]).height(1));
+    }
+
+    // Capture screen-row → pid map for mouse hit-testing in the next event
+    // poll.  inner.y is the y of the first visible row; each Row has height(1).
+    app.clickable_rows.clear();
+    for (i, ri) in agent_row_indices.iter().enumerate() {
+        if let Some(pid) = pid_order.get(i) {
+            let y = inner.y + (*ri as u16);
+            if y < inner.y + inner.height {
+                app.clickable_rows.push((y, *pid));
+            }
         }
     }
 
@@ -521,80 +597,108 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(table, inner);
 }
 
-fn agent_row<'a>(a: &'a Agent, selected: bool) -> Row<'a> {
+fn agent_row<'a>(a: &'a Agent, selected: bool, zebra: bool) -> Row<'a> {
+    // Tight layout: every fixed-width column packs against the next so the
+    // DOING field at the end gets the lion's share of the row.  Column
+    // widths chosen to hold realistic values without overflow:
+    //   2  leading indent
+    //   6  status glyph + 4-char label  (e.g. "● BUSY")
+    //   1  space
+    //  10  agent label
+    //   1  space
+    //   7  pid (right-aligned)
+    //   1  space
+    //   5  cpu%  (e.g. "31.4%")
+    //   1  space
+    //   4  cpu mini-bar
+    //   1  space
+    //   5  mem  (e.g. "642M")
+    //   1  space
+    //   6  uptime (e.g. "3h17m")
+    //   3  +N subagent chip (only if non-zero, otherwise spaces)
+    //   5  tokens chip (only if non-zero, otherwise spaces)
+    //   2  separator before DOING
+    //   ∞  doing
     let mut spans: Vec<Span> = Vec::new();
     spans.push(Span::raw("  "));
-    // Status badge.
-    spans.push(Span::styled(format!("{} {} ", a.status.glyph(), a.status.label()),
-                            theme::status_style(a.status)));
-    // Agent label chip.  Pulsates with reverse-video + slow-blink when the
-    // agent was launched in "god mode" (--dangerously-skip-permissions etc.)
-    // so unsafe sessions are impossible to miss at a glance.
-    if a.dangerous {
-        spans.push(Span::styled(" GOD ",
-            Style::default()
-                .bg(ratatui::style::Color::Red)
-                .fg(ratatui::style::Color::Black)
-                .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK | Modifier::REVERSED)));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(format!("{:<7}", shorten(&a.label, 7)),
-            Style::default().fg(theme::agent_color(&a.label))
-                .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)));
+
+    // Status badge — compact "● BUSY" form (6 visible chars).
+    spans.push(Span::styled(
+        format!("{} {:<4}", a.status.glyph(), a.status.label()),
+        theme::status_style(a.status),
+    ));
+    spans.push(Span::raw(" "));
+
+    // Agent label.  Dangerous-mode (`--dangerously-skip-permissions`,
+    // `--yolo`, `sudo`, …) makes the label itself glow: bright red, bold,
+    // slow-blink, reverse-video.  No text chip — the label *is* the warning.
+    let label_text = format!("{:<10}", shorten(&a.label, 10));
+    let label_style = if a.dangerous {
+        Style::default()
+            .fg(ratatui::style::Color::Rgb(255, 90, 90))
+            .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK | Modifier::REVERSED)
     } else {
-        spans.push(Span::styled(format!("{:<12}", shorten(&a.label, 12)),
-            Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)));
-    }
+        Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)
+    };
+    spans.push(Span::styled(label_text, label_style));
+    spans.push(Span::raw(" "));
+
     // PID
-    spans.push(Span::styled("pid ", Style::default().fg(theme::FG_DIM)));
     spans.push(Span::styled(format!("{:>7}", a.pid),
-                            Style::default().fg(theme::FG)));
+                            Style::default().fg(theme::FG_DIM)));
     spans.push(Span::raw(" "));
-    // CPU% with an inline mini-bar so relative load reads at a glance.
-    let bar_cells = (a.cpu / 100.0 * 6.0).round().clamp(0.0, 6.0) as usize;
-    let cpu_color = theme::cpu_color(a.cpu);
-    spans.push(Span::styled(format!("{:>6}", pct(a.cpu)),
-                            Style::default().fg(cpu_color).add_modifier(Modifier::BOLD)));
+
+    // CPU% + 4-cell mini bar.
+    let cpu_col = theme::cpu_color(a.cpu);
+    spans.push(Span::styled(format!("{:>5}", pct(a.cpu)),
+                            Style::default().fg(cpu_col).add_modifier(Modifier::BOLD)));
     spans.push(Span::raw(" "));
+    let bar_cells = (a.cpu / 100.0 * 4.0).round().clamp(0.0, 4.0) as usize;
     spans.push(Span::styled("█".repeat(bar_cells),
-                            Style::default().fg(cpu_color).add_modifier(Modifier::BOLD)));
-    spans.push(Span::styled("·".repeat(6 - bar_cells),
+                            Style::default().fg(cpu_col).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled("·".repeat(4 - bar_cells),
                             Style::default().fg(theme::BORDER_DIM)));
     spans.push(Span::raw(" "));
+
     // MEM
-    spans.push(Span::styled(format!("{:>7}", bytes(a.rss)),
+    spans.push(Span::styled(format!("{:>5}", bytes(a.rss)),
                             Style::default().fg(theme::C_CHART_MEM)));
     spans.push(Span::raw(" "));
+
     // Uptime
-    spans.push(Span::styled(format!("{:>7}", dur(a.uptime_sec)),
+    spans.push(Span::styled(format!("{:>6}", dur(a.uptime_sec)),
                             Style::default().fg(theme::FG_DIM)));
-    // Subagent badge
+
+    // Subagent chip — fixed 4-char slot, capped at 99 so two-digit counts
+    // (which would otherwise widen the column and shift DOING) fit.
     if a.subagents > 0 {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(format!("+{}", a.subagents),
+        spans.push(Span::styled(format!(" +{:<2}", a.subagents.min(99)),
                                 Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(" sub", Style::default().fg(theme::FG_DIM)));
     } else {
-        spans.push(Span::raw("       "));
+        spans.push(Span::raw("    "));
     }
-    // Token chip — compact, only when non-zero, kept short with si().
+
+    // Token chip — fixed 6-char slot, value clipped to 5 visible chars so
+    // even "100M+" abbreviations don't push downstream columns.
     if a.tokens_total > 0 {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(si(a.tokens_total),
+        let s = si(a.tokens_total);
+        let clipped: String = s.chars().take(5).collect();
+        spans.push(Span::styled(format!(" {:>5}", clipped),
                                 Style::default().fg(theme::C_CHART_TOK)));
+    } else {
+        spans.push(Span::raw("      "));
     }
-    // Inline 8-cell CPU sparkline.
-    spans.push(Span::raw(" "));
-    let spark = sparkline(&a.cpu_history, 100.0, 8);
-    spans.push(Span::styled(spark,
-        Style::default().fg(theme::cpu_color(a.cpu))));
+
+    // DOING — gets all remaining width.
     spans.push(Span::raw("  "));
-    // Doing
     spans.push(describe_doing_span(a));
 
     let line = Line::from(spans);
     let mut row = Row::new(vec![line]).height(1);
     if selected {
-        row = row.style(Style::default().bg(theme::HL_BG));
+        row = row.style(Style::default().bg(theme::HL_BG).add_modifier(Modifier::BOLD));
+    } else if zebra {
+        row = row.style(Style::default().bg(theme::ZEBRA_BG));
     }
     row
 }
