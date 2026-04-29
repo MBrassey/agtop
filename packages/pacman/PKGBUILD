@@ -1,42 +1,41 @@
 # Maintainer: Matt Brassey <matt@brassey.io>
 pkgname=agtop
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Terminal UI for monitoring AI coding agents (Claude Code, Codex, Aider, Cursor, Gemini, Goose, ...) — like top, but for agents."
-arch=('any')
+arch=('x86_64' 'aarch64')
 url="https://github.com/mbrassey/agtop"
 license=('MIT')
-depends=('nodejs>=16')
-makedepends=('npm')
-# build.sh stages a release tarball next to this PKGBUILD before invoking
-# makepkg, so makepkg verifies a real source tree even during local builds.
+depends=('gcc-libs')
+makedepends=('cargo')
 source=("agtop-${pkgver}.tar.gz")
 sha256sums=('SKIP')
-options=('!strip' '!debug')
+options=('!debug')
+
+prepare() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  # Vendor cache: respect $CARGO_HOME so makepkg can be reproducible offline.
+  export CARGO_HOME="${srcdir}/.cargo"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')" || true
+}
+
+build() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  export CARGO_HOME="${srcdir}/.cargo"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --release --frozen 2>/dev/null || cargo build --release
+}
+
+check() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  export CARGO_HOME="${srcdir}/.cargo"
+  cargo test --release --frozen 2>/dev/null || cargo test --release
+}
 
 package() {
-  cd "${srcdir}/agtop-${pkgver}"
-
-  install -d "${pkgdir}/usr/lib/agtop"
-  cp -r src bin package.json LICENSE "${pkgdir}/usr/lib/agtop/"
-  if [ -f README.md ]; then
-    cp README.md "${pkgdir}/usr/lib/agtop/"
-  fi
-
-  # Bundle production node_modules so the package is self-contained and only
-  # needs `nodejs` at runtime.
-  ( cd "${pkgdir}/usr/lib/agtop" && \
-      npm install --omit=dev --no-audit --no-fund --loglevel=error \
-        blessed blessed-contrib commander >/dev/null )
-  rm -f "${pkgdir}/usr/lib/agtop/package-lock.json"
-
-  install -d "${pkgdir}/usr/bin"
-  cat > "${pkgdir}/usr/bin/agtop" <<'LAUNCHER'
-#!/bin/sh
-exec /usr/bin/env node /usr/lib/agtop/bin/agtop "$@"
-LAUNCHER
-  chmod 0755 "${pkgdir}/usr/bin/agtop"
-
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  install -Dm755 "target/release/${pkgname}" "${pkgdir}/usr/bin/${pkgname}"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
   if [ -f README.md ]; then
     install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"

@@ -1,8 +1,9 @@
 # agtop — npm package
 
-This is the npm publishing wrapper for **agtop**, a terminal UI for monitoring AI
-coding agents on your system. The actual source lives at the repo root; this
-folder only carries the npm build script and publish notes.
+The npm distribution of **agtop** wraps the static Rust binary. On install
+the postinstall script either downloads the prebuilt binary from GitHub
+Releases (once cut) or falls back to `cargo install agtop` if the user has
+Rust on PATH.
 
 ## Build
 
@@ -10,24 +11,17 @@ folder only carries the npm build script and publish notes.
 ./build.sh
 ```
 
-This produces `agtop-<version>.tgz` in this folder by running `npm pack` against
-the repo root and copying the tarball here. The tarball is what `npm publish`
-uploads — install it locally to test:
+Produces `agtop-<version>.tgz` here. Inspect it with:
 
 ```sh
-npm install -g ./agtop-0.1.0.tgz
-agtop --help
+tar -tzf agtop-0.2.0.tgz
 ```
 
 ## Publish
 
 ```sh
-cd ../..               # repo root
-npm publish --access public
+npm publish ./agtop-0.2.0.tgz --access public
 ```
-
-The `package.json` `files` array restricts what's shipped to `bin/`, `src/`,
-`README.md`, and `LICENSE` — no `node_modules`, tests, or packaging metadata.
 
 ## Install (end users)
 
@@ -36,3 +30,14 @@ npm install -g agtop
 agtop                  # launch TUI
 agtop --once --top 10  # one-shot snapshot
 ```
+
+If you don't have a prebuilt binary yet (or are on an unusual platform), the
+postinstall script will run `cargo install agtop` for you. Install Rust from
+[rustup.rs](https://rustup.rs) if you don't have it.
+
+## Long-term plan
+
+Once we cut GitHub Releases (`v0.2.0`, …) with prebuilt artefacts named
+`agtop-<platform>-<arch>` for the standard targets, the postinstall fetches
+those over HTTPS and unpacks into `vendor/<platform>-<arch>/agtop`. The
+`bin/agtop` shim already looks in that path first.
