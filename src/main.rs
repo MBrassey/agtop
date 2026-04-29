@@ -4,11 +4,14 @@
 
 mod cli;
 mod claude;
+mod codex;
 mod collector;
 mod format;
+mod generic;
 mod matchers;
 mod model;
 mod proc_;
+mod sessions;
 mod theme;
 mod ui;
 

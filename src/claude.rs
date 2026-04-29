@@ -1,8 +1,9 @@
 // Reads ~/.claude/projects/*/<session>.jsonl best-effort to surface live agent
 // status, current tool, in-flight Task subagents, and the last task subject.
 
-use crate::format::{project_basename};
-use crate::model::{RecentTask, Session, Sessions, Status};
+use crate::format::project_basename;
+use crate::model::{RecentTask, Session, Status};
+use crate::sessions::{LiveAgentRef, SessionsResult};
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -161,17 +162,6 @@ fn classify_status(is_live: bool, age_ms: u64, stop_reason: &Option<String>, has
     Status::Stale
 }
 
-pub struct LiveAgentRef<'a> {
-    pub pid: u32,
-    pub cwd: &'a str,
-    pub label: &'a str,
-}
-
-pub struct SessionsResult {
-    pub sessions: Sessions,
-    pub by_pid: HashMap<u32, Session>,
-}
-
 pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     let root = root();
     let mut sessions: Vec<Session> = Vec::new();
@@ -179,10 +169,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     let mut by_pid: HashMap<u32, Session> = HashMap::new();
 
     if !root.exists() {
-        return SessionsResult {
-            sessions: Sessions::default(),
-            by_pid,
-        };
+        return SessionsResult::empty();
     }
 
     let mut cwd_to_pid: HashMap<String, u32> = HashMap::new();
@@ -194,7 +181,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
 
     let read_dir = match fs::read_dir(&root) {
         Ok(d) => d,
-        Err(_) => return SessionsResult { sessions: Sessions::default(), by_pid },
+        Err(_) => return SessionsResult::empty(),
     };
 
     for ent in read_dir.flatten() {
@@ -297,7 +284,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     let busy      = sessions.iter().filter(|s| matches!(s.status, Status::Busy | Status::Spawning)).count() as u32;
 
     SessionsResult {
-        sessions: Sessions { sessions, recent_tasks, active, busy, waiting, completed },
+        sessions: crate::model::Sessions { sessions, recent_tasks, active, busy, waiting, completed },
         by_pid,
     }
 }

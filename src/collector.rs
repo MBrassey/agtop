@@ -1,7 +1,8 @@
 // Stitches /proc, matchers, and ~/.claude/projects into a single Snapshot.
 // Holds smoothing state across snapshots so the TUI doesn't jitter.
 
-use crate::claude::{self, LiveAgentRef};
+use crate::sessions::{self, LiveAgentRef};
+use crate::{claude, codex, generic};
 use crate::format::project_basename;
 use crate::matchers::{builtin, classify, Matcher, UserMatcher};
 use crate::model::{
@@ -61,15 +62,18 @@ impl Collector {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
 
         if !proc_::is_linux() {
-            let sessions = claude::summarise(&[], now);
+            let merged = sessions::merge(vec![
+                claude::summarise(&[], now),
+                codex::summarise(&[], now),
+            ]);
             let mut snap = Snapshot::default();
             snap.now = now;
             snap.platform = std::env::consts::OS.to_string();
-            snap.note = Some("Live process metrics require Linux /proc — running in Claude-sessions-only mode.".into());
+            snap.note = Some("Live process metrics require Linux /proc — running in session-readers-only mode.".into());
             snap.sys_cpus = self.num_cpus as u32;
-            snap.aggregates.waiting = sessions.sessions.waiting;
-            snap.aggregates.completed = sessions.sessions.completed;
-            snap.sessions = sessions.sessions;
+            snap.aggregates.waiting = merged.sessions.waiting;
+            snap.aggregates.completed = merged.sessions.completed;
+            snap.sessions = merged.sessions;
             return snap;
         }
 
@@ -191,34 +195,38 @@ impl Collector {
 
         self.prev_total = total_cpu;
 
-        // Claude session enrichment.
+        // Per-vendor session enrichment + generic fallback for everyone else.
         let live_refs: Vec<LiveAgentRef> = agents.iter()
             .map(|a| LiveAgentRef { pid: a.pid, cwd: a.cwd.as_str(), label: a.label.as_str() })
             .collect();
-        let sessions = claude::summarise(&live_refs, now);
+        let claude_r  = claude::summarise(&live_refs, now);
+        let codex_r   = codex::summarise(&live_refs, now);
+        let generic_r = generic::summarise(&agents, &live_refs, now);
+        let merged = sessions::merge(vec![claude_r, codex_r, generic_r]);
 
         for a in &mut agents {
-            if a.label == "claude" || a.label == "claude-code" {
-                if let Some(s) = sessions.by_pid.get(&a.pid) {
-                    a.status = s.status;
-                    a.current_tool = s.current_tool.clone();
-                    a.current_task = s.last_task.clone();
-                    a.subagents = s.in_flight_tasks;
-                    a.session_id = Some(s.id.clone());
-                    a.session_age_ms = Some(s.age_ms);
-                } else {
-                    a.status = Status::Idle;
-                }
-                if a.cpu >= 20.0 { a.status = Status::Busy; }
-                else if a.cpu >= 3.0 && matches!(a.status, Status::Idle | Status::Stale) {
-                    a.status = Status::Active;
-                }
+            if let Some(s) = merged.by_pid.get(&a.pid) {
+                a.status = s.status;
+                a.current_tool = s.current_tool.clone();
+                a.current_task = s.last_task.clone();
+                a.subagents = s.in_flight_tasks;
+                a.session_id = Some(s.id.clone());
+                a.session_age_ms = Some(s.age_ms);
             } else {
-                a.status = if a.cpu >= 20.0 { Status::Busy }
-                           else if a.cpu >= 1.0 { Status::Active }
-                           else { Status::Idle };
+                // No vendor-specific or generic enrichment — derive status
+                // from process activity alone.
+                a.status = Status::Idle;
+            }
+            // Universal CPU% override — process state always wins over any
+            // flush-lag in the underlying session transcript.
+            if a.cpu >= 20.0 { a.status = Status::Busy; }
+            else if a.cpu >= 3.0 && matches!(a.status, Status::Idle | Status::Stale) {
+                a.status = Status::Active;
+            } else if a.cpu >= 1.0 && a.status == Status::Idle {
+                a.status = Status::Active;
             }
         }
+        let sessions = merged;
 
         // Stable sort: status > project > cpu > rss > pid.
         agents.sort_by(|a, b| {

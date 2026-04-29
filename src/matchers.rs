@@ -40,7 +40,7 @@ pub fn builtin() -> Vec<Matcher> {
         m("mods",         &p(r"mods(\s|$)")),
         m("sgpt",         &p(r"sgpt(\s|$)")),
         m("llm",          &p(r"llm(\s|$)")),
-        m("ollama",       &p(r"ollama\s+(run|chat)")),
+        m("ollama",       &p(r"ollama(\s+(run|chat|serve)|$)")),
         m("fabric",       &p(r"fabric(\s|$)")),
         m("block-goose",  &p(r"goose-server")),
     ]

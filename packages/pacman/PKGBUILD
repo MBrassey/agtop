@@ -1,6 +1,6 @@
 # Maintainer: Matt Brassey <matt@brassey.io>
 pkgname=agtop
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="Terminal UI for monitoring AI coding agents (Claude Code, Codex, Aider, Cursor, Gemini, Goose, ...) — like top, but for agents."
 arch=('x86_64' 'aarch64')
