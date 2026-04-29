@@ -1,20 +1,19 @@
-<div align="center">
-
 # agtop
 
-**Like `top`, but for AI coding agents.**
-
-A terminal UI that surfaces every AI coding agent running on your system —
-live PIDs, CPU%, memory, tokens, and what each one is *currently doing* —
-in one sleek, project-grouped view.
+A terminal monitor for AI coding agents. Reads `/proc` (or `sysinfo` on
+non-Linux) plus the on-disk session transcripts of Claude Code, OpenAI
+Codex, Block Goose, Aider, and Google Gemini, and presents per-agent CPU,
+RSS, status, current tool / task, in-flight subagents, token usage, and
+estimated cost in a `top`-style TUI.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.74%2B-orange.svg)](https://www.rust-lang.org)
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos-blue.svg)](#platform-support)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-blue.svg)](#platform-support)
 [![Built with ratatui](https://img.shields.io/badge/built%20with-ratatui-purple.svg)](https://ratatui.rs)
-[![GitHub stars](https://img.shields.io/github/stars/mbrassey/agtop?style=social)](https://github.com/mbrassey/agtop)
 
-</div>
+Implemented as a Rust binary (3.6 MB stripped on x86_64-linux) on top of
+ratatui, crossterm, clap, sysinfo, serde_json, and toml. No runtime
+dependencies beyond a working terminal.
 
 ---
 
@@ -22,13 +21,23 @@ in one sleek, project-grouped view.
 
 ### Arch Linux / CachyOS / Manjaro
 
+Local build (until AUR submission):
+
 ```sh
 git clone https://github.com/mbrassey/agtop.git && cd agtop
 packages/pacman/build.sh
 sudo pacman -U packages/pacman/agtop-2.0.0-1-x86_64.pkg.tar.zst
 ```
 
-Or once published to the AUR: `yay -S agtop`.
+Once the AUR package is published:
+
+```sh
+yay  -S agtop      # via yay
+paru -S agtop      # via paru
+```
+
+Pure `pacman -S agtop` requires the package to be in an official Arch
+repo (`extra` / `community`); `pacman` itself does not query the AUR.
 
 ### Debian / Ubuntu
 
@@ -45,25 +54,32 @@ brew tap mbrassey/tap
 brew install agtop
 ```
 
-(or `cargo install --path .` from a clone, with full live-process metrics
-via the `sysinfo` backend)
+The Homebrew formula compiles from source via `cargo install`; the
+`sysinfo` backend supplies the same agent metadata as `/proc` minus
+per-process IO bytes and writable-FD enumeration.
 
-### Cargo (any platform with Rust)
-
-```sh
-cargo install agtop                # once published to crates.io
-# or, locally:
-cargo install --path .             # → ~/.cargo/bin/agtop
-```
-
-### npm (wraps the Rust binary)
+### Cargo
 
 ```sh
-npm install -g agtop
+cargo install agtop          # once published to crates.io
+# or, locally from a clone:
+cargo install --path .
 ```
 
-The npm postinstall downloads the prebuilt binary from GitHub Releases
-when available, otherwise falls back to `cargo install agtop`.
+### npm
+
+```sh
+npm install -g @blueprint.xyz/agtop
+```
+
+The package is a thin Node shim that downloads the matching prebuilt
+binary from the GitHub Release for the host platform / arch and places it
+at `vendor/<platform>-<arch>/agtop`. The `agtop` command lands on
+`$PATH` unchanged. If no prebuilt is available the postinstall falls back
+to `cargo install agtop`.
+
+The unscoped name `agtop` was rejected by npm's spam-similarity filter;
+the scoped name `@blueprint.xyz/agtop` is the canonical npm publication.
 
 ### From source
 
@@ -75,154 +91,124 @@ cargo build --release
 
 ---
 
-## Why agtop?
-
-If you run multiple AI coding agents at once — say a Claude Code session
-in `~/code/api`, a Codex CLI session in `~/code/web`, and Aider over in
-`~/scratch` — `top`/`htop` show you 10 nondescript processes called
-`claude`, `node`, `python`. They don't tell you:
-
-- which **project** each agent is working on
-- what **tool / task** each is currently doing
-- how many **tokens** each has consumed
-- which sessions are **busy** vs **waiting** vs **completed**
-- how many **subagents** the parent agent has spawned
-
-agtop reads `/proc` plus each vendor's session transcripts and stitches
-the picture together. It's the missing observability layer for the
-multi-agent workflow.
-
----
-
-## What it looks like
-
-```
-╭ agtop  active 13 · busy 1 · subagents 2 · waiting 4 · done 5 · projects 11 · cpu 17.2% · mem 4.0/132G · tokens 95.2M ─╮
-├ Agents (project-grouped) ─────────────────────────────┬ CPU  32 cores · now 17% · peak 38% · avg 4% ──────────────────┤
-│ ◆ xsol     1 agent · 16% cpu · 626M mem  +1 sub  5.9M tok │ ▁▂▃▄▆█▇▆▄▂▁▂▄▆█████                                          │
-│   ● BUSY  claude   pid 404872  16.3% ████░  626M  4d   │ ● xsol      claude  ████████████  16.3%                      │
-│           Bash: cargo test                             │ ● agtop     claude  ███           3.8%                       │
-│   └ +1 sub: code-reviewer                              │ ○ marinade  claude  ·             0.0%                       │
-│                                                        │ ○ ollama    ollama  ·             0.0%                       │
-│ ◆ agtop    1 agent · 4% cpu · 469M mem                 ├ Memory by agent  4.0G across 13 agents ──────────────────────┤
-│   ● ACTV  claude   pid 3847918  3.8% █░░░  469M  47m   │ ● xsol      claude  ████████████  626M                       │
-│           Edit src/ui.rs                               │ ● blueprint claude  █████████     464M                       │
-│                                                        │ ● marinade  claude  █████████     425M                       │
-│ ◆ audius   1 agent · 0% cpu · 398M mem  40.7M tok      │ agents 4.0G  other 76.6G  free 42.8G / 132G                  │
-│   ○ idle  claude   pid 3064084  0.0% ····  398M  22h   ├ Tokens  total 95.2M  rate 124k/min ──────────────────────────┤
-│           Here's the nvme4 controller failure …       │ ▁▁▂▃▅▇▆▄▂▁▁▂▃▄▅▆▇                                            │
-│                                                        │ ◆ audius    claude  ████████████  40.7M                      │
-│ ◆ marinade 1 agent · 0% cpu · 425M mem  9.9M tok       │ ◆ games     claude  ████████      27.2M                      │
-│   ○ idle  claude   pid 4176380  0.0% ····  425M  10h   │ ◆ marinade  claude  ███           9.9M                       │
-│                                                        ├ Status distribution  13 live agents ─────────────────────────┤
-├ Projects ──────────────┬ Activity ─────────────────────┤   ● BUSY    1 ████░░░░░░░░░░  9%                              │
-│ ● xsol      1  16% ████ │ 23:14:57 ● spawn claude xsol  │   ● ACTV    1 ████░░░░░░░░░░  9%                             │
-│ ● agtop     1   4% █▏   │ 23:13:22 ◌ exit  codex 98271  │   ○ idle   11 ███████████░░░ 85%                             │
-│ ◆ audius    1   0%      │                               ├ Claude sessions — recent tasks ──────────────────────────────┤
-│ ◆ marinade  1   0%      │                               │   ● xsol      End of turn: Subliminal monetization layer …   │
-│ ◆ games     1   0%      │                               │   ○ audius    Here's the nvme4 controller failure snippet …  │
-╰─ q quit · ? help · s sort(smart) · g group(on) · / filter · p pause · r refresh · ↑↓ select ────────────────────────╯
-```
-
-(ASCII approximation — the real thing has rounded borders, RGB pastel
-colors, and per-agent accent chips.)
-
----
-
-## Quick start
+## Usage
 
 ```sh
 agtop                       # full TUI
-agtop --once                # one-shot snapshot, top -b -n 1 style
+agtop --once                # one-shot snapshot, like `top -b -n 1`
 agtop -1 --top 10           # top-10 agents and exit
-agtop --json | jq           # structured JSON for scripts / dashboards
+agtop --json                # snake_case JSON snapshot
+agtop --watch               # one summary line per tick (no TUI, pipes cleanly)
+agtop --watch --threshold-cpu 50 --threshold-tokens-rate 100000
+                            # exits 3 / 4 if a threshold is breached
 agtop --interval 0.5        # half-second refresh
-agtop --filter aider        # only show matching agents
+agtop --filter aider        # only show agents matching label / cmdline / cwd
 agtop --sort tokens         # sort by token consumption
-agtop -m "myagent=python.*my_agent\.py"   # custom matcher
+agtop --prices ~/.config/agtop/prices.toml
+                            # override / extend the built-in price table
+agtop -m "myagent=python.*my_agent\.py"
+                            # add a custom matcher
 ```
 
----
-
-## Features
-
-| Feature                          | Notes                                            |
-| -------------------------------- | ------------------------------------------------ |
-| Live process metrics             | `/proc` walk on Linux, `sysinfo` on macOS / Windows |
-| Project grouping                 | Agents clustered under `cwd` basename (or `<label> <subcommand>` for daemons) |
-| Stable sort                      | Status → project → CPU → RSS → PID               |
-| Status badges                    | BUSY / SPWN / ACTV / idle / WAIT / DONE / stale  |
-| Claude Code session enrichment   | Current tool, task subject, in-flight subagents, model, tokens |
-| OpenAI Codex session enrichment  | Function-call tracking, prompts, completions, model, tokens |
-| Goose session reader             | `~/.config/goose/sessions` + `~/.local/share/goose/sessions` |
-| Aider session reader             | `<cwd>/.aider.chat.history.md` per running aider |
-| Gemini session reader            | `~/.gemini/sessions/*.json`                      |
-| Generic enricher                 | Fallback for cursor, copilot, cody, amp, mods, … |
-| Token usage tracking             | Per-agent, per-project, aggregate, history       |
-| Token rate sparkline             | tokens/min over time, bursts read as spikes      |
-| Cost estimation                  | Built-in price table for Anthropic / OpenAI / Google + `--prices` TOML override |
-| Per-agent CPU sparkline          | Inline 8-cell ▁▂▃▄▅▆▇█ in agent row              |
-| Detail popup                     | Enter on a row → model, cost, exe, cwd, tokens in/out, current tool/task, writing files |
-| Memory-by-agent panel            | RSS bars + 3-segment system gauge                |
-| CPU-by-agent panel               | Sparkline + per-agent bars                       |
-| Status distribution              | htop-style segment bars per status               |
-| Project-aggregated rollup        | "Projects" panel with bar gauge                  |
-| Recent activity log              | Spawn / exit events with timestamps              |
-| TUI with ratatui                 | Rounded borders, pastel palette, smooth charts   |
-| `--once` / `--json` modes        | Pipeable, scriptable                             |
-| `--watch` / threshold alerts     | One summary line per tick; exit codes 3/4 on threshold breach |
-| Custom regex matchers            | `-m label=regex` repeatable, `$AGTOP_MATCH` env  |
-| Static binary, no runtime deps   | ~3 MB stripped                                   |
-| All five distro channels         | Pacman, deb, npm, Homebrew, crates.io            |
-| GitHub Actions CI + Releases     | Build matrix on linux/macOS/windows; auto-release prebuilt binaries on tag |
-
----
-
-## CLI reference
+### CLI flags
 
 ```
 agtop [OPTIONS]
 ```
 
-| Flag                          | Default | Description                                             |
-| ----------------------------- | ------- | ------------------------------------------------------- |
-| `-V`, `--version`             |         | Print version and exit                                  |
-| `-h`, `--help`                |         | Print help and exit                                     |
-| `-1`, `--once`                |         | Print a one-shot snapshot and exit (no TUI)             |
-| `-j`, `--json`                |         | Machine-readable JSON; implies `--once`                 |
-| `-i`, `--interval <SECONDS>`  | `1.5`   | TUI / iteration refresh interval                        |
-| `-n`, `--iterations <COUNT>`  | `1`     | With `--once`, print N snapshots delimited by `---`     |
-| `-f`, `--filter <SUBSTR>`     |         | Only show agents matching label / cmdline / cwd / project |
-| `-s`, `--sort <KEY>`          | `smart` | `smart` \| `cpu` \| `mem` \| `tokens` \| `uptime` \| `agent` |
-| `-m`, `--match <LABEL=REGEX>` |         | Add a custom agent matcher (repeatable)                 |
-| `--no-color`                  |         | Disable ANSI colors in `--once` output                  |
-| `--top <N>`                   | `0`     | With `--once`, only show top N agents (`0` = all)       |
-| `--list-builtins`             |         | Print built-in matcher list and exit                    |
-| `--prices <PATH>`             |         | TOML override file extending the built-in price table   |
-| `--watch`                     |         | Stream one summary line per tick (no TUI, pipes cleanly) |
-| `--threshold-cpu <PERCENT>`   |         | In `--watch`, exit code 3 if aggregate CPU% > N         |
-| `--threshold-tokens-rate <T>` |         | In `--watch`, exit code 4 if tokens/min > N             |
+| Flag                                | Default | Description                                                                         |
+| ----------------------------------- | ------- | ----------------------------------------------------------------------------------- |
+| `-V`, `--version`                   |         | Print version and exit                                                              |
+| `-h`, `--help`                      |         | Print help and exit                                                                 |
+| `-1`, `--once`                      |         | Print a one-shot snapshot and exit (no TUI)                                         |
+| `-j`, `--json`                      |         | Machine-readable JSON; implies `--once`                                             |
+| `-i`, `--interval <SECONDS>`        | `1.5`   | TUI / iteration refresh interval                                                    |
+| `-n`, `--iterations <COUNT>`        | `1`     | With `--once`, print N snapshots delimited by `---`                                 |
+| `-f`, `--filter <SUBSTR>`           |         | Only show agents matching label / cmdline / cwd / project / pid                     |
+| `-s`, `--sort <KEY>`                | `smart` | One of `smart` / `cpu` / `mem` / `tokens` / `uptime` / `agent`                      |
+| `-m`, `--match <LABEL=REGEX>`       |         | Add a custom agent matcher (repeatable, additive to the built-in list)              |
+| `--no-color`                        |         | Disable ANSI colors in `--once` output                                              |
+| `--top <N>`                         | `0`     | With `--once`, only show top N agents (`0` = all)                                   |
+| `--list-builtins`                   |         | Print built-in matcher list and exit                                                |
+| `--prices <PATH>`                   |         | TOML file overriding / extending the built-in model price table                     |
+| `--watch`                           |         | Stream one summary line per tick to stdout (no TUI)                                 |
+| `--threshold-cpu <PERCENT>`         |         | In `--watch`, exit 3 if aggregate CPU% exceeds N                                    |
+| `--threshold-tokens-rate <T>`       |         | In `--watch`, exit 4 if average tokens/min exceeds N                                |
 
 ### TUI keybindings
 
-| Key            | Action                                            |
-| -------------- | ------------------------------------------------- |
-| `q`, `Ctrl-C`  | Quit                                              |
-| `?`, `h`       | Toggle help overlay                               |
-| `p`            | Pause / resume refresh                            |
-| `r`            | Refresh now                                       |
-| `s`            | Cycle sort (`smart` → `cpu` → `mem` → `tokens` → `uptime` → `agent`) |
-| `g`            | Toggle project grouping                           |
-| `/`, `f`       | Filter (Esc to clear)                             |
-| `j` / `k`, ↓/↑ | Move selection (tracks the agent's PID across refreshes) |
-| `Enter`        | Open detail popup for the selected agent          |
-| `Esc`          | Close popup / clear filter / dismiss prompt       |
+| Key                | Action                                                            |
+| ------------------ | ----------------------------------------------------------------- |
+| `q`, `Ctrl-C`      | Quit (or close popup, if open)                                    |
+| `?`, `h`           | Toggle help overlay                                               |
+| `p`                | Pause / resume refresh                                            |
+| `r`                | Refresh now                                                       |
+| `s`                | Cycle sort (`smart` → `cpu` → `mem` → `tokens` → `uptime` → `agent`) |
+| `g`                | Toggle project grouping                                           |
+| `/`, `f`           | Filter by substring                                               |
+| `j` / `k`, ↓ / ↑   | Move selection (tracks the agent's PID across refreshes)          |
+| `Enter`            | Open / close the detail popup for the selected agent              |
+| `Esc`              | Close popup, clear filter, dismiss prompt                         |
 
 ### Environment
 
-| Variable      | Effect                                                          |
-| ------------- | --------------------------------------------------------------- |
-| `AGTOP_MATCH` | Semicolon-separated `label=regex` matchers, additive to builtins |
+| Variable        | Effect                                                                          |
+| --------------- | ------------------------------------------------------------------------------- |
+| `AGTOP_MATCH`   | Semicolon-separated `label=regex` matchers, additive to built-ins               |
+| `AGTOP_PRICES`  | Path to a TOML price-table file; equivalent to `--prices PATH`                  |
+
+---
+
+## What it shows
+
+### Status
+
+Every agent row carries one of seven status tags. The collector blends
+each session reader's verdict with the live process's CPU% so an agent
+mid-generation (transcript not yet flushed) is not reported as `idle`.
+
+| Tag    | Trigger                                                                                   |
+| ------ | ----------------------------------------------------------------------------------------- |
+| BUSY   | Live process **and** transcript written in last 5s, **or** CPU% ≥ 20 (universal override) |
+| SPWN   | Live process with one or more in-flight tool calls (subagents currently running)          |
+| ACTV   | Live process with transcript activity in last 60s, **or** CPU% ≥ 3 (override from idle/stale), **or** CPU% ≥ 1 (override from idle) |
+| idle   | Live process up but quiet for >60s and CPU% below threshold                               |
+| WAIT   | No live process, but session activity in the last 24h                                     |
+| DONE   | Session ended (Claude `stop_reason: end_turn` / `stop_sequence`, Codex `session_end`)     |
+| stale  | None of the above; last activity older than 24h                                           |
+
+### Layout
+
+- **Header bar.** `active`, `busy`, `subagents`, `waiting`, `done`,
+  `projects`, `cpu`, `mem`, `tokens`, `cost` chips. Sort label, group
+  toggle, filter, pause indicator.
+- **Left top — Agents (project-grouped).** Per-project header with
+  totals (agent count, total CPU, total RSS, total subagents, total
+  tokens). Below: agent rows clustered under each header. Each row:
+  status tag · agent label chip · pid · CPU% with a 6-cell mini-bar ·
+  RSS · uptime · `+N sub` chip when subagents are spawned · token count
+  (compact `42k`/`1.2M`) when non-zero · 8-cell inline CPU sparkline ·
+  `DOING` field (current tool, current task subject, or one of
+  `(idle ...)` / `(awaiting input)` / `(session ended)`).
+- **Left bottom — Projects.** Per-project rollup as a horizontal bar
+  list, dominant-status glyph on the left.
+- **Left bottom — Activity.** Recent spawn / exit events with timestamps
+  and per-agent accent colors (most recent first).
+- **Right — CPU.** Single-line braille `Sparkline` of system CPU history,
+  then a per-agent CPU bar list sorted desc.
+- **Right — Memory by agent.** Horizontal bar list of every agent by
+  RSS, plus a 3-segment system memory gauge: `agents | other | free`.
+- **Right — Tokens.** Sparkline of per-tick token deltas (bursts read as
+  spikes) plus a per-agent token bar list.
+- **Right — Status distribution.** Six htop-style segment bars (BUSY,
+  SPWN, ACTV, idle, WAIT, DONE) with count + proportional bar + %.
+- **Right — Sessions.** In-flight Task subagents count + recent task
+  subjects, color-coded by session status.
+- **Footer.** Keybinding cheatsheet.
+- **Detail popup (Enter).** Centered modal for the selected agent: model,
+  cpu + 24-cell sparkline, RSS / VSize, uptime, threads / state / ppid,
+  tokens in/out, estimated cost, subagents count, session id, exe, cwd,
+  full cmdline, current tool, current task, up to 4 writable open files.
 
 ---
 
@@ -231,37 +217,56 @@ agtop [OPTIONS]
 ```mermaid
 flowchart LR
     subgraph Sources["Data sources"]
-        P["/proc/&lt;pid&gt;/{stat,cmdline,cwd,exe,io,fdinfo,fd}"]
+        direction TB
+        P["/proc/&lt;pid&gt;/{stat,cmdline,cwd,exe,io,fdinfo,fd}<br/>(Linux)"]
+        SI["sysinfo crate process scan<br/>(macOS / *BSD / Windows)"]
         CL["~/.claude/projects/&lt;cwd&gt;/&lt;session&gt;.jsonl"]
         CO["~/.codex/sessions/YYYY/MM/DD/&lt;rollout&gt;.jsonl"]
+        GS["~/.config/goose/sessions and<br/>~/.local/share/goose/sessions"]
+        AI["&lt;cwd&gt;/.aider.chat.history.md"]
+        GE["~/.gemini/sessions/&lt;id&gt;.json"]
         FD["/proc/&lt;pid&gt;/fdinfo writable FDs"]
     end
 
     subgraph Vendors["Per-vendor enrichers"]
+        direction TB
         Claude["claude.rs"]
         Codex["codex.rs"]
+        Goose["goose.rs"]
+        Aider["aider.rs"]
+        Gemini["gemini.rs"]
         Generic["generic.rs"]
     end
 
     subgraph Core["Core"]
-        Coll["collector.rs<br/>EWMA smoothing<br/>stable sort<br/>aggregates"]
-        Merge["sessions::merge()"]
+        direction TB
+        Coll["collector.rs<br/>EWMA smoothing<br/>per-pid CPU history<br/>stable sort<br/>aggregates<br/>cost lookup"]
+        Merge["sessions::merge"]
         Snap["Snapshot"]
     end
 
     subgraph Surfaces["Surfaces"]
+        direction TB
         TUI["ratatui TUI<br/>(ui.rs + theme.rs)"]
         Once["--once table"]
-        JSON["--json output"]
+        JSON["--json snapshot"]
+        Watch["--watch + thresholds"]
     end
 
     P --> Coll
+    SI --> Coll
     CL --> Claude
     CO --> Codex
+    GS --> Goose
+    AI --> Aider
+    GE --> Gemini
     FD --> Generic
 
     Claude --> Merge
     Codex --> Merge
+    Goose --> Merge
+    Aider --> Merge
+    Gemini --> Merge
     Generic --> Merge
     Merge --> Coll
     Coll --> Snap
@@ -269,55 +274,51 @@ flowchart LR
     Snap --> TUI
     Snap --> Once
     Snap --> JSON
+    Snap --> Watch
 ```
 
 ### Data flow per tick
 
 ```mermaid
 sequenceDiagram
-    participant U as User
     participant Tui as TUI
     participant C as Collector
-    participant P as /proc
-    participant V as Vendor enrichers
-    Note over Tui,C: every --interval seconds
+    participant P as /proc or sysinfo
+    participant V as 6 vendor enrichers
+    participant Pr as PriceTable
     Tui->>C: snapshot()
-    C->>P: walk /proc, classify with matchers
-    C->>C: EWMA-smooth CPU%, derive_project()
-    C->>V: for each agent, run claude/codex/generic
-    V-->>C: SessionsResult per vendor
-    C->>C: sessions::merge(), apply CPU% override
+    C->>P: list_pids + read stat/cmdline/cwd/io/fdinfo
+    C->>C: classify with builtin + user matchers
+    C->>C: EWMA-smooth CPU%, push per-pid history
+    C->>C: derive_project(cwd, exe, cmdline, label)
+    C->>V: claude / codex / goose / aider / gemini / generic
+    V-->>C: SessionsResult per vendor (model, tokens, current_tool, ...)
+    C->>C: sessions::merge() — first-wins by pid
+    C->>C: apply CPU% override (>=20 BUSY, >=3 ACTV, >=1 ACTV)
+    C->>Pr: cost_usd = price.cost(model, tokens_in, tokens_out)
     C->>C: stable sort + per-project aggregates
     C-->>Tui: Snapshot
-    Tui->>Tui: render header / agents / charts / panels
+    Tui->>Tui: render header / agents / 4 charts / panels / footer
 ```
-
----
-
-## Status legend
-
-| Badge   | Trigger                                                                                |
-| ------- | -------------------------------------------------------------------------------------- |
-| ● BUSY  | Live process **and** transcript written in last 5s, **or** CPU% ≥ 20 (universal override) |
-| ◆ SPWN  | Live process with one or more in-flight tool calls (subagents currently running)       |
-| ● ACTV  | Live process with transcript activity in last 60s, **or** CPU% ≥ 3 (universal override), **or** CPU% ≥ 1 if otherwise idle |
-| ○ idle  | Live process up but quiet for >60s and CPU% below threshold                            |
-| ◌ WAIT  | No live process, but session activity in the last 24h                                  |
-| ✓ DONE  | Session ended (Claude `stop_reason: end_turn`/`stop_sequence`, Codex `session_end`)    |
-| · stale | None of the above — last activity older than 24h                                       |
 
 ---
 
 ## Multi-vendor session enrichment
 
-Each per-vendor module exposes a `summarise(live_agents, now_ms) → SessionsResult`.
-The collector calls all of them and merges via `sessions::merge()`.
+Each vendor module exports
+`summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult`.
+The collector calls all six and merges via `sessions::merge()`; for any
+PID listed by multiple readers, the first one wins. Where a session
+yields a model name, the price table is consulted for cost.
 
-| Module           | Source                                                | Pulls                                                                                                                  |
-| ---------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `src/claude.rs`  | `~/.claude/projects/<encoded-cwd>/<session>.jsonl`    | current `tool_use` name; `TodoWrite` in-progress / `Task` subject / latest assistant prose; in-flight `Task`/`Agent` subagents; `stop_reason`; **token usage** (sum of `input_tokens` + `output_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens`) |
-| `src/codex.rs`   | `~/.codex/sessions/<YYYY>/<MM>/<DD>/<rollout>.jsonl`  | current `function_call` name; last user prompt; last assistant text; in-flight `function_call` (no matching `function_call_output`); **token usage** (`input_tokens` / `prompt_tokens` + `output_tokens` / `completion_tokens` + `input_tokens_details.cached_tokens`). Walks date-partitioned tree, tolerates both nested-`payload` and flat schemas, and the `local_shell_call` / `tool_use` aliases |
-| `src/generic.rs` | `/proc/<pid>/fdinfo` writable FDs                     | most recently modified file the agent has open for write, surfaced as a relative path under cwd in the DOING column. Status from CPU%. Applies to every label without a dedicated module |
+| Module           | Source                                                | Fields populated                                                                                                                                           |
+| ---------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/claude.rs`  | `~/.claude/projects/<encoded-cwd>/<session>.jsonl`    | `current_tool`, `last_task`, `in_flight_tasks` (Task/Agent tool_use IDs without matching tool_result), `stop_reason`, `model`, `tokens_input` (input + cache_read + cache_creation), `tokens_output` |
+| `src/codex.rs`   | `~/.codex/sessions/<YYYY>/<MM>/<DD>/<rollout>.jsonl`  | `current_tool` (function_call name), `last_task` (last user prompt or assistant text), `in_flight_tasks` (function_call without matching function_call_output), `model`, `tokens_input`/`tokens_output`. Tolerates nested-`payload` and flat schemas, plus `local_shell_call` / `tool_use` aliases |
+| `src/goose.rs`   | `~/.config/goose/sessions` + `~/.local/share/goose/sessions` (JSON or JSONL) | `current_tool`, `last_task`, `in_flight_tasks` (tool_request without tool_response), `stop_reason`, `model`, `tokens_input`/`tokens_output` |
+| `src/aider.rs`   | `<cwd>/.aider.chat.history.md` per running aider      | `last_task` (last `>` user block or trailing assistant prose). Aider doesn't write structured token usage to disk; tokens fields stay 0                    |
+| `src/gemini.rs`  | `~/.gemini/sessions/<id>.json`                        | `last_task`, `model`, `tokens_input` (`promptTokenCount`), `tokens_output` (`candidatesTokenCount`)                                                        |
+| `src/generic.rs` | `/proc/<pid>/fdinfo` writable FDs                     | Synthetic session whose `last_task` is the relative path of the most-recently modified file the agent has open for write. Status from CPU%. Applied to every label not handled by a dedicated module |
 
 The collector applies a universal CPU% override on top of vendor verdicts:
 
@@ -325,14 +326,14 @@ The collector applies a universal CPU% override on top of vendor verdicts:
 - CPU% ≥ 3 and current status is `Idle` or `Stale` → `Active`
 - CPU% ≥ 1 and current status is `Idle` → `Active`
 
-So process state always wins over flush-lag in any session reader.
+So process state always overrides flush-lag in the underlying transcript.
 
 ---
 
 ## Built-in agent matchers
 
-20 patterns ship out of the box. `agtop --list-builtins` always prints the
-canonical list:
+20 patterns ship out of the box. `agtop --list-builtins` always prints
+the canonical list:
 
 ```
 claude            (^|[\s/])claude(-code)?(\s|$)
@@ -357,28 +358,54 @@ fabric            (^|[\s/])fabric(\s|$)
 block-goose       (^|[\s/])goose-server
 ```
 
-The word-boundary prefix `(^|[\s/])` catches both bare-binary invocations
-(`/usr/bin/claude`) and module-style ones (`python -m aider`).
+The word-boundary prefix `(^|[\s/])` matches both bare-binary invocations
+(`/usr/bin/claude`) and module-style invocations (`python -m aider`).
+First match wins; user matchers are appended.
 
 ### Custom matchers
 
 ```sh
-# repeatable -m flag
+# Repeatable -m flag
 agtop -m "internal-bot=python.*src/agent\.py" \
       -m "rag-worker=node.*workers/rag\.js"
 
-# or via env so it's always on
+# Or via env
 export AGTOP_MATCH="internal-bot=python.*src/agent\.py;rag-worker=node.*workers/rag\.js"
 ```
 
-Custom matchers are appended to (not replacing) the built-in list.
+---
+
+## Cost estimation
+
+The built-in price table covers the common Anthropic / OpenAI / Google
+SKUs. Lookup is suffix-tolerant: `claude-sonnet-4-7-20260101` resolves to
+`claude-sonnet-4-7`. Override or add models with a TOML file:
+
+```toml
+# ~/.config/agtop/prices.toml — passed via --prices PATH or AGTOP_PRICES env.
+# Values are USD per 1,000,000 tokens.
+
+[models."my-private-model"]
+input_per_mtok  = 0.50
+output_per_mtok = 2.00
+
+[models."claude-opus-4-7"]
+input_per_mtok  = 15.00
+output_per_mtok = 75.00
+```
+
+User-defined entries are merged on top of the built-in table, so a TOML
+file containing only the entries you want to override is sufficient.
+
+`prices.example.toml` in the repo root is a starting point.
 
 ---
 
 ## JSON output
 
-`agtop --json` writes a single JSON object to stdout with `snake_case` field
-names. The shape is stable and the schema below matches the live binary:
+`agtop --json` (or `agtop -1 --json`) writes one JSON object to stdout.
+All field names are `snake_case`; the schema below matches the live
+binary verbatim.
 
 ```json
 {
@@ -392,7 +419,8 @@ names. The shape is stable and the schema below matches the live binary:
     "cpu": 17.2, "mem_bytes": 4257710080,
     "active": 13, "busy": 1, "waiting": 4, "completed": 5,
     "subagents": 2, "project_count": 11,
-    "tokens_total": 95199819, "tokens_input": 94971751, "tokens_output": 228068
+    "tokens_total": 95199819, "tokens_input": 94971751, "tokens_output": 228068,
+    "cost_usd": 1441.68
   },
   "agents": [
     {
@@ -401,6 +429,8 @@ names. The shape is stable and the schema below matches the live binary:
       "current_tool": "Bash", "current_task": "running tests",
       "subagents": 1, "session_id": "abc-123", "session_age_ms": 3200,
       "tokens_total": 5893647, "tokens_input": 5841200, "tokens_output": 52447,
+      "cost_usd": 18.31, "model": "claude-sonnet-4-7-20260101",
+      "cpu_history": [0.0, 1.0, 3.5, 12.4, 16.3],
       "cpu": 16.3, "cpu_raw": 14.8,
       "rss": 626491392, "vsize": 75879088128,
       "threads": 14, "state": "S", "ppid": 1453022, "uptime_sec": 345600,
@@ -415,7 +445,7 @@ names. The shape is stable and the schema below matches the live binary:
   "projects": [
     {
       "project": "xsol", "agents": 1, "cpu": 16.3, "rss": 626491392,
-      "subagents": 1, "tokens_total": 5893647,
+      "subagents": 1, "tokens_total": 5893647, "cost_usd": 18.31,
       "statuses": { "busy": 1 },
       "cwd": "/home/matt/code/xsol"
     }
@@ -426,12 +456,12 @@ names. The shape is stable and the schema below matches the live binary:
     "active": 13, "busy": 1, "waiting": 4, "completed": 5
   },
   "history": {
-    "total":       [/* last 60 ticks */],
-    "active":      [/* ... */],
-    "busy":        [/* ... */],
-    "cpu":         [/* CPU% */],
-    "mem":         [/* MB */],
-    "tokens_rate": [/* tokens added per tick — bursts read as spikes */]
+    "total":       [/* last 60 ticks: total agent count */],
+    "active":      [/* live + waiting count */],
+    "busy":        [/* busy + spawning count */],
+    "cpu":         [/* sum of agent CPU% */],
+    "mem":         [/* sum of agent RSS in MB */],
+    "tokens_rate": [/* tokens added per tick (delta) */]
   },
   "activity": [
     { "t": 1777439481861, "kind": "spawn",
@@ -440,38 +470,42 @@ names. The shape is stable and the schema below matches the live binary:
 }
 ```
 
----
-
-## Comparison
-
-|                                   | `top` / `htop` | `btop`  | `nvtop` | **agtop** |
-| --------------------------------- | :------------: | :-----: | :-----: | :-------: |
-| System processes                  |       ✓        |    ✓    |    ✓    |     —     |
-| GPU                               |       —        |    ✓    |    ✓    |     —     |
-| AI agent detection                |       —        |    —    |    —    |     ✓     |
-| Per-agent project / CWD grouping  |       —        |    —    |    —    |     ✓     |
-| Current tool / task surfaced      |       —        |    —    |    —    |     ✓     |
-| In-flight Task subagent count     |       —        |    —    |    —    |     ✓     |
-| Token usage / rate                |       —        |    —    |    —    |     ✓     |
-| Multi-vendor JSONL transcripts    |       —        |    —    |    —    |     ✓     |
-
-agtop sits *next to* `htop`, not in place of it. Run both.
+`note` is non-null when running off-Linux (sysinfo backend) — explains
+which fields are unavailable in that mode.
 
 ---
 
 ## Platform support
 
-|                          | Live process metrics       | Sessions enrichment | IO bytes / writing-files |
-| ------------------------ | :------------------------: | :-----------------: | :----------------------: |
-| **Linux** (x86_64/arm64) | ✓ (native `/proc`)         |          ✓          |            ✓             |
-| **macOS** (x86_64/arm64) | ✓ (`sysinfo` backend)      |          ✓          |    not implemented       |
-| **Windows** (x86_64)     | ✓ (`sysinfo` backend)      |          ✓          |    not implemented       |
-| ***BSD**                 | ✓ (`sysinfo` backend)      |          ✓          |    not implemented       |
+|                          | Process metrics            | Sessions enrichment | IO bytes | Writable open files |
+| ------------------------ | :------------------------: | :-----------------: | :------: | :-----------------: |
+| Linux (x86_64 / aarch64) | native `/proc`             |          ✓          |    ✓     |          ✓          |
+| macOS (x86_64 / aarch64) | `sysinfo`                  |          ✓          |          |                     |
+| Windows (x86_64)         | `sysinfo`                  |          ✓          |          |                     |
+| *BSD                     | `sysinfo`                  |          ✓          |          |                     |
 
-The Claude session reader is validated against the actual `~/.claude/projects/`
-transcript format. The Codex session reader is implemented against the
-documented OpenAI Codex CLI rollout schema with defensive probing for both
-the nested-`payload` envelope and the flat shape.
+The Claude session reader is validated against the `~/.claude/projects/`
+transcript format on Linux. The Codex reader is implemented against the
+documented OpenAI Codex CLI rollout schema with defensive probing for
+both nested-`payload` and flat shapes; it has not been validated against
+a live Codex install on the maintainer's machine yet. Goose, Aider, and
+Gemini readers are similarly schema-driven and best-effort.
+
+---
+
+## Building from source
+
+```sh
+cargo build                # debug, fast
+cargo test                 # 12 unit tests
+cargo run                  # full TUI
+cargo run -- --once        # snapshot
+cargo run -- --json | jq   # JSON for scripting
+cargo clippy               # lint
+cargo fmt                  # format
+```
+
+Minimum supported Rust version: 1.74.
 
 ---
 
@@ -479,79 +513,61 @@ the nested-`payload` envelope and the flat shape.
 
 ```
 agtop/
-├── Cargo.toml                       (1.0.0, MIT)
-├── src/
-│   ├── main.rs              entrypoint, installs SIGPIPE handler
-│   ├── cli.rs               clap CLI + --once / --json / --watch paths
-│   ├── ui.rs                ratatui TUI (header / agents / 4 charts / panels / detail popup)
-│   ├── theme.rs             pastel palette + per-agent accents
-│   ├── collector.rs         snapshot orchestrator + EWMA smoothing + cost
-│   ├── pricing.rs           model-aware token → $ table (built-in + --prices TOML)
-│   ├── proc_.rs             /proc parser (Linux fast path)
-│   ├── sysbackend.rs        sysinfo-backed cross-platform fallback
-│   ├── claude.rs            Claude Code transcript reader
-│   ├── codex.rs             OpenAI Codex rollout reader
-│   ├── goose.rs             Block goose session reader
-│   ├── aider.rs             aider chat history reader
-│   ├── gemini.rs            Google Gemini CLI session reader
-│   ├── generic.rs           vendor-agnostic fallback
-│   ├── sessions.rs          shared types + merge()
-│   ├── matchers.rs          built-in + user matchers + tests
-│   ├── model.rs             Snapshot / Agent / Session / etc.
-│   └── format.rs            bytes / pct / dur / si / shorten / sparkline / derive_project
+├── Cargo.toml
+├── Cargo.lock
+├── src/                              (18 source files, ~4,553 lines, 12 tests)
+│   ├── main.rs                       entrypoint, installs SIGPIPE handler
+│   ├── cli.rs                        clap CLI + --once / --json / --watch paths
+│   ├── ui.rs                         ratatui TUI (header / agents / 4 charts / panels / detail popup)
+│   ├── theme.rs                      RGB palette + per-agent accents
+│   ├── collector.rs                  snapshot orchestrator + EWMA + cost lookup
+│   ├── pricing.rs                    model-aware token → $ table
+│   ├── proc_.rs                      /proc parser (Linux)
+│   ├── sysbackend.rs                 sysinfo-backed cross-platform fallback
+│   ├── claude.rs                     Claude Code transcript reader
+│   ├── codex.rs                      OpenAI Codex rollout reader
+│   ├── goose.rs                      Block goose session reader
+│   ├── aider.rs                      Aider chat history reader
+│   ├── gemini.rs                     Google Gemini CLI session reader
+│   ├── generic.rs                    vendor-agnostic fallback
+│   ├── sessions.rs                   shared types + merge()
+│   ├── matchers.rs                   built-in + user matchers + 3 tests
+│   ├── model.rs                      Snapshot / Agent / Session / etc.
+│   └── format.rs                     bytes / pct / dur / si / shorten / sparkline / derive_project
+├── prices.example.toml               starter price-override file
 ├── README.md
-├── LICENSE                  MIT
+├── LICENSE                           MIT
+├── CONTRIBUTING.md                   release runbook
+├── homebrew/
+│   ├── agtop.rb                      Homebrew formula
+│   └── README.md
+├── .github/workflows/
+│   ├── ci.yml                        cargo build/test/clippy/fmt on linux/macos/windows
+│   └── release.yml                   tag-triggered prebuilt-binary release
 └── packages/
-    ├── npm/                 → agtop-<v>.tgz
-    ├── deb/                 → agtop_<v>_<arch>.deb
-    └── pacman/              → agtop-<v>-1-<arch>.pkg.tar.zst
+    ├── npm/                          → @blueprint.xyz/agtop-<v>.tgz
+    ├── deb/                          → agtop_<v>_<arch>.deb
+    └── pacman/                       → agtop-<v>-1-<arch>.pkg.tar.zst
 ```
-
-17 Rust source files, ~4,200 lines, 12 unit tests.  Static binary is ~3 MB
-stripped, no runtime dependencies beyond a working terminal.
 
 ---
 
 ## Distribution
 
-agtop ships through every channel listed below.  All channels are wired up
-in the repo; cutting a release is a single `git tag vX.Y.Z && git push --tags`
-which triggers `.github/workflows/release.yml` to build prebuilt binaries
-for Linux x86_64 / Linux aarch64 / macOS x86_64 / macOS aarch64 / Windows
-x86_64 and attach them to the GitHub Release.
+| Channel       | Source of truth                                                            |
+| ------------- | -------------------------------------------------------------------------- |
+| crates.io     | `Cargo.toml` — `cargo publish` (CI does this if `CRATES_IO_TOKEN` is set)  |
+| AUR           | `packages/pacman/PKGBUILD`                                                 |
+| Homebrew tap  | `homebrew/agtop.rb`                                                        |
+| Debian / PPA  | `packages/deb/build.sh`                                                    |
+| npm registry  | `packages/npm/build.sh` (`@blueprint.xyz/agtop`)                           |
+| GitHub        | tagged releases; `release.yml` builds prebuilts for 5 targets              |
 
-| Channel       | Source of truth                                      |
-| ------------- | ---------------------------------------------------- |
-| crates.io     | `cargo publish` (CI does this if `CRATES_IO_TOKEN` set) |
-| AUR           | `packages/pacman/PKGBUILD`                           |
-| Homebrew tap  | `homebrew/agtop.rb`                                  |
-| Debian / PPA  | `packages/deb/build.sh` produces a working `.deb`    |
-| npm registry  | `packages/npm/build.sh` produces a postinstall shim  |
-| GitHub        | tagged releases with prebuilt binaries (CI workflow) |
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the release runbook.
-
----
-
-## Contributing
-
-```sh
-cargo build                # debug, fast
-cargo test                 # 7 unit tests
-cargo run                  # full TUI
-cargo run -- --once        # one-shot snapshot
-cargo run -- --json | jq   # JSON for scripting
-cargo clippy               # lint
-```
-
-When adding a new built-in matcher, edit `src/matchers.rs` and add a
-classification test in the same file's `#[cfg(test)]` block.
-
-When adding a new vendor's session reader, model it on `src/codex.rs` —
-expose a `summarise(live_agents, now_ms) -> SessionsResult` function and
-slot it into `src/collector.rs` alongside the existing calls.
-
-Issues, PRs, and ideas welcome.
+`release.yml` produces prebuilt tarballs for `x86_64-unknown-linux-gnu`,
+`aarch64-unknown-linux-gnu`, `x86_64-apple-darwin`, `aarch64-apple-darwin`,
+and `x86_64-pc-windows-msvc` on every `vX.Y.Z` tag push, attaches them to
+the GitHub Release, and (when `CRATES_IO_TOKEN` is configured) publishes
+the crate. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full runbook.
 
 ---
 
