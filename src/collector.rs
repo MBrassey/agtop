@@ -179,6 +179,7 @@ impl Collector {
                 model: None,
                 dangerous: is_dangerous_invocation(&cmdline),
                 in_flight_subagents: Vec::new(),
+                recent_activity: Vec::new(),
                 cpu_history: Vec::new(),
                 cpu: smoothed,
                 cpu_raw,
@@ -367,6 +368,7 @@ impl Collector {
                 a.tokens_total  = s.tokens_total;
                 a.model = s.model.clone();
                 a.in_flight_subagents = s.in_flight_subagents.clone();
+                a.recent_activity = s.recent_activity.clone();
             } else {
                 a.status = Status::Idle;
             }

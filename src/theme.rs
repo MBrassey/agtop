@@ -12,23 +12,18 @@ pub const FG:         Color = Color::Rgb(225, 222, 215);   // warm off-white
 pub const FG_DIM:     Color = Color::Rgb(165, 170, 178);   // neutral mid-gray (>4.8:1 contrast)
 pub const HL_BG:      Color = Color::Rgb( 50,  85, 120);   // bright slate-cyan for selection (high contrast)
 
-/// Subtle low-saturation background tints used for project grouping.
-/// Same project → same tint; the order in this array is stable so a
-/// given project name always maps to the same swatch via hash.  Tints
-/// are dim enough that text + status colors stay readable.
-pub const GROUP_TINTS: [Color; 6] = [
-    Color::Rgb(20, 26, 34),   // slate-blue
-    Color::Rgb(28, 24, 32),   // plum
-    Color::Rgb(20, 30, 30),   // teal
-    Color::Rgb(30, 28, 22),   // olive
-    Color::Rgb(30, 24, 24),   // rose
-    Color::Rgb(22, 30, 26),   // sage
-];
+/// Two subtle bg tints used to differentiate adjacent project groups.
+/// Same project → same tint within a single render (alternates with the
+/// next group), so the eye reads "this row belongs with that row" without
+/// the rainbow distraction of per-name hashing.  Both tints sit very
+/// close to the terminal's default panel background so the agents panel
+/// matches the rest of the app instead of looking like a darker box.
+pub const GROUP_TINT_A: Color = Color::Rgb(16, 18, 22);   // a hair lighter
+pub const GROUP_TINT_B: Color = Color::Rgb(12, 14, 18);   // a hair darker
 
-pub fn project_tint(name: &str) -> Color {
-    let mut h: u32 = 0;
-    for b in name.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u32); }
-    GROUP_TINTS[(h as usize) % GROUP_TINTS.len()]
+/// Pick the alternating tint for the group at index `i` (0-based).
+pub fn group_tint(i: usize) -> Color {
+    if i % 2 == 0 { GROUP_TINT_A } else { GROUP_TINT_B }
 }
 
 // ── Status accents (soft pastel, still distinguishable) ────────────────────

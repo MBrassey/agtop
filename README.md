@@ -199,21 +199,34 @@ mid-generation (transcript not yet flushed) is not reported as `idle`.
 ### Dangerous-mode detection
 
 Processes invoked with `--dangerously-skip-permissions`, `--no-permissions`,
-`--allow-dangerous`, `--yolo`, or `sudo {claude,codex}` are flagged as
-running with elevated permissions. The TUI renders the **agent label
-itself** with a subtle warning underline + warm amber bold accent — no
-reverse-video, no blink, no bright red cell. The hint is enough to
-register without yelling. The flag is also exposed in `--json` as
-`agents[].dangerous: bool`.
+`--allow-dangerous`, `--yolo`, or `sudo {claude,codex}` are flagged. The
+TUI prefixes the agent row with a single 1-char `▍` left-edge bar in
+warm amber — no underline, no blink, no big red cell. The label keeps
+its normal accent color; the glyph alone carries the warning. The flag
+is also exposed in `--json` as `agents[].dangerous: bool`.
+
+### Detail popup live preview
+
+Pressing **Enter** on an agent opens a centered detail popup that ends
+with a *Live preview* box: the last 6–8 events from the session
+transcript, color-coded by glyph —
+
+- `›` user / assistant prose (FG)
+- `→` tool call (cyan / spawn color)
+- `←` tool result (sage / active color)
+
+The collector tail-reads the JSONL each tick (already does this for
+status detection) and now retains a capped buffer of these readable
+events on `Agent.recent_activity`. Surfaced in `--json` too.
 
 ### Project grouping (visual)
 
-Every agent row picks up a low-saturation background tint hashed off the
-project name. Same project → same tint across ticks, so all rows in a
-cluster (including the project header) share one organised swatch — the
-eye sees groups, not random alternation. Six tints rotate through
-slate-blue / plum / teal / olive / rose / sage; tints are dim enough that
-text + status colors stay readable.
+Adjacent project groups alternate between two very subtle background
+tints — same project shares one tint, the next group flips to the other.
+The deltas are within a few RGB units of the panel's default background,
+so the agents panel stays matched with the rest of the app while still
+marking group boundaries. The same alternation is applied to the
+Projects rollup and Activity log for visual confluence across panels.
 
 ### Layout
 

@@ -338,8 +338,8 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     let agent = app.snap.agents.iter().find(|a| Some(a.pid) == app.selected_pid);
     let Some(a) = agent else { return; };
 
-    let w = 90.min(area.width.saturating_sub(4));
-    let h = 24.min(area.height.saturating_sub(2));
+    let w = 100.min(area.width.saturating_sub(4));
+    let h = 32.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + (area.height.saturating_sub(h)) / 2;
     let r = Rect { x, y, width: w, height: h };
@@ -429,6 +429,27 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(vec![Span::raw("    "),
                 Span::styled(shorten(f, (w as usize).saturating_sub(6)),
                     Style::default().fg(theme::FG_DIM))]));
+        }
+    }
+    // Live preview: a fenced box at the bottom showing the last few
+    // events from the session transcript.  Color-coded by glyph: › prose,
+    // → tool call, ← tool result.
+    if !a.recent_activity.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "  ─ Live preview ".to_string() + &"─".repeat((w as usize).saturating_sub(20)),
+            Style::default().fg(theme::BORDER_DIM))));
+        let cap = ((h as usize).saturating_sub(lines.len() + 3)).min(8);
+        for ev in a.recent_activity.iter().rev().take(cap).rev() {
+            let glyph_col = if ev.starts_with("› ")      { theme::FG }
+                            else if ev.starts_with("→ ") { theme::C_SPAWN }
+                            else if ev.starts_with("← ") { theme::C_ACTIVE }
+                            else                          { theme::FG_DIM };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(shorten(ev, (w as usize).saturating_sub(4)),
+                    Style::default().fg(glyph_col)),
+            ]));
         }
     }
     lines.push(Line::raw(""));
@@ -522,8 +543,8 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
 
     let mut pid_order: Vec<u32> = Vec::new();
     let mut rows: Vec<Row> = Vec::new();
-    // Track which screen row each agent maps to (for mouse hit-testing).
     let mut agent_row_indices: Vec<usize> = Vec::new();
+    let mut group_index: usize = 0;
 
     if app.grouped {
         // Group agents by project, preserving collector ordering.
@@ -572,13 +593,15 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             // Project header inherits the group's tint so the cluster
             // visually belongs together.
             let header_row = Row::new(vec![header_line]).height(1)
-                .style(Style::default().bg(theme::project_tint(&proj)));
+                .style(Style::default().bg(theme::group_tint(group_index)));
             rows.push(header_row);
 
-            // Per-group bg tint: every agent under the same project header
-            // shares the same subtle tint, hashed off project name so it's
-            // stable across ticks.
-            let tint = Some(theme::project_tint(&proj));
+            // Two subtle alternating tints — same project gets one tint,
+            // the next group gets the other.  Subtle enough that the
+            // panel still matches the rest of the app's background;
+            // bright enough to mark group boundaries.
+            let tint = Some(theme::group_tint(group_index));
+            group_index += 1;
             for a in list {
                 pid_order.push(a.pid);
                 agent_row_indices.push(rows.len());
@@ -586,10 +609,15 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             }
         }
     } else {
-        // Ungrouped: each agent gets the tint of its own project so rows
+        // Ungrouped: alternate by project run-length so consecutive rows
         // for the same project still cluster visually.
+        let mut last_proj: Option<&str> = None;
         for a in agents.iter() {
-            let tint = Some(theme::project_tint(&a.project));
+            if last_proj != Some(a.project.as_str()) {
+                group_index += 1;
+                last_proj = Some(a.project.as_str());
+            }
+            let tint = Some(theme::group_tint(group_index));
             pid_order.push(a.pid);
             agent_row_indices.push(rows.len());
             rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint));
@@ -670,19 +698,19 @@ fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratatui::style::
     ));
     spans.push(Span::raw(" "));
 
-    // Agent label.  Dangerous-mode (`--dangerously-skip-permissions`,
-    // `--yolo`, `sudo`, …) gives the label a subtle warning underline +
-    // a warm amber accent — no reverse-video, no blink, no big red cell.
-    // The hint is enough to register without yelling.
-    let label_text = format!("{:<10}", shorten(&a.label, 10));
-    let label_style = if a.dangerous {
-        Style::default()
-            .fg(ratatui::style::Color::Rgb(240, 175, 95))
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    // Dangerous-mode marker: a single ▍ left-edge bar in amber, sized one
+    // visible char.  The label itself stays in its normal accent so the
+    // glyph alone carries the "this row is flagged" semantic.
+    if a.dangerous {
+        spans.push(Span::styled("▍",
+            Style::default().fg(ratatui::style::Color::Rgb(240, 175, 95))
+                .add_modifier(Modifier::BOLD)));
     } else {
-        Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)
-    };
-    spans.push(Span::styled(label_text, label_style));
+        spans.push(Span::raw(" "));
+    }
+    // Agent label — always its normal accent color + bold.
+    spans.push(Span::styled(format!("{:<9}", shorten(&a.label, 9)),
+        Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)));
     spans.push(Span::raw(" "));
 
     // PID
@@ -795,7 +823,8 @@ fn draw_projects(f: &mut Frame, area: Rect, snap: &Snapshot) {
     // status — the most informative single panel about "where is work happening".
     let max_lines = inner.height as usize;
     let mut items: Vec<ListItem> = Vec::new();
-    for p in snap.projects.iter().take(max_lines) {
+    for (i, p) in snap.projects.iter().take(max_lines).enumerate() {
+        let row_bg = theme::group_tint(i);
         let dominant = if *p.statuses.get("busy").unwrap_or(&0) > 0 { Status::Busy }
                        else if *p.statuses.get("spawning").unwrap_or(&0) > 0 { Status::Spawning }
                        else if *p.statuses.get("active").unwrap_or(&0) > 0 { Status::Active }
@@ -820,7 +849,7 @@ fn draw_projects(f: &mut Frame, area: Rect, snap: &Snapshot) {
             spans.push(Span::styled(format!(" +{}", p.subagents),
                                     Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)));
         }
-        items.push(ListItem::new(Line::from(spans)));
+        items.push(ListItem::new(Line::from(spans)).style(Style::default().bg(row_bg)));
     }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled("  (no projects)", Style::default().fg(theme::FG_DIM)))));
@@ -839,7 +868,8 @@ fn draw_activity(f: &mut Frame, area: Rect, snap: &Snapshot) {
     f.render_widget(block, area);
 
     let mut items: Vec<ListItem> = Vec::new();
-    for e in snap.activity.iter().take(inner.height as usize) {
+    for (i, e) in snap.activity.iter().take(inner.height as usize).enumerate() {
+        let row_bg = theme::group_tint(i);
         let secs = e.t / 1000;
         let nd = chrono::DateTime::<chrono::Local>::from(
             std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
@@ -867,7 +897,7 @@ fn draw_activity(f: &mut Frame, area: Rect, snap: &Snapshot) {
             spans.push(Span::styled(format!("  {}", cwd),
                 Style::default().fg(theme::FG)));
         }
-        items.push(ListItem::new(Line::from(spans)));
+        items.push(ListItem::new(Line::from(spans)).style(Style::default().bg(row_bg)));
     }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled("  (no recent events)", Style::default().fg(theme::FG_DIM)))));

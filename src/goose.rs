@@ -212,6 +212,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 current_tool: info.current_tool.as_deref().map(sanitize_control),
                 in_flight_tasks: info.in_flight,
                 in_flight_subagents: Vec::new(),
+                recent_activity: Vec::new(),
                 live_pid,
                 is_most_recent: true,
                 tokens_input: info.tokens_input,

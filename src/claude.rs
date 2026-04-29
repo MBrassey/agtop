@@ -56,9 +56,19 @@ struct AnalysisOut {
     /// In-flight count for ANY tool (Bash, Edit, Read, Write, ...) — used by
     /// the busy-status decision so an agent mid-Bash also reads as busy.
     in_flight_tools: u32,
+    /// Capped, prefix-tagged tail of session activity for the detail popup
+    /// preview.  Each entry already starts with `› `, `→ `, or `← `.
+    recent_activity: Vec<String>,
     tokens_input: u64,
     tokens_output: u64,
     model: Option<String>,
+}
+
+fn push_recent(buf: &mut Vec<String>, line: String) {
+    // Cheap dedup: skip consecutive duplicates so spammy retries don't
+    // overflow the preview window.
+    if buf.last().map(|s| s == &line).unwrap_or(false) { return; }
+    buf.push(line);
 }
 
 fn analyse(records: &[Value]) -> AnalysisOut {
@@ -104,6 +114,22 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                             if !name.is_empty() {
                                 out.last_tool = Some(name.to_string());
                                 out.current_tool = Some(name.to_string());
+                                // Recent-activity preview entry.
+                                let arg_hint = c.get("input").and_then(|i| {
+                                    i.get("command").and_then(|v| v.as_str())
+                                        .or_else(|| i.get("file_path").and_then(|v| v.as_str()))
+                                        .or_else(|| i.get("subject").and_then(|v| v.as_str()))
+                                        .or_else(|| i.get("description").and_then(|v| v.as_str()))
+                                        .or_else(|| i.get("path").and_then(|v| v.as_str()))
+                                }).map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                                  .unwrap_or_default();
+                                let hint: String = arg_hint.chars().take(120).collect();
+                                let line = if hint.is_empty() {
+                                    format!("→ {}", name)
+                                } else {
+                                    format!("→ {}: {}", name, hint)
+                                };
+                                push_recent(&mut out.recent_activity, line);
                             }
                             // Track every tool_use id so we can compute
                             // generic in-flight (Bash/Edit/Read/...) too.
@@ -153,15 +179,35 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                                 completed.insert(id.to_string(), ());
                             }
                             out.current_tool = None;
+                            // Pull a short result preview when present.
+                            let preview = c.get("content").and_then(|v| {
+                                if let Some(s) = v.as_str() { return Some(s.to_string()); }
+                                if let Some(arr) = v.as_array() {
+                                    for x in arr {
+                                        if let Some(s) = x.get("text").and_then(|t| t.as_str()) {
+                                            return Some(s.to_string());
+                                        }
+                                    }
+                                }
+                                None
+                            }).map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                              .unwrap_or_default();
+                            let hint: String = preview.chars().take(120).collect();
+                            let line = if hint.is_empty() {
+                                "← (ok)".to_string()
+                            } else {
+                                format!("← {}", hint)
+                            };
+                            push_recent(&mut out.recent_activity, line);
                         }
                         "text" => {
-                            // Treat assistant prose as a useful "doing" hint, but only if
-                            // this record is the assistant speaking.
                             if r.get("type").and_then(|v| v.as_str()) == Some("assistant") {
                                 if let Some(t) = c.get("text").and_then(|v| v.as_str()) {
                                     let trimmed: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
                                     if !trimmed.is_empty() {
-                                        out.last_task = Some(trimmed.chars().take(120).collect());
+                                        let snippet: String = trimmed.chars().take(120).collect();
+                                        out.last_task = Some(snippet.clone());
+                                        push_recent(&mut out.recent_activity, format!("› {}", snippet));
                                     }
                                 }
                             }
@@ -177,6 +223,11 @@ fn analyse(records: &[Value]) -> AnalysisOut {
         }
     }
 
+    // Keep the activity buffer to the most recent 12 events.
+    if out.recent_activity.len() > 12 {
+        let drop = out.recent_activity.len() - 12;
+        out.recent_activity.drain(0..drop);
+    }
     out.in_flight_tasks = task_use_ids.iter()
         .filter(|id| !completed.contains_key(*id)).count() as u32;
     out.in_flight_subagents = task_use_ids.iter()
@@ -307,6 +358,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 current_tool: info.current_tool.as_deref().map(sanitize_control),
                 in_flight_tasks: info.in_flight_tasks,
                 in_flight_subagents: info.in_flight_subagents.iter()
+                    .map(|s| crate::format::sanitize_control(s)).collect(),
+                recent_activity: info.recent_activity.iter()
                     .map(|s| crate::format::sanitize_control(s)).collect(),
                 live_pid,
                 is_most_recent,

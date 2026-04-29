@@ -58,6 +58,7 @@ pub fn summarise(agents: &[Agent], live_agents: &[LiveAgentRef], _now_ms: u64) -
                 current_tool: None,
                 in_flight_tasks: 0,
                 in_flight_subagents: Vec::new(),
+                recent_activity: Vec::new(),
                 live_pid: Some(a.pid),
                 is_most_recent: true,
                 tokens_input: 0,

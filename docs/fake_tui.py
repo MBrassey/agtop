@@ -207,12 +207,11 @@ def agents_body(width):
         )
         if sub_sum > 0:
             header += f"{SPAWN}  +{sub_sum}{RST}{FG_DIM} sub{RST}"
-        # Per-project bg tint — same project → same tint, hashed off name.
-        TINTS = [(20,26,34),(28,24,32),(20,30,30),(30,28,22),(30,24,24),(22,30,26)]
-        h = 0
-        for b in proj.encode():
-            h = (h * 31 + b) & 0xFFFFFFFF
-        tint = TINTS[h % len(TINTS)]
+        # Two subtle alternating tints — same project gets one tint, the
+        # next group gets the other.  Subtle enough that the panel still
+        # matches the rest of the app's background.
+        proj_idx = sum(1 for h in out if "◆ " in h)  # number of group headers so far
+        tint = (16, 18, 22) if proj_idx % 2 == 0 else (12, 14, 18)
         tint_open  = f"\x1b[48;2;{tint[0]};{tint[1]};{tint[2]}m"
         tint_close = "\x1b[49m"
         out.append(f"{tint_open}{header}{tint_close}")
@@ -235,12 +234,14 @@ def agents_body(width):
             sp = f"{cpu_color(cpu)}{per_agent_spark(cpu)}{RST}"
             doing_col = SPAWN if any(t in doing for t in ("Bash:","Edit:","Task:","Write:")) else FG
             doing_clipped = trunc(doing, max(0, inner - 78))
-            # Dangerous-mode agents: subtle warning underline + warm amber
-            # bold accent on the label.  No reverse-video, no blink.
+            # Dangerous-mode marker: a single ▍ left-edge bar in amber.
+            # The label keeps its normal color/bold; the glyph carries
+            # the "this row is flagged" semantic.
             if dangerous:
-                label_styled = f"\x1b[1m\x1b[4m\x1b[38;2;240;175;95m{label:<10}{RST}"
+                marker = f"\x1b[1m\x1b[38;2;240;175;95m▍{RST}"
+                label_styled = f"{marker}{acc(label)}{BOLD}{label:<9}{RST}"
             else:
-                label_styled = f"{acc(label)}{BOLD}{label:<10}{RST}"
+                label_styled = f" {acc(label)}{BOLD}{label:<9}{RST}"
             line = (
                 f"{zebra_open}   {badge}  "
                 f"{label_styled} "

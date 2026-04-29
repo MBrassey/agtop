@@ -126,6 +126,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             current_tool: None,
             in_flight_tasks: 0,
             in_flight_subagents: Vec::new(),
+            recent_activity: Vec::new(),
             live_pid: pid,
             is_most_recent: true,
             tokens_input: 0, tokens_output: 0, tokens_total: 0,
