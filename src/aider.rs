@@ -42,6 +42,9 @@ fn read_tail(path: &Path, bytes: u64) -> String {
 struct ParsedHistory {
     last_user: Option<String>,
     last_assistant: Option<String>,
+    /// Per-turn activity: last few user prompts and assistant responses,
+    /// oldest → newest.  Each line already prefixed with `›`.
+    recent_activity: Vec<String>,
 }
 
 fn parse_md(text: &str) -> ParsedHistory {
@@ -49,12 +52,17 @@ fn parse_md(text: &str) -> ParsedHistory {
     let mut user_lines: Vec<&str> = Vec::new();
     let mut asst_lines: Vec<&str> = Vec::new();
     let mut in_user = false;
+    let mut all_turns: Vec<(String, String)> = Vec::new();   // (user, assistant)
+    let flush = |u: &mut Vec<&str>, a: &mut Vec<&str>, all: &mut Vec<(String, String)>| {
+        let join = |v: &[&str]| v.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+        let us = join(u); let asx = join(a);
+        if !us.is_empty() || !asx.is_empty() { all.push((us, asx)); }
+        u.clear(); a.clear();
+    };
     for line in text.lines() {
         if line.starts_with("# ") {
-            // Header — reset accumulators on each new turn so we end on the last one.
+            flush(&mut user_lines, &mut asst_lines, &mut all_turns);
             in_user = false;
-            user_lines.clear();
-            asst_lines.clear();
         } else if let Some(rest) = line.strip_prefix("> ") {
             in_user = true;
             user_lines.push(rest);
@@ -64,12 +72,24 @@ fn parse_md(text: &str) -> ParsedHistory {
             asst_lines.push(line);
         }
     }
-    let join = |v: &[&str]| {
-        let s = v.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
-        if s.is_empty() { None } else { Some(s.chars().take(120).collect()) }
-    };
-    out.last_user = join(&user_lines);
-    out.last_assistant = join(&asst_lines);
+    flush(&mut user_lines, &mut asst_lines, &mut all_turns);
+
+    if let Some((u, a)) = all_turns.last() {
+        if !u.is_empty() { out.last_user = Some(u.chars().take(120).collect()); }
+        if !a.is_empty() { out.last_assistant = Some(a.chars().take(120).collect()); }
+    }
+    // Take the last 4 turns (≤8 lines) for the preview tail.
+    let take = all_turns.len().saturating_sub(4);
+    for (u, a) in &all_turns[take..] {
+        if !u.is_empty() {
+            let s: String = u.chars().take(120).collect();
+            out.recent_activity.push(format!("› {}", s));
+        }
+        if !a.is_empty() {
+            let s: String = a.chars().take(120).collect();
+            out.recent_activity.push(format!("› {}", s));
+        }
+    }
     out
 }
 
@@ -126,7 +146,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             current_tool: None,
             in_flight_tasks: 0,
             in_flight_subagents: Vec::new(),
-            recent_activity: Vec::new(),
+            recent_activity: parsed.recent_activity.iter()
+                .map(|s| sanitize_control(s)).collect(),
             live_pid: pid,
             is_most_recent: true,
             tokens_input: 0, tokens_output: 0, tokens_total: 0,

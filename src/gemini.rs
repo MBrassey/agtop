@@ -41,6 +41,7 @@ struct AnalysisOut {
     model: Option<String>,
     tokens_input: u64,
     tokens_output: u64,
+    recent_activity: Vec<String>,
 }
 
 fn analyse(text: &str) -> AnalysisOut {
@@ -57,8 +58,15 @@ fn analyse(text: &str) -> AnalysisOut {
                 .or_else(|| m.get("text").and_then(|x| x.as_str()))
                 .unwrap_or("");
             let normalised: String = content.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
-            if role == "user" { out.last_user = Some(normalised); }
-            else if role == "model" || role == "assistant" { out.last_assistant = Some(normalised); }
+            if !normalised.is_empty() {
+                if role == "user" {
+                    out.last_user = Some(normalised.clone());
+                    out.recent_activity.push(format!("› {}", normalised));
+                } else if role == "model" || role == "assistant" {
+                    out.last_assistant = Some(normalised.clone());
+                    out.recent_activity.push(format!("› {}", normalised));
+                }
+            }
             if let Some(u) = m.get("usage").or_else(|| m.get("usageMetadata")) {
                 out.tokens_input  += u.get("promptTokenCount").and_then(|x| x.as_u64())
                     .or_else(|| u.get("input_tokens").and_then(|x| x.as_u64())).unwrap_or(0);
@@ -66,6 +74,11 @@ fn analyse(text: &str) -> AnalysisOut {
                     .or_else(|| u.get("output_tokens").and_then(|x| x.as_u64())).unwrap_or(0);
             }
         }
+    }
+    // Cap to most recent 12 events.
+    if out.recent_activity.len() > 12 {
+        let drop = out.recent_activity.len() - 12;
+        out.recent_activity.drain(0..drop);
     }
     out
 }
@@ -123,7 +136,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             current_tool: None,
             in_flight_tasks: 0,
             in_flight_subagents: Vec::new(),
-            recent_activity: Vec::new(),
+            recent_activity: info.recent_activity.iter()
+                .map(|s| sanitize_control(s)).collect(),
             live_pid,
             is_most_recent: true,
             tokens_input: info.tokens_input,

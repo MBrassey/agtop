@@ -56,9 +56,13 @@ pub fn summarise(agents: &[Agent], live_agents: &[LiveAgentRef], _now_ms: u64) -
                 last_task,
                 last_tool: None,
                 current_tool: None,
+                // Generic enricher has no transcript; populate the preview
+                // with the writing-files signal so the popup still shows
+                // *something* useful for non-Claude / non-Codex agents.
                 in_flight_tasks: 0,
                 in_flight_subagents: Vec::new(),
-                recent_activity: Vec::new(),
+                recent_activity: a.writing_files.iter().take(6)
+                    .map(|f| format!("→ writing: {}", f)).collect(),
                 live_pid: Some(a.pid),
                 is_most_recent: true,
                 tokens_input: 0,

@@ -433,12 +433,26 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     }
     // Live preview: a fenced box at the bottom showing the last few
     // events from the session transcript.  Color-coded by glyph: › prose,
-    // → tool call, ← tool result.
-    if !a.recent_activity.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "  ─ Live preview ".to_string() + &"─".repeat((w as usize).saturating_sub(20)),
-            Style::default().fg(theme::BORDER_DIM))));
+    // → tool call, ← tool result.  Always rendered so users know whether
+    // the lack-of-content is "no activity" vs. "this agent doesn't ship a
+    // transcript reader".
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  ─ Live preview ".to_string() + &"─".repeat((w as usize).saturating_sub(20)),
+        Style::default().fg(theme::BORDER_DIM))));
+    if a.recent_activity.is_empty() {
+        // Non-Claude/Codex/Goose/Aider/Gemini agents (cursor, copilot,
+        // mods, llm, ollama, custom matchers, ...) don't have a vendor
+        // transcript reader yet, so the buffer is empty.  Be explicit
+        // rather than mysteriously blank.
+        let hint = if a.session_id.is_some() {
+            "  (no recent activity in this session)"
+        } else {
+            "  (no transcript reader for this agent type — see /proc fields above)"
+        };
+        lines.push(Line::from(Span::styled(hint.to_string(),
+            Style::default().fg(theme::FG_DIM))));
+    } else {
         let cap = ((h as usize).saturating_sub(lines.len() + 3)).min(8);
         for ev in a.recent_activity.iter().rev().take(cap).rev() {
             let glyph_col = if ev.starts_with("› ")      { theme::FG }

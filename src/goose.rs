@@ -64,6 +64,13 @@ struct AnalysisOut {
     tokens_output: u64,
     model: Option<String>,
     cwd: Option<String>,
+    recent_activity: Vec<String>,
+}
+
+fn push_recent(buf: &mut Vec<String>, line: String) {
+    if buf.last().map(|s| s == &line).unwrap_or(false) { return; }
+    buf.push(line);
+    if buf.len() > 12 { buf.remove(0); }
 }
 
 fn analyse_jsonl(text: &str) -> AnalysisOut {
@@ -87,11 +94,17 @@ fn analyse_jsonl(text: &str) -> AnalysisOut {
             .unwrap_or("");
         match kind {
             "tool_request" | "tool_use" | "tool_call" | "function_call" => {
-                if let Some(name) = r.get("name").and_then(|v| v.as_str()) {
-                    out.last_tool = Some(name.into());
-                    out.current_tool = Some(name.into());
-                }
+                let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                out.last_tool = Some(name.into());
+                out.current_tool = Some(name.into());
                 if let Some(id) = r.get("id").and_then(|v| v.as_str()) { tool_ids.push(id.into()); }
+                let arg = r.get("arguments").and_then(|v| v.as_str())
+                    .or_else(|| r.get("input").and_then(|i| i.as_str()))
+                    .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default();
+                let hint: String = arg.chars().take(120).collect();
+                let line = if hint.is_empty() { format!("→ {}", name) } else { format!("→ {}: {}", name, hint) };
+                push_recent(&mut out.recent_activity, line);
             }
             "tool_response" | "tool_result" | "function_call_output" => {
                 if let Some(id) = r.get("id").and_then(|v| v.as_str())
@@ -99,15 +112,26 @@ fn analyse_jsonl(text: &str) -> AnalysisOut {
                     completed.insert(id.into(), ());
                 }
                 out.current_tool = None;
+                let preview = r.get("output").and_then(|v| v.as_str())
+                    .or_else(|| r.get("content").and_then(|v| v.as_str()))
+                    .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default();
+                let hint: String = preview.chars().take(120).collect();
+                let line = if hint.is_empty() { "← (ok)".into() } else { format!("← {}", hint) };
+                push_recent(&mut out.recent_activity, line);
             }
             "user" | "human" => {
                 if let Some(t) = r.get("content").and_then(|v| v.as_str()) {
-                    out.last_user = Some(t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect());
+                    let snip: String = t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
+                    out.last_user = Some(snip.clone());
+                    push_recent(&mut out.recent_activity, format!("› {}", snip));
                 }
             }
             "assistant" | "model" => {
                 if let Some(t) = r.get("content").and_then(|v| v.as_str()) {
-                    out.last_assistant = Some(t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect());
+                    let snip: String = t.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
+                    out.last_assistant = Some(snip.clone());
+                    push_recent(&mut out.recent_activity, format!("› {}", snip));
                 }
             }
             "session_end" | "stop" => out.finished = true,
@@ -212,7 +236,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 current_tool: info.current_tool.as_deref().map(sanitize_control),
                 in_flight_tasks: info.in_flight,
                 in_flight_subagents: Vec::new(),
-                recent_activity: Vec::new(),
+                recent_activity: info.recent_activity.iter()
+                    .map(|s| sanitize_control(s)).collect(),
                 live_pid,
                 is_most_recent: true,
                 tokens_input: info.tokens_input,

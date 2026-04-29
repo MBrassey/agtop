@@ -123,6 +123,15 @@ struct AnalysisOut {
     tokens_input: u64,
     tokens_output: u64,
     model: Option<String>,
+    /// Capped, prefix-tagged tail (`›` prose, `→` tool, `←` result) for
+    /// the detail-popup live preview.
+    recent_activity: Vec<String>,
+}
+
+fn push_recent(buf: &mut Vec<String>, line: String) {
+    if buf.last().map(|s| s == &line).unwrap_or(false) { return; }
+    buf.push(line);
+    if buf.len() > 12 { buf.remove(0); }
 }
 
 fn analyse(records: &[Value]) -> AnalysisOut {
@@ -150,6 +159,18 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                         tool_call_ids.push(id.to_string());
                     }
                 }
+                let arg_hint = payload.get("arguments").and_then(|v| v.as_str())
+                    .or_else(|| payload.get("input").and_then(|i|
+                        i.get("command").and_then(|v| v.as_str())
+                            .or_else(|| i.get("file_path").and_then(|v| v.as_str()))
+                            .or_else(|| i.get("subject").and_then(|v| v.as_str()))
+                            .or_else(|| i.get("path").and_then(|v| v.as_str()))))
+                    .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default();
+                let hint: String = arg_hint.chars().take(120).collect();
+                let line = if hint.is_empty() { format!("→ {}", name) }
+                           else { format!("→ {}: {}", name, hint) };
+                push_recent(&mut out.recent_activity, line);
             }
             "function_call_output" | "tool_result" | "local_shell_call_output" => {
                 if let Some(id) = payload.get("call_id").and_then(|v| v.as_str())
@@ -157,15 +178,26 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                     completed.insert(id.to_string());
                 }
                 out.current_tool = None;
+                let preview = payload.get("output").and_then(|v| v.as_str())
+                    .or_else(|| payload.get("content").and_then(|v| v.as_str()))
+                    .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default();
+                let hint: String = preview.chars().take(120).collect();
+                let line = if hint.is_empty() { "← (ok)".to_string() }
+                           else { format!("← {}", hint) };
+                push_recent(&mut out.recent_activity, line);
             }
             "message" | "response" => {
                 let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 let text = extract_text(payload);
                 if !text.is_empty() {
+                    let snippet: String = text.chars().take(120).collect();
                     if role == "user" || role == "human" {
-                        out.last_user_prompt = Some(text.chars().take(120).collect());
+                        out.last_user_prompt = Some(snippet.clone());
+                        push_recent(&mut out.recent_activity, format!("› {}", snippet));
                     } else if role == "assistant" || role == "model" {
-                        out.last_assistant = Some(text.chars().take(120).collect());
+                        out.last_assistant = Some(snippet.clone());
+                        push_recent(&mut out.recent_activity, format!("› {}", snippet));
                     }
                 }
             }
@@ -337,7 +369,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 last_tool:    info.last_tool.as_deref().map(sanitize_control),
                 current_tool: info.current_tool.as_deref().map(sanitize_control),
                 in_flight_subagents: Vec::new(),
-                recent_activity: Vec::new(),
+                recent_activity: info.recent_activity.iter()
+                    .map(|s| sanitize_control(s)).collect(),
                 in_flight_tasks: info.in_flight,
                 live_pid: if is_most_recent { live_pid } else { None },
                 is_most_recent,
