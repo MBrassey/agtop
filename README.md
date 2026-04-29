@@ -17,7 +17,13 @@ estimated cost in a `top`-style TUI.
 
 <br/>
 
-<img src="docs/screenshot.png" alt="agtop one-shot snapshot" width="92%" />
+<img src="docs/screenshot-tui.png" alt="agtop full TUI" width="94%" />
+
+<br/><br/>
+
+<sub>or `agtop --once` for a table snapshot:</sub>
+
+<img src="docs/screenshot.png" alt="agtop one-shot snapshot" width="86%" />
 
 </div>
 
