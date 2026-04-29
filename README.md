@@ -162,8 +162,8 @@ session reader's verdict with the live process's CPU% so an agent mid-generation
 
 ### Layout
 
-- **Header** — totals chip strip, sort label, group toggle, filter, pause indicator
-- **Left top: Agents (grouped by project)** — per-project header with totals (agent count, total CPU, total MEM, in-flight subagents), then the agent rows clustered below. Each row: status badge · agent label chip · pid · CPU% with a 6-cell mini-bar · RSS · uptime · `+N sub` chip when subagents are spawned · "DOING" — current tool, current task subject, or friendly idle/waiting/done label.
+- **Header** — totals chip strip (active · busy · subagents · waiting · done · projects · cpu · mem · tokens), sort label, group toggle, filter, pause indicator
+- **Left top: Agents (grouped by project)** — per-project header with totals (agent count, total CPU, total MEM, in-flight subagents, tokens consumed), then the agent rows clustered below. Each row: status badge · agent label chip · pid · CPU% with a 6-cell mini-bar · RSS · uptime · `+N sub` chip when subagents are spawned · token count (compact `42k`/`1.2M`) when non-zero · "DOING" — current tool, current task subject, or friendly idle/waiting/done label. Daemons without a meaningful cwd (e.g. `ollama serve`) still get a sensible project label derived from `<agent> <subcommand>` rather than a bare `?`.
 - **Left bottom: Projects** — per-project rollup as a horizontal bar list, dominant-status glyph on the left
 - **Left bottom: Activity** — recent spawn/exit events with timestamps and per-agent accent colors
 - **Right top: CPU** — single-line braille `Sparkline` showing system CPU history, then a per-agent CPU bar list sorted desc
@@ -211,8 +211,8 @@ in-flight count, session id) or falls back to the universal CPU% override.
 
 | Module           | Source                                                | Pulls                                                                                                                  |
 | ---------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `src/claude.rs`  | `~/.claude/projects/<encoded-cwd>/<session>.jsonl`    | current `tool_use` name, `TodoWrite` in-progress / `Task` subject / latest assistant prose, in-flight `Task`/`Agent` subagents (count of `tool_use` IDs without matching `tool_result`), `stop_reason` |
-| `src/codex.rs`   | `~/.codex/sessions/<YYYY>/<MM>/<DD>/<rollout>.jsonl`  | current `function_call` name, last user prompt, last assistant text, in-flight `function_call` (no matching `function_call_output`). Walks date-partitioned tree (max depth 4), tolerates both nested `payload` envelope and flat schema, and the `local_shell_call` / `tool_use` aliases |
+| `src/claude.rs`  | `~/.claude/projects/<encoded-cwd>/<session>.jsonl`    | current `tool_use` name, `TodoWrite` in-progress / `Task` subject / latest assistant prose, in-flight `Task`/`Agent` subagents, `stop_reason`, **token usage** (sum of `input_tokens` + `output_tokens` + `cache_read_input_tokens` + `cache_creation_input_tokens` from each assistant message's `usage` block) |
+| `src/codex.rs`   | `~/.codex/sessions/<YYYY>/<MM>/<DD>/<rollout>.jsonl`  | current `function_call` name, last user prompt, last assistant text, in-flight `function_call` (no matching `function_call_output`), **token usage** (`input_tokens` / `prompt_tokens` + `output_tokens` / `completion_tokens` + `input_tokens_details.cached_tokens`). Walks date-partitioned tree (max depth 4), tolerates both nested `payload` envelope and flat schema, and the `local_shell_call` / `tool_use` aliases |
 | `src/generic.rs` | `/proc/<pid>/fdinfo` writable FDs                     | most recently modified file the agent has open for write, surfaced as a relative path under cwd in the DOING column. Status from CPU%. Applies to every label that doesn't have a dedicated module |
 
 The collector then applies a universal CPU% override on top:
@@ -295,7 +295,8 @@ and the schema below matches the live shape:
   "aggregates": {
     "cpu": 17.2, "mem_bytes": 4257710080,
     "active": 13, "busy": 1, "waiting": 4, "completed": 5,
-    "subagents": 2, "project_count": 11
+    "subagents": 2, "project_count": 11,
+    "tokens_total": 95199819, "tokens_input": 94971751, "tokens_output": 228068
   },
   "agents": [
     {
@@ -303,6 +304,7 @@ and the schema below matches the live shape:
       "project": "xsol",
       "current_tool": "Bash", "current_task": "running tests",
       "subagents": 1, "session_id": "abc-123", "session_age_ms": 3200,
+      "tokens_total": 5893647, "tokens_input": 5841200, "tokens_output": 52447,
       "cpu": 16.3, "cpu_raw": 14.8,
       "rss": 626491392, "vsize": 75879088128,
       "threads": 14, "state": "S", "ppid": 1453022, "uptime_sec": 345600,
@@ -317,7 +319,8 @@ and the schema below matches the live shape:
   "projects": [
     {
       "project": "xsol", "agents": 1, "cpu": 16.3, "rss": 626491392,
-      "subagents": 1, "statuses": { "busy": 1 },
+      "subagents": 1, "tokens_total": 5893647,
+      "statuses": { "busy": 1 },
       "cwd": "/home/matt/code/xsol"
     }
   ],
@@ -329,7 +332,8 @@ and the schema below matches the live shape:
         "age_ms": 3200, "status": "busy",
         "stop_reason": null, "last_task": "running tests", "last_tool": "Bash",
         "current_tool": "Bash", "in_flight_tasks": 1,
-        "live_pid": 404872, "is_most_recent": true
+        "live_pid": 404872, "is_most_recent": true,
+        "tokens_total": 5893647, "tokens_input": 5841200, "tokens_output": 52447
       }
     ],
     "recent_tasks": [

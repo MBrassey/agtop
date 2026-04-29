@@ -3,7 +3,7 @@
 
 use crate::sessions::{self, LiveAgentRef};
 use crate::{claude, codex, generic};
-use crate::format::project_basename;
+use crate::format::derive_project;
 use crate::matchers::{builtin, classify, Matcher, UserMatcher};
 use crate::model::{
     ActivityEvent, ActivityKind, Agent, Aggregates, History, ProjectAgg, Snapshot, Status,
@@ -122,7 +122,8 @@ impl Collector {
             let uptime_sec = now_sec.saturating_sub(started_at_sec);
 
             let cwd = cwd_path.to_string_lossy().into_owned();
-            let project = project_basename(&cwd);
+            let exe = exe_path.to_string_lossy().into_owned();
+            let project = derive_project(&cwd, &exe, &cmdline, &label);
             let writing_files: Vec<String> = writing.iter().map(|p| p.to_string_lossy().into_owned()).collect();
             let writing_dirs: Vec<String> = dedupe(
                 writing.iter()
@@ -140,6 +141,9 @@ impl Collector {
                 subagents: 0,
                 session_id: None,
                 session_age_ms: None,
+                tokens_total: 0,
+                tokens_input: 0,
+                tokens_output: 0,
                 cpu: smoothed,
                 cpu_raw,
                 rss: rss_bytes,
@@ -149,7 +153,7 @@ impl Collector {
                 ppid: stat.ppid,
                 uptime_sec,
                 cwd,
-                exe: exe_path.to_string_lossy().into_owned(),
+                exe,
                 cmdline,
                 read_bytes: io.read_bytes,
                 write_bytes: io.write_bytes,
@@ -212,6 +216,9 @@ impl Collector {
                 a.subagents = s.in_flight_tasks;
                 a.session_id = Some(s.id.clone());
                 a.session_age_ms = Some(s.age_ms);
+                a.tokens_input  = s.tokens_input;
+                a.tokens_output = s.tokens_output;
+                a.tokens_total  = s.tokens_total;
             } else {
                 // No vendor-specific or generic enrichment — derive status
                 // from process activity alone.
@@ -249,6 +256,7 @@ impl Collector {
             row.cpu += a.cpu;
             row.rss += a.rss;
             row.subagents += a.subagents;
+            row.tokens_total += a.tokens_total;
             *row.statuses.entry(status_key(a.status)).or_insert(0) += 1;
         }
         let mut projects: Vec<ProjectAgg> = by_proj.into_values().collect();
@@ -262,6 +270,9 @@ impl Collector {
 
         let busy_count = agents.iter().filter(|a| matches!(a.status, Status::Busy | Status::Spawning)).count() as u32;
         let subagents_total: u32 = agents.iter().map(|a| a.subagents).sum();
+        let tokens_input_total:  u64 = agents.iter().map(|a| a.tokens_input).sum();
+        let tokens_output_total: u64 = agents.iter().map(|a| a.tokens_output).sum();
+        let tokens_grand_total = tokens_input_total + tokens_output_total;
 
         push_bounded(&mut self.history_total,  agents.len() as f64, HISTORY);
         push_bounded(&mut self.history_active, agents.len() as f64 + sessions.sessions.waiting as f64, HISTORY);
@@ -286,6 +297,9 @@ impl Collector {
                 completed: sessions.sessions.completed,
                 subagents: subagents_total,
                 project_count,
+                tokens_total:  tokens_grand_total,
+                tokens_input:  tokens_input_total,
+                tokens_output: tokens_output_total,
             },
             agents,
             projects,

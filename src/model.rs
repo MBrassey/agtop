@@ -61,6 +61,10 @@ pub struct Agent {
     pub subagents: u32,
     pub session_id: Option<String>,
     pub session_age_ms: Option<u64>,
+    /// Sum of input + output (+ cache) tokens charged to this agent's session.
+    pub tokens_total: u64,
+    pub tokens_input: u64,
+    pub tokens_output: u64,
     pub cpu: f64,
     pub cpu_raw: f64,
     pub rss: u64,
@@ -85,6 +89,7 @@ pub struct ProjectAgg {
     pub cpu: f64,
     pub rss: u64,
     pub subagents: u32,
+    pub tokens_total: u64,
     pub statuses: HashMap<&'static str, u32>,
     pub cwd: String,
 }
@@ -106,6 +111,9 @@ pub struct Session {
     pub in_flight_tasks: u32,
     pub live_pid: Option<u32>,
     pub is_most_recent: bool,
+    pub tokens_total: u64,
+    pub tokens_input: u64,
+    pub tokens_output: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -153,6 +161,9 @@ pub struct Aggregates {
     pub completed: u32,
     pub subagents: u32,
     pub project_count: u32,
+    pub tokens_total: u64,
+    pub tokens_input: u64,
+    pub tokens_output: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

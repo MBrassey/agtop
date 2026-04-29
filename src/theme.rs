@@ -1,47 +1,45 @@
-// Color palette + per-agent accent colors. Centralised so the TUI keeps one
-// coherent visual identity.
+// Refined pastel + greyscale palette: still colorful enough to read state at
+// a glance, but soft enough to feel professional rather than neon. Every
+// color is RGB so it lands the same on any modern terminal.
 
 use crate::model::Status;
 use ratatui::style::{Color, Modifier, Style};
 
-// Borders, headings, accents — a calm cyan/teal palette with bright accents
-// for state changes that the eye actually needs to catch.
-pub const BORDER: Color = Color::Rgb(89, 178, 215);
-pub const BORDER_DIM: Color = Color::Rgb(42, 90, 110);
-pub const FG: Color = Color::Rgb(220, 224, 232);
-pub const FG_DIM: Color = Color::Rgb(120, 130, 145);
-pub const HL_BG: Color = Color::Rgb(30, 60, 80);
+// ── Structural colors ──────────────────────────────────────────────────────
+pub const BORDER:     Color = Color::Rgb(125, 150, 165);   // soft slate-cyan
+pub const BORDER_DIM: Color = Color::Rgb( 70,  85,  95);   // gentle dim
+pub const FG:         Color = Color::Rgb(225, 222, 215);   // warm off-white
+pub const FG_DIM:     Color = Color::Rgb(140, 140, 140);   // neutral mid-gray
+pub const HL_BG:      Color = Color::Rgb( 40,  45,  55);   // subtle warm dark for selection
 
-// Status accents.
-pub const C_BUSY: Color = Color::Rgb(80, 220, 100);
-pub const C_SPAWN: Color = Color::Rgb(120, 220, 220);
-pub const C_ACTIVE: Color = Color::Rgb(80, 200, 120);
-pub const C_IDLE: Color = Color::Rgb(140, 145, 155);
-pub const C_WAIT: Color = Color::Rgb(240, 200, 90);
-pub const C_DONE: Color = Color::Rgb(200, 130, 220);
-pub const C_STALE: Color = Color::Rgb(110, 110, 120);
+// ── Status accents (soft pastel, still distinguishable) ────────────────────
+pub const C_BUSY:   Color = Color::Rgb(150, 210, 165);     // pastel sage green
+pub const C_SPAWN:  Color = Color::Rgb(165, 215, 210);     // pastel teal
+pub const C_ACTIVE: Color = Color::Rgb(160, 200, 150);     // muted sage
+pub const C_IDLE:   Color = Color::Rgb(155, 155, 155);     // neutral gray
+pub const C_WAIT:   Color = Color::Rgb(225, 195, 140);     // warm peach
+pub const C_DONE:   Color = Color::Rgb(200, 175, 215);     // soft lavender
+pub const C_STALE:  Color = Color::Rgb(110, 105, 108);     // dim gray
 
-// Chart colors — distinct hue for each series, plus a dim "fill" partner for
-// area-style line charts (Bar dataset underneath, bright Braille line on top).
-pub const C_CHART_CPU: Color = Color::Rgb(255, 200, 80);
-pub const C_CHART_CPU_FILL: Color = Color::Rgb(120, 80, 25);
-pub const C_CHART_MEM: Color = Color::Rgb(220, 130, 220);
-pub const C_CHART_MEM_FILL: Color = Color::Rgb(110, 60, 110);
-pub const C_CHART_ACTIVE: Color = Color::Rgb(110, 220, 130);
-pub const C_CHART_BUSY: Color = Color::Rgb(255, 110, 110);
-pub const C_GAUGE_USED: Color = Color::Rgb(110, 220, 130);
-pub const C_GAUGE_AGENT: Color = Color::Rgb(255, 200, 80);
-pub const C_GAUGE_FREE: Color = Color::Rgb(50, 70, 80);
+// ── Chart colors ───────────────────────────────────────────────────────────
+pub const C_CHART_CPU: Color = Color::Rgb(225, 195, 140);  // warm peach
+pub const C_CHART_MEM: Color = Color::Rgb(200, 175, 215);  // soft lavender
+pub const C_CHART_TOK: Color = Color::Rgb(180, 200, 215);  // pastel sky for token streams
+
+// ── System memory gauge segments ───────────────────────────────────────────
+pub const C_GAUGE_USED:  Color = Color::Rgb(160, 200, 150);  // sage
+pub const C_GAUGE_AGENT: Color = Color::Rgb(225, 195, 140);  // peach
+pub const C_GAUGE_FREE:  Color = Color::Rgb( 60,  65,  75);  // slate
 
 pub fn status_color(s: Status) -> Color {
     match s {
-        Status::Busy => C_BUSY,
-        Status::Spawning => C_SPAWN,
-        Status::Active => C_ACTIVE,
-        Status::Idle => C_IDLE,
-        Status::Waiting => C_WAIT,
+        Status::Busy      => C_BUSY,
+        Status::Spawning  => C_SPAWN,
+        Status::Active    => C_ACTIVE,
+        Status::Idle      => C_IDLE,
+        Status::Waiting   => C_WAIT,
         Status::Completed => C_DONE,
-        Status::Stale => C_STALE,
+        Status::Stale     => C_STALE,
     }
 }
 
@@ -57,31 +55,31 @@ pub fn status_style(s: Status) -> Style {
 }
 
 // Per-agent-type accent so rows for the same agent visually cluster.
+// Same pastel discipline as the rest of the palette.
 pub fn agent_color(label: &str) -> Color {
     match label {
-        "claude" | "claude-code" => Color::Rgb(120, 170, 255),
-        "codex" | "openai-codex" => Color::Rgb(110, 220, 130),
-        "aider" => Color::Rgb(240, 130, 130),
-        "cursor-agent" => Color::Rgb(220, 150, 240),
-        "gemini" => Color::Rgb(120, 220, 220),
-        "goose" => Color::Rgb(240, 200, 90),
-        "continue" => Color::Rgb(220, 224, 232),
-        "opencode" => Color::Rgb(220, 130, 220),
-        "copilot" => Color::Rgb(120, 220, 220),
-        "cody" => Color::Rgb(220, 130, 220),
-        "amp" => Color::Rgb(240, 200, 90),
-        "crush" => Color::Rgb(240, 130, 130),
-        "mods" => Color::Rgb(110, 220, 130),
-        "sgpt" => Color::Rgb(120, 170, 255),
-        "llm" => Color::Rgb(120, 220, 220),
-        "ollama" => Color::Rgb(240, 200, 90),
-        "fabric" => Color::Rgb(220, 224, 232),
-        "block-goose" => Color::Rgb(240, 200, 90),
+        "claude" | "claude-code"   => Color::Rgb(160, 180, 215),  // soft blue
+        "codex"  | "openai-codex"  => Color::Rgb(160, 200, 150),  // sage
+        "aider"                    => Color::Rgb(220, 160, 155),  // dusty rose
+        "cursor-agent"             => Color::Rgb(200, 170, 210),  // lavender
+        "gemini"                   => Color::Rgb(165, 215, 210),  // teal
+        "goose" | "block-goose"    => Color::Rgb(225, 195, 140),  // peach
+        "continue"                 => Color::Rgb(225, 222, 215),  // off-white
+        "opencode"                 => Color::Rgb(200, 170, 210),  // lavender
+        "copilot"                  => Color::Rgb(165, 215, 210),  // teal
+        "cody"                     => Color::Rgb(200, 170, 210),  // lavender
+        "amp"                      => Color::Rgb(225, 195, 140),  // peach
+        "crush"                    => Color::Rgb(220, 160, 155),  // dusty rose
+        "mods"                     => Color::Rgb(160, 200, 150),  // sage
+        "sgpt"                     => Color::Rgb(160, 180, 215),  // soft blue
+        "llm"                      => Color::Rgb(165, 215, 210),  // teal
+        "ollama"                   => Color::Rgb(225, 195, 140),  // peach
+        "fabric"                   => Color::Rgb(225, 222, 215),  // off-white
         _ => {
-            // Hash-based stable color from the palette.
+            // Hash-based stable color from the soft palette.
             let palette = [
-                Color::Rgb(120, 220, 220), Color::Rgb(220, 150, 240), Color::Rgb(240, 200, 90),
-                Color::Rgb(240, 130, 130), Color::Rgb(110, 220, 130), Color::Rgb(120, 170, 255),
+                Color::Rgb(165, 215, 210), Color::Rgb(200, 170, 210), Color::Rgb(225, 195, 140),
+                Color::Rgb(220, 160, 155), Color::Rgb(160, 200, 150), Color::Rgb(160, 180, 215),
             ];
             let mut h: u32 = 0;
             for b in label.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u32); }
@@ -91,8 +89,8 @@ pub fn agent_color(label: &str) -> Color {
 }
 
 pub fn cpu_color(v: f64) -> Color {
-    if v >= 50.0 { Color::Rgb(255, 110, 110) }
-    else if v >= 10.0 { Color::Rgb(255, 200, 80) }
-    else if v >= 1.0 { Color::Rgb(110, 220, 130) }
-    else { FG_DIM }
+    if v >= 50.0      { Color::Rgb(220, 160, 155) }   // dusty rose
+    else if v >= 10.0 { Color::Rgb(225, 195, 140) }   // peach
+    else if v >=  1.0 { Color::Rgb(160, 200, 150) }   // sage
+    else              { FG_DIM }
 }

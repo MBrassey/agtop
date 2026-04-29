@@ -58,7 +58,7 @@ fn read_tail(path: &Path, bytes: u64) -> String {
 }
 
 fn read_head(path: &Path, bytes: u64) -> String {
-    let mut f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
+    let f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
     let mut buf = String::with_capacity(bytes as usize);
     let _ = f.take(bytes).read_to_string(&mut buf);
     buf
@@ -119,6 +119,8 @@ struct AnalysisOut {
     in_flight: u32,
     last_ts: u64,
     finished: bool,
+    tokens_input: u64,
+    tokens_output: u64,
 }
 
 fn analyse(records: &[Value]) -> AnalysisOut {
@@ -172,6 +174,28 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                 let ms = dt.timestamp_millis() as u64;
                 if ms > out.last_ts { out.last_ts = ms; }
             }
+        }
+
+        // Token usage — Codex emits a usage block on response.completed and
+        // a few other events. Probe both nested-payload and flat shapes.
+        let usage = payload.get("usage")
+            .or_else(|| r.get("usage"))
+            .or_else(|| payload.get("response").and_then(|r| r.get("usage")));
+        if let Some(u) = usage {
+            // OpenAI uses input_tokens / output_tokens (sometimes prompt_tokens /
+            // completion_tokens on older APIs). Accept either.
+            let it = u.get("input_tokens").and_then(|v| v.as_u64())
+                .or_else(|| u.get("prompt_tokens").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            let ot = u.get("output_tokens").and_then(|v| v.as_u64())
+                .or_else(|| u.get("completion_tokens").and_then(|v| v.as_u64()))
+                .unwrap_or(0);
+            // Cached input bonus, when reported.
+            let cr = u.get("input_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64()).unwrap_or(0);
+            out.tokens_input  += it + cr;
+            out.tokens_output += ot;
         }
     }
 
@@ -300,6 +324,9 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 in_flight_tasks: info.in_flight,
                 live_pid: if is_most_recent { live_pid } else { None },
                 is_most_recent,
+                tokens_input: info.tokens_input,
+                tokens_output: info.tokens_output,
+                tokens_total: info.tokens_input + info.tokens_output,
             };
 
             if is_most_recent {
@@ -339,6 +366,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             stop_reason: None, last_task: None, last_tool: None,
             current_tool: None, in_flight_tasks: 0, live_pid: None,
             is_most_recent: false,
+            tokens_input: 0, tokens_output: 0, tokens_total: 0,
         });
     }
 

@@ -29,6 +29,8 @@ pub fn list_pids() -> Vec<u32> {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // pid + comm are part of the Stat record we may later
+                    // surface in --json or use for ppid-tree analysis.
 pub struct Stat {
     pub pid: u32,
     pub comm: String,

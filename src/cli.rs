@@ -155,10 +155,10 @@ fn run_once(collector: &mut Collector, args: &Args) -> Result<ExitCode> {
 }
 
 fn print_snapshot(snap: &Snapshot, args: &Args) {
-    use crate::format::{bytes, dur, pct, shorten};
+    use crate::format::{bytes, dur, pct, shorten, si};
     let color = !args.no_color;
     println!(
-        "agtop  active={}  busy={}  subagents={}  waiting={}  completed={}  projects={}  cpu={}  mem={}",
+        "agtop  active={}  busy={}  subagents={}  waiting={}  completed={}  projects={}  cpu={}  mem={}  tokens={}",
         snap.aggregates.active,
         snap.aggregates.busy,
         snap.aggregates.subagents,
@@ -167,10 +167,11 @@ fn print_snapshot(snap: &Snapshot, args: &Args) {
         snap.aggregates.project_count,
         pct(snap.aggregates.cpu),
         bytes(snap.aggregates.mem_bytes),
+        si(snap.aggregates.tokens_total),
     );
     println!(
         "{}",
-        bold("STATUS   AGENT          PID    CPU%      MEM       UP  SUB  PROJECT         DOING", color)
+        bold("STATUS   AGENT          PID    CPU%      MEM       UP  SUB   TOK  PROJECT         DOING", color)
     );
     let take = if args.top > 0 { args.top as usize } else { snap.agents.len() };
     for a in snap.agents.iter().take(take) {
@@ -181,9 +182,14 @@ fn print_snapshot(snap: &Snapshot, args: &Args) {
         } else {
             "  -".to_string()
         };
+        let tok = if a.tokens_total > 0 {
+            paint(&si(a.tokens_total), Color::Cyan, color)
+        } else {
+            "-".to_string()
+        };
         let doing = describe_doing(a);
         println!(
-            "{:<8} {:<12} {:>7} {:>6} {:>8} {:>8} {:>4}  {:<14}  {}",
+            "{:<8} {:<12} {:>7} {:>6} {:>8} {:>8} {:>4} {:>5}  {:<14}  {}",
             badge,
             a.label,
             a.pid,
@@ -191,6 +197,7 @@ fn print_snapshot(snap: &Snapshot, args: &Args) {
             bytes(a.rss),
             dur(a.uptime_sec),
             sub,
+            tok,
             shorten(&a.project, 14),
             shorten(&doing, 80),
         );
@@ -218,14 +225,13 @@ fn describe_doing(a: &crate::model::Agent) -> String {
 }
 
 #[derive(Copy, Clone)]
-enum Color { Green, Yellow, Cyan, Magenta, Red, Gray }
+enum Color { Green, Yellow, Cyan, Magenta, Gray }
 fn esc(c: Color) -> &'static str {
     match c {
         Color::Green   => "\x1b[32m",
         Color::Yellow  => "\x1b[33m",
         Color::Cyan    => "\x1b[36m",
         Color::Magenta => "\x1b[35m",
-        Color::Red     => "\x1b[31m",
         Color::Gray    => "\x1b[2m",
     }
 }

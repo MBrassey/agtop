@@ -15,7 +15,7 @@
 
 use crate::cli::Args;
 use crate::collector::Collector;
-use crate::format::{bytes, dur, pct, project_basename, shorten};
+use crate::format::{bytes, dur, pct, project_basename, shorten, si};
 use crate::model::{ActivityKind, Agent, Snapshot, Status};
 use crate::theme;
 
@@ -276,6 +276,9 @@ fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App) {
     chip("cpu",       pct(a.cpu),              theme::C_CHART_CPU);
     chip("mem",       format!("{}/{}", bytes(mem_used), bytes(snap.mem_total)),
                                                theme::C_CHART_MEM);
+    if a.tokens_total > 0 {
+        chip("tokens", si(a.tokens_total),     theme::C_CHART_TOK);
+    }
     spans.push(Span::styled(format!(" sort:{}  group:{}  ", app.sort.label(), if app.grouped {"on"} else {"off"}),
                             Style::default().fg(theme::FG_DIM)));
     if !app.filter.is_empty() {
@@ -350,7 +353,7 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             let total_cpu: f64 = list.iter().map(|a| a.cpu).sum();
             let total_mem: u64 = list.iter().map(|a| a.rss).sum();
             let total_sub: u32 = list.iter().map(|a| a.subagents).sum();
-            // Project header row.
+            let total_tok: u64 = list.iter().map(|a| a.tokens_total).sum();
             let mut header_spans: Vec<Span> = Vec::new();
             header_spans.push(Span::styled("◆ ", Style::default().fg(theme::BORDER)));
             header_spans.push(Span::styled(proj.clone(),
@@ -365,8 +368,12 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             if total_sub > 0 {
                 header_spans.push(Span::styled(format!("  +{}", total_sub),
                     Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)));
-                header_spans.push(Span::styled(" sub",
-                    Style::default().fg(theme::FG_DIM)));
+                header_spans.push(Span::styled(" sub", Style::default().fg(theme::FG_DIM)));
+            }
+            if total_tok > 0 {
+                header_spans.push(Span::styled(format!("  {}", si(total_tok)),
+                    Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)));
+                header_spans.push(Span::styled(" tok", Style::default().fg(theme::FG_DIM)));
             }
             let header_line = Line::from(header_spans);
             rows.push(Row::new(vec![header_line]).height(1));
@@ -438,6 +445,12 @@ fn agent_row<'a>(a: &'a Agent, selected: bool) -> Row<'a> {
         spans.push(Span::styled(" sub", Style::default().fg(theme::FG_DIM)));
     } else {
         spans.push(Span::raw("       "));
+    }
+    // Token chip — compact, only when non-zero, kept short with si().
+    if a.tokens_total > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(si(a.tokens_total),
+                                Style::default().fg(theme::C_CHART_TOK)));
     }
     spans.push(Span::raw("  "));
     // Doing
@@ -717,7 +730,7 @@ fn draw_memory_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
             Style::default().fg(theme::agent_color(&a.label))));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(bar_full,  Style::default().fg(theme::C_CHART_MEM).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(bar_empty, Style::default().fg(theme::C_CHART_MEM_FILL)));
+        spans.push(Span::styled(bar_empty, Style::default().fg(theme::BORDER_DIM)));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(format!("{:>7}", bytes(a.rss)),
             Style::default().fg(theme::C_CHART_MEM)));

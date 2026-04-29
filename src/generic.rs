@@ -59,6 +59,9 @@ pub fn summarise(agents: &[Agent], live_agents: &[LiveAgentRef], _now_ms: u64) -
                 in_flight_tasks: 0,
                 live_pid: Some(a.pid),
                 is_most_recent: true,
+                tokens_input: 0,
+                tokens_output: 0,
+                tokens_total: 0,
             });
         }
     }

@@ -47,6 +47,8 @@ struct AnalysisOut {
     last_tool: Option<String>,
     current_tool: Option<String>,
     in_flight_tasks: u32,
+    tokens_input: u64,
+    tokens_output: u64,
 }
 
 fn analyse(records: &[Value]) -> AnalysisOut {
@@ -59,6 +61,18 @@ fn analyse(records: &[Value]) -> AnalysisOut {
             out.stop_reason = Some(sr.to_string());
         } else if let Some(sr) = r.get("message").and_then(|m| m.get("stop_reason")).and_then(|v| v.as_str()) {
             out.stop_reason = Some(sr.to_string());
+        }
+
+        // Token usage — Claude attaches a usage block to each assistant
+        // message. Sum across the whole transcript.
+        if let Some(usage) = r.get("message").and_then(|m| m.get("usage")) {
+            let it = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ot = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            // Cache-read counts as charged input under most pricing schemes.
+            let cr = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let cc = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            out.tokens_input  += it + cr + cc;
+            out.tokens_output += ot;
         }
 
         let content_holder = r.get("message").and_then(|m| m.get("content")).cloned()
@@ -251,6 +265,9 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 in_flight_tasks: info.in_flight_tasks,
                 live_pid,
                 is_most_recent,
+                tokens_input: info.tokens_input,
+                tokens_output: info.tokens_output,
+                tokens_total: info.tokens_input + info.tokens_output,
             };
 
             if let Some(pid) = live_pid {
