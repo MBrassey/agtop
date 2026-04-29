@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build
+        run: cargo build --release --locked
+      - name: cargo test
+        run: cargo test --release --locked
+      - name: cargo clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+        continue-on-error: true
+      - name: --version smoke
+        run: ./target/release/agtop${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+        shell: bash
+      - name: --list-builtins smoke
+        run: ./target/release/agtop${{ matrix.os == 'windows-latest' && '.exe' || '' }} --list-builtins
+        shell: bash
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt }
+      - run: cargo fmt --all -- --check
+        continue-on-error: true

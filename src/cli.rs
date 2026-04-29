@@ -27,6 +27,7 @@ KEY BINDINGS (TUI):
   g           toggle project grouping
   /           filter by substring (Esc to clear)
   j/k, ↓/↑    move selection
+  Enter       open / close the detail popup for the selected agent
 
 ENVIRONMENT:
   AGTOP_MATCH   semicolon-separated `label=regex` matchers
@@ -38,7 +39,11 @@ EXAMPLES:
   agtop -1 --top 10           # top-10 active agents and exit
   agtop --json | jq           # machine-readable JSON for scripting
   agtop --interval 0.5        # half-second refresh
-  agtop -m \"myagent=python.*my_agent\\.py\"   # custom matcher
+  agtop --sort tokens         # sort by token consumption (descending)
+  agtop --watch               # one summary line per tick (CI-friendly)
+  agtop --watch --threshold-tokens-rate 100000   # alert if >100k tok/min
+  agtop --prices ~/.config/agtop/prices.toml     # custom model prices
+  agtop -m \"myagent=python.*my_agent\\.py\"        # custom matcher
 ";
 
 #[derive(Parser, Debug)]
@@ -90,6 +95,23 @@ pub struct Args {
     /// Print the built-in agent matcher list and exit.
     #[arg(long)]
     pub list_builtins: bool,
+
+    /// TOML file overriding / extending the built-in model price table.
+    #[arg(long, value_name = "PATH")]
+    pub prices: Option<std::path::PathBuf>,
+
+    /// Print one summary line per tick to stdout (no TUI). Pipes cleanly.
+    #[arg(long)]
+    pub watch: bool,
+
+    /// In --watch mode, exit with code 3 if aggregate CPU% goes above N.
+    #[arg(long, value_name = "PERCENT")]
+    pub threshold_cpu: Option<f64>,
+
+    /// In --watch mode, exit with code 4 if average token rate (tokens/min)
+    /// exceeds N.  Useful for "alert me if I'm burning >100k tok/min".
+    #[arg(long, value_name = "TOK_PER_MIN")]
+    pub threshold_tokens_rate: Option<f64>,
 }
 
 pub fn run() -> Result<ExitCode> {
@@ -113,8 +135,20 @@ pub fn run() -> Result<ExitCode> {
     }
     let user = matchers::parse_user_matchers(&user_extra);
 
-    let mut collector = Collector::new(user);
+    let mut pricing = crate::pricing::PriceTable::builtin();
+    let prices_path = args.prices.clone()
+        .or_else(|| std::env::var("AGTOP_PRICES").ok().map(std::path::PathBuf::from));
+    if let Some(p) = prices_path {
+        match crate::pricing::PriceTable::load(&p) {
+            Ok(t) => pricing = pricing.merge(t),
+            Err(e) => eprintln!("agtop: --prices {}: {e:#}", p.display()),
+        }
+    }
+    let mut collector = Collector::new(user, pricing);
 
+    if args.watch {
+        return run_watch(&mut collector, &args);
+    }
     if args.once || args.json {
         return run_once(&mut collector, &args);
     }
@@ -152,6 +186,48 @@ fn run_once(collector: &mut Collector, args: &Args) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn run_watch(collector: &mut Collector, args: &Args) -> Result<ExitCode> {
+    let interval = std::time::Duration::from_millis((args.interval.max(0.1) * 1000.0) as u64);
+    use crate::format::{bytes, pct, si};
+    // Warm-up sample.
+    let _ = collector.snapshot();
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    loop {
+        let snap = collector.snapshot();
+        let a = &snap.aggregates;
+        // Average token rate over the last 20 ticks → tokens/min.
+        let recent: Vec<f64> = snap.history.tokens_rate.iter().rev().take(20).copied().collect();
+        let rate_per_tick = if !recent.is_empty() {
+            recent.iter().sum::<f64>() / recent.len() as f64
+        } else { 0.0 };
+        let rate_per_min = rate_per_tick * 60.0 / args.interval.max(0.1);
+        let cost = if a.cost_usd > 0.0 { format!("  cost {}", crate::pricing::format_cost(a.cost_usd)) } else { String::new() };
+        println!(
+            "{}  active={}  busy={}  cpu={}  mem={}  tokens={}  tok/min={}{}",
+            chrono::Local::now().format("%H:%M:%S"),
+            a.active, a.busy,
+            pct(a.cpu), bytes(a.mem_bytes),
+            si(a.tokens_total), si(rate_per_min as u64),
+            cost,
+        );
+        // Threshold checks.
+        if let Some(t) = args.threshold_cpu {
+            if a.cpu > t {
+                eprintln!("agtop: cpu {} > threshold {}", pct(a.cpu), pct(t));
+                return Ok(ExitCode::from(3));
+            }
+        }
+        if let Some(t) = args.threshold_tokens_rate {
+            if rate_per_min > t {
+                eprintln!("agtop: token rate {}/min > threshold {}/min",
+                    si(rate_per_min as u64), si(t as u64));
+                return Ok(ExitCode::from(4));
+            }
+        }
+        std::thread::sleep(interval);
+    }
 }
 
 fn print_snapshot(snap: &Snapshot, args: &Args) {

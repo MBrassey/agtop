@@ -2,16 +2,21 @@
 //
 // `cargo run` for the TUI; `cargo run -- --once` for a one-shot snapshot.
 
+mod aider;
 mod cli;
 mod claude;
 mod codex;
 mod collector;
 mod format;
+mod gemini;
 mod generic;
+mod goose;
 mod matchers;
 mod model;
+mod pricing;
 mod proc_;
 mod sessions;
+mod sysbackend;
 mod theme;
 mod ui;
 

@@ -49,6 +49,7 @@ struct AnalysisOut {
     in_flight_tasks: u32,
     tokens_input: u64,
     tokens_output: u64,
+    model: Option<String>,
 }
 
 fn analyse(records: &[Value]) -> AnalysisOut {
@@ -73,6 +74,11 @@ fn analyse(records: &[Value]) -> AnalysisOut {
             let cc = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             out.tokens_input  += it + cr + cc;
             out.tokens_output += ot;
+        }
+
+        // Model — most recent assistant message wins.
+        if let Some(m) = r.get("message").and_then(|m| m.get("model")).and_then(|v| v.as_str()) {
+            out.model = Some(m.to_string());
         }
 
         let content_holder = r.get("message").and_then(|m| m.get("content")).cloned()
@@ -268,6 +274,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 tokens_input: info.tokens_input,
                 tokens_output: info.tokens_output,
                 tokens_total: info.tokens_input + info.tokens_output,
+                cost_usd: 0.0,   // collector fills this in using the price table
+                model: info.model.clone(),
             };
 
             if let Some(pid) = live_pid {

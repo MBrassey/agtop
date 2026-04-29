@@ -121,6 +121,7 @@ struct AnalysisOut {
     finished: bool,
     tokens_input: u64,
     tokens_output: u64,
+    model: Option<String>,
 }
 
 fn analyse(records: &[Value]) -> AnalysisOut {
@@ -196,6 +197,14 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                 .and_then(|v| v.as_u64()).unwrap_or(0);
             out.tokens_input  += it + cr;
             out.tokens_output += ot;
+        }
+
+        // Model — try every place codex might mention it.
+        let model_str = payload.get("model").and_then(|v| v.as_str())
+            .or_else(|| r.get("model").and_then(|v| v.as_str()))
+            .or_else(|| payload.get("response").and_then(|r| r.get("model")).and_then(|v| v.as_str()));
+        if let Some(m) = model_str {
+            out.model = Some(m.to_string());
         }
     }
 
@@ -327,6 +336,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 tokens_input: info.tokens_input,
                 tokens_output: info.tokens_output,
                 tokens_total: info.tokens_input + info.tokens_output,
+                cost_usd: 0.0,
+                model: info.model.clone(),
             };
 
             if is_most_recent {
@@ -367,6 +378,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             current_tool: None, in_flight_tasks: 0, live_pid: None,
             is_most_recent: false,
             tokens_input: 0, tokens_output: 0, tokens_total: 0,
+            cost_usd: 0.0, model: None,
         });
     }
 

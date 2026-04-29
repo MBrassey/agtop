@@ -2,8 +2,10 @@
 // Holds smoothing state across snapshots so the TUI doesn't jitter.
 
 use crate::sessions::{self, LiveAgentRef};
-use crate::{claude, codex, generic};
+use crate::{aider, claude, codex, gemini, generic, goose};
 use crate::format::derive_project;
+use crate::pricing::PriceTable;
+use crate::sysbackend::SysBackend;
 use crate::matchers::{builtin, classify, Matcher, UserMatcher};
 use crate::model::{
     ActivityEvent, ActivityKind, Agent, Aggregates, History, ProjectAgg, Snapshot, Status,
@@ -23,6 +25,8 @@ pub struct Collector {
     prev: HashMap<u32, PrevCpu>,
     prev_total: u64,
     cpu_smooth: HashMap<u32, f64>,
+    /// Per-pid CPU% history for the inline sparkline column.
+    agent_cpu_hist: HashMap<u32, VecDeque<f64>>,
     boot_time: u64,
     num_cpus: usize,
     known_pids: HashMap<u32, String>,
@@ -34,22 +38,29 @@ pub struct Collector {
     history_mem:          VecDeque<f64>,
     history_tokens_rate:  VecDeque<f64>,
     prev_tokens_total:    u64,
+    pricing: PriceTable,
+    sys: Option<SysBackend>,
 }
+
+const PER_AGENT_HISTORY: usize = 24;
 
 struct PrevCpu {
     total: u64,
 }
 
 impl Collector {
-    pub fn new(user: Vec<UserMatcher>) -> Self {
+    pub fn new(user: Vec<UserMatcher>, pricing: PriceTable) -> Self {
+        let sys = if proc_::is_linux() { None } else { Some(SysBackend::new()) };
+        let num_cpus = sys.as_ref().map(|s| s.num_cpus()).unwrap_or_else(proc_::num_cpus);
         Self {
             builtins: builtin(),
             user,
             prev: HashMap::new(),
             prev_total: 0,
             cpu_smooth: HashMap::new(),
+            agent_cpu_hist: HashMap::new(),
             boot_time: proc_::read_boot_time(),
-            num_cpus: proc_::num_cpus(),
+            num_cpus,
             known_pids: HashMap::new(),
             activity: VecDeque::with_capacity(MAX_ACTIVITY),
             history_total:        VecDeque::with_capacity(HISTORY),
@@ -59,6 +70,8 @@ impl Collector {
             history_mem:          VecDeque::with_capacity(HISTORY),
             history_tokens_rate:  VecDeque::with_capacity(HISTORY),
             prev_tokens_total:    0,
+            pricing,
+            sys,
         }
     }
 
@@ -66,19 +79,7 @@ impl Collector {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
 
         if !proc_::is_linux() {
-            let merged = sessions::merge(vec![
-                claude::summarise(&[], now),
-                codex::summarise(&[], now),
-            ]);
-            let mut snap = Snapshot::default();
-            snap.now = now;
-            snap.platform = std::env::consts::OS.to_string();
-            snap.note = Some("Live process metrics require Linux /proc — running in session-readers-only mode.".into());
-            snap.sys_cpus = self.num_cpus as u32;
-            snap.aggregates.waiting = merged.sessions.waiting;
-            snap.aggregates.completed = merged.sessions.completed;
-            snap.sessions = merged.sessions;
-            return snap;
+            return self.snapshot_via_sysinfo(now);
         }
 
         let total_cpu = proc_::read_system_cpu_total();
@@ -148,6 +149,9 @@ impl Collector {
                 tokens_total: 0,
                 tokens_input: 0,
                 tokens_output: 0,
+                cost_usd: 0.0,
+                model: None,
+                cpu_history: Vec::new(),
                 cpu: smoothed,
                 cpu_raw,
                 rss: rss_bytes,
@@ -169,6 +173,9 @@ impl Collector {
             agg_mem += rss_bytes;
             agents.push(agent);
         }
+
+        // Update per-agent CPU history & attach a copy onto the agent struct.
+        self.refresh_agent_cpu_history(&mut agents);
 
         // Spawn / exit events.
         let live_pids: std::collections::HashSet<u32> = agents.iter().map(|a| a.pid).collect();
@@ -203,41 +210,7 @@ impl Collector {
 
         self.prev_total = total_cpu;
 
-        // Per-vendor session enrichment + generic fallback for everyone else.
-        let live_refs: Vec<LiveAgentRef> = agents.iter()
-            .map(|a| LiveAgentRef { pid: a.pid, cwd: a.cwd.as_str(), label: a.label.as_str() })
-            .collect();
-        let claude_r  = claude::summarise(&live_refs, now);
-        let codex_r   = codex::summarise(&live_refs, now);
-        let generic_r = generic::summarise(&agents, &live_refs, now);
-        let merged = sessions::merge(vec![claude_r, codex_r, generic_r]);
-
-        for a in &mut agents {
-            if let Some(s) = merged.by_pid.get(&a.pid) {
-                a.status = s.status;
-                a.current_tool = s.current_tool.clone();
-                a.current_task = s.last_task.clone();
-                a.subagents = s.in_flight_tasks;
-                a.session_id = Some(s.id.clone());
-                a.session_age_ms = Some(s.age_ms);
-                a.tokens_input  = s.tokens_input;
-                a.tokens_output = s.tokens_output;
-                a.tokens_total  = s.tokens_total;
-            } else {
-                // No vendor-specific or generic enrichment — derive status
-                // from process activity alone.
-                a.status = Status::Idle;
-            }
-            // Universal CPU% override — process state always wins over any
-            // flush-lag in the underlying session transcript.
-            if a.cpu >= 20.0 { a.status = Status::Busy; }
-            else if a.cpu >= 3.0 && matches!(a.status, Status::Idle | Status::Stale) {
-                a.status = Status::Active;
-            } else if a.cpu >= 1.0 && a.status == Status::Idle {
-                a.status = Status::Active;
-            }
-        }
-        let sessions = merged;
+        let sessions = self.enrich_and_score(&mut agents, now);
 
         // Stable sort: status > project > cpu > rss > pid.
         agents.sort_by(|a, b| {
@@ -261,6 +234,7 @@ impl Collector {
             row.rss += a.rss;
             row.subagents += a.subagents;
             row.tokens_total += a.tokens_total;
+            row.cost_usd += a.cost_usd;
             *row.statuses.entry(status_key(a.status)).or_insert(0) += 1;
         }
         let mut projects: Vec<ProjectAgg> = by_proj.into_values().collect();
@@ -277,9 +251,10 @@ impl Collector {
         let tokens_input_total:  u64 = agents.iter().map(|a| a.tokens_input).sum();
         let tokens_output_total: u64 = agents.iter().map(|a| a.tokens_output).sum();
         let tokens_grand_total = tokens_input_total + tokens_output_total;
+        let cost_grand_total: f64 = agents.iter().map(|a| a.cost_usd).sum();
 
         push_bounded(&mut self.history_total,  agents.len() as f64, HISTORY);
-        push_bounded(&mut self.history_active, agents.len() as f64 + sessions.sessions.waiting as f64, HISTORY);
+        push_bounded(&mut self.history_active, agents.len() as f64 + sessions.waiting as f64, HISTORY);
         push_bounded(&mut self.history_busy,   busy_count as f64, HISTORY);
         push_bounded(&mut self.history_cpu,    (agg_cpu * 10.0).round() / 10.0, HISTORY);
         push_bounded(&mut self.history_mem,    ((agg_mem as f64 / 1_048_576.0) * 10.0).round() / 10.0, HISTORY);
@@ -306,17 +281,18 @@ impl Collector {
                 mem_bytes: agg_mem,
                 active: agents.len() as u32,
                 busy: busy_count,
-                waiting: sessions.sessions.waiting,
-                completed: sessions.sessions.completed,
+                waiting: sessions.waiting,
+                completed: sessions.completed,
                 subagents: subagents_total,
                 project_count,
                 tokens_total:  tokens_grand_total,
                 tokens_input:  tokens_input_total,
                 tokens_output: tokens_output_total,
+                cost_usd: cost_grand_total,
             },
             agents,
             projects,
-            sessions: sessions.sessions,
+            sessions,
             history: History {
                 total:       self.history_total.iter().copied().collect(),
                 active:      self.history_active.iter().copied().collect(),
@@ -332,6 +308,193 @@ impl Collector {
     fn push_activity(&mut self, e: ActivityEvent) {
         if self.activity.len() >= MAX_ACTIVITY { self.activity.pop_front(); }
         self.activity.push_back(e);
+    }
+
+    /// Enriches `agents` in-place with vendor session info, applies the
+    /// universal CPU% override, fills in cost from the price table, and
+    /// returns the merged sessions block ready to put on the snapshot.
+    fn enrich_and_score(&self, agents: &mut [Agent], now: u64) -> crate::model::Sessions {
+        let live_refs: Vec<LiveAgentRef> = agents.iter()
+            .map(|a| LiveAgentRef { pid: a.pid, cwd: a.cwd.as_str(), label: a.label.as_str() })
+            .collect();
+        let merged = sessions::merge(vec![
+            claude::summarise(&live_refs, now),
+            codex::summarise(&live_refs, now),
+            goose::summarise(&live_refs, now),
+            gemini::summarise(&live_refs, now),
+            aider::summarise(&live_refs, now),
+            generic::summarise(agents, &live_refs, now),
+        ]);
+
+        for a in agents.iter_mut() {
+            if let Some(s) = merged.by_pid.get(&a.pid) {
+                a.status = s.status;
+                a.current_tool = s.current_tool.clone();
+                a.current_task = s.last_task.clone();
+                a.subagents = s.in_flight_tasks;
+                a.session_id = Some(s.id.clone());
+                a.session_age_ms = Some(s.age_ms);
+                a.tokens_input  = s.tokens_input;
+                a.tokens_output = s.tokens_output;
+                a.tokens_total  = s.tokens_total;
+                a.model = s.model.clone();
+            } else {
+                a.status = Status::Idle;
+            }
+            // Universal CPU% override.
+            if a.cpu >= 20.0 { a.status = Status::Busy; }
+            else if a.cpu >= 3.0 && matches!(a.status, Status::Idle | Status::Stale) {
+                a.status = Status::Active;
+            } else if a.cpu >= 1.0 && a.status == Status::Idle {
+                a.status = Status::Active;
+            }
+            // Cost.
+            if let Some(model) = &a.model {
+                a.cost_usd = self.pricing.cost(model, a.tokens_input, a.tokens_output);
+            }
+        }
+
+        // Mutate session entries inline so JSON output carries cost too.
+        let mut sessions_block = merged.sessions;
+        for s in sessions_block.sessions.iter_mut() {
+            if let Some(model) = &s.model {
+                s.cost_usd = self.pricing.cost(model, s.tokens_input, s.tokens_output);
+            }
+        }
+        sessions_block
+    }
+
+    fn refresh_agent_cpu_history(&mut self, agents: &mut [Agent]) {
+        let live: std::collections::HashSet<u32> = agents.iter().map(|a| a.pid).collect();
+        for a in agents.iter_mut() {
+            let entry = self.agent_cpu_hist.entry(a.pid)
+                .or_insert_with(|| VecDeque::with_capacity(PER_AGENT_HISTORY));
+            if entry.len() >= PER_AGENT_HISTORY { entry.pop_front(); }
+            entry.push_back(a.cpu);
+            a.cpu_history = entry.iter().copied().collect();
+        }
+        // Drop entries for processes that disappeared.
+        self.agent_cpu_hist.retain(|pid, _| live.contains(pid));
+    }
+
+    /// macOS / *BSD / Windows path: lean on sysinfo for process metadata.
+    /// Session enrichment, sorting, charts, and aggregates work identically.
+    fn snapshot_via_sysinfo(&mut self, now: u64) -> Snapshot {
+        let sys = self.sys.as_mut().expect("sysinfo backend must exist on non-Linux");
+        sys.refresh();
+        let mut agents = sys.collect_agents(&self.builtins, &self.user);
+
+        // Spawn / exit events.
+        let live_pids: std::collections::HashSet<u32> = agents.iter().map(|a| a.pid).collect();
+        for a in &agents {
+            if !self.known_pids.contains_key(&a.pid) {
+                self.known_pids.insert(a.pid, a.label.clone());
+                self.push_activity(ActivityEvent {
+                    t: now, kind: ActivityKind::Spawn,
+                    label: a.label.clone(), pid: a.pid, cwd: Some(a.cwd.clone()),
+                });
+            }
+        }
+        let exited: Vec<(u32, String)> = self.known_pids.iter()
+            .filter(|(p, _)| !live_pids.contains(p))
+            .map(|(p, l)| (*p, l.clone())).collect();
+        for (pid, label) in &exited {
+            self.push_activity(ActivityEvent { t: now, kind: ActivityKind::Exit,
+                label: label.clone(), pid: *pid, cwd: None });
+            self.known_pids.remove(pid);
+            self.cpu_smooth.remove(pid);
+        }
+        if self.activity.len() > MAX_ACTIVITY {
+            let drop = self.activity.len() - MAX_ACTIVITY;
+            self.activity.drain(0..drop);
+        }
+
+        self.refresh_agent_cpu_history(&mut agents);
+        let sessions = self.enrich_and_score(&mut agents, now);
+
+        let mut agg_cpu = 0.0;
+        let mut agg_mem = 0u64;
+        for a in &agents {
+            agg_cpu += a.cpu;
+            agg_mem += a.rss;
+        }
+
+        agents.sort_by(|a, b| {
+            a.status.rank().cmp(&b.status.rank())
+                .then_with(|| a.project.cmp(&b.project))
+                .then_with(|| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| b.rss.cmp(&a.rss))
+                .then_with(|| a.pid.cmp(&b.pid))
+        });
+
+        let mut by_proj: HashMap<String, ProjectAgg> = HashMap::new();
+        for a in &agents {
+            let row = by_proj.entry(a.project.clone()).or_insert_with(|| ProjectAgg {
+                project: a.project.clone(), cwd: a.cwd.clone(), ..Default::default()
+            });
+            row.agents += 1;
+            row.cpu += a.cpu;
+            row.rss += a.rss;
+            row.subagents += a.subagents;
+            row.tokens_total += a.tokens_total;
+            row.cost_usd += a.cost_usd;
+            *row.statuses.entry(status_key(a.status)).or_insert(0) += 1;
+        }
+        let mut projects: Vec<ProjectAgg> = by_proj.into_values().collect();
+        projects.sort_by(|a, b| {
+            let a_busy = *a.statuses.get("busy").unwrap_or(&0);
+            let b_busy = *b.statuses.get("busy").unwrap_or(&0);
+            b_busy.cmp(&a_busy)
+                .then_with(|| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| a.project.cmp(&b.project))
+        });
+
+        let busy_count = agents.iter().filter(|a| matches!(a.status, Status::Busy | Status::Spawning)).count() as u32;
+        let subagents_total: u32 = agents.iter().map(|a| a.subagents).sum();
+        let tokens_input_total:  u64 = agents.iter().map(|a| a.tokens_input).sum();
+        let tokens_output_total: u64 = agents.iter().map(|a| a.tokens_output).sum();
+        let tokens_grand_total = tokens_input_total + tokens_output_total;
+        let cost_grand_total: f64 = agents.iter().map(|a| a.cost_usd).sum();
+
+        push_bounded(&mut self.history_total,  agents.len() as f64, HISTORY);
+        push_bounded(&mut self.history_active, agents.len() as f64 + sessions.waiting as f64, HISTORY);
+        push_bounded(&mut self.history_busy,   busy_count as f64, HISTORY);
+        push_bounded(&mut self.history_cpu,    (agg_cpu * 10.0).round() / 10.0, HISTORY);
+        push_bounded(&mut self.history_mem,    ((agg_mem as f64 / 1_048_576.0) * 10.0).round() / 10.0, HISTORY);
+        let tokens_delta = if self.prev_tokens_total == 0 { 0.0 }
+                           else { tokens_grand_total.saturating_sub(self.prev_tokens_total) as f64 };
+        self.prev_tokens_total = tokens_grand_total;
+        push_bounded(&mut self.history_tokens_rate, tokens_delta, HISTORY);
+
+        let project_count = projects.len() as u32;
+        Snapshot {
+            now,
+            platform: std::env::consts::OS.to_string(),
+            note: Some("running via sysinfo backend (no /proc) — IO bytes and writing-files unavailable".into()),
+            sys_cpus: self.num_cpus as u32,
+            mem_total: 0,
+            mem_available: 0,
+            aggregates: Aggregates {
+                cpu: agg_cpu, mem_bytes: agg_mem,
+                active: agents.len() as u32, busy: busy_count,
+                waiting: sessions.waiting, completed: sessions.completed,
+                subagents: subagents_total, project_count,
+                tokens_total: tokens_grand_total,
+                tokens_input: tokens_input_total,
+                tokens_output: tokens_output_total,
+                cost_usd: cost_grand_total,
+            },
+            agents, projects, sessions,
+            history: History {
+                total:       self.history_total.iter().copied().collect(),
+                active:      self.history_active.iter().copied().collect(),
+                busy:        self.history_busy.iter().copied().collect(),
+                cpu:         self.history_cpu.iter().copied().collect(),
+                mem:         self.history_mem.iter().copied().collect(),
+                tokens_rate: self.history_tokens_rate.iter().copied().collect(),
+            },
+            activity: self.activity.iter().rev().take(80).cloned().collect(),
+        }
     }
 }
 

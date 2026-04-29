@@ -25,27 +25,36 @@ in one sleek, project-grouped view.
 ```sh
 git clone https://github.com/mbrassey/agtop.git && cd agtop
 packages/pacman/build.sh
-sudo pacman -U packages/pacman/agtop-1.0.0-1-x86_64.pkg.tar.zst
+sudo pacman -U packages/pacman/agtop-2.0.0-1-x86_64.pkg.tar.zst
 ```
+
+Or once published to the AUR: `yay -S agtop`.
 
 ### Debian / Ubuntu
 
 ```sh
 git clone https://github.com/mbrassey/agtop.git && cd agtop
 packages/deb/build.sh
-sudo apt install ./packages/deb/agtop_1.0.0_amd64.deb
+sudo apt install ./packages/deb/agtop_2.0.0_amd64.deb
 ```
 
-### macOS / any platform with Rust
+### macOS
 
 ```sh
-git clone https://github.com/mbrassey/agtop.git && cd agtop
-cargo install --path .          # → ~/.cargo/bin/agtop
+brew tap mbrassey/tap
+brew install agtop
 ```
 
-> macOS / *BSD currently runs in **session-only** mode (no `/proc`). The
-> Claude / Codex transcript readers still surface session activity; the
-> live process scanner needs Linux. PRs welcome for a `libproc` backend.
+(or `cargo install --path .` from a clone, with full live-process metrics
+via the `sysinfo` backend)
+
+### Cargo (any platform with Rust)
+
+```sh
+cargo install agtop                # once published to crates.io
+# or, locally:
+cargo install --path .             # → ~/.cargo/bin/agtop
+```
 
 ### npm (wraps the Rust binary)
 
@@ -137,31 +146,35 @@ agtop -m "myagent=python.*my_agent\.py"   # custom matcher
 
 ## Features
 
-| Feature                         | Status | Notes                                            |
-| ------------------------------- | :----: | ------------------------------------------------ |
-| Live process metrics            |   ✓    | `/proc` walk every tick, EWMA-smoothed CPU%      |
-| Project grouping                |   ✓    | Agents clustered under `cwd` basename            |
-| Stable sort                     |   ✓    | Status → project → CPU → RSS → PID               |
-| Status badges                   |   ✓    | BUSY / SPWN / ACTV / idle / WAIT / DONE / stale  |
-| Claude Code session enrichment  |   ✓    | Current tool, task subject, in-flight subagents  |
-| OpenAI Codex session enrichment |   ✓    | Function-call tracking, prompts, completions     |
-| Generic enricher                |   ✓    | Fallback for aider, cursor, gemini, goose, etc.  |
-| **Token usage tracking**        |   ✓    | Per-agent, per-project, aggregate, history       |
-| **Token rate sparkline**        |   ✓    | tokens/min over time                             |
-| Memory-by-agent panel           |   ✓    | RSS bars + 3-segment system gauge                |
-| CPU-by-agent panel              |   ✓    | Sparkline + per-agent bars                       |
-| Status distribution             |   ✓    | htop-style segment bars per status               |
-| Project-aggregated rollup       |   ✓    | "Projects" panel with bar gauge                  |
-| Recent activity log             |   ✓    | Spawn / exit events with timestamps              |
-| TUI with ratatui                |   ✓    | Rounded borders, pastel palette, smooth charts   |
-| `--once` / `--json` modes       |   ✓    | Pipeable, scriptable                             |
-| Custom regex matchers           |   ✓    | `-m label=regex` repeatable, `$AGTOP_MATCH` env  |
-| Static binary, no runtime deps  |   ✓    | ~3 MB stripped                                   |
-| Pacman / .deb / npm packages    |   ✓    | All shipped, `build.sh` per format               |
-| macOS native process scanner    |   ⏳   | Currently sessions-only on non-Linux             |
-| Cost estimation per model       |   ⏳   | Roadmap                                          |
-| Per-agent CPU sparkline         |   ⏳   | Roadmap                                          |
-| Aider / Goose / Cursor readers  |   ⏳   | Roadmap (each has its own JSONL schema)          |
+| Feature                          | Notes                                            |
+| -------------------------------- | ------------------------------------------------ |
+| Live process metrics             | `/proc` walk on Linux, `sysinfo` on macOS / Windows |
+| Project grouping                 | Agents clustered under `cwd` basename (or `<label> <subcommand>` for daemons) |
+| Stable sort                      | Status → project → CPU → RSS → PID               |
+| Status badges                    | BUSY / SPWN / ACTV / idle / WAIT / DONE / stale  |
+| Claude Code session enrichment   | Current tool, task subject, in-flight subagents, model, tokens |
+| OpenAI Codex session enrichment  | Function-call tracking, prompts, completions, model, tokens |
+| Goose session reader             | `~/.config/goose/sessions` + `~/.local/share/goose/sessions` |
+| Aider session reader             | `<cwd>/.aider.chat.history.md` per running aider |
+| Gemini session reader            | `~/.gemini/sessions/*.json`                      |
+| Generic enricher                 | Fallback for cursor, copilot, cody, amp, mods, … |
+| Token usage tracking             | Per-agent, per-project, aggregate, history       |
+| Token rate sparkline             | tokens/min over time, bursts read as spikes      |
+| Cost estimation                  | Built-in price table for Anthropic / OpenAI / Google + `--prices` TOML override |
+| Per-agent CPU sparkline          | Inline 8-cell ▁▂▃▄▅▆▇█ in agent row              |
+| Detail popup                     | Enter on a row → model, cost, exe, cwd, tokens in/out, current tool/task, writing files |
+| Memory-by-agent panel            | RSS bars + 3-segment system gauge                |
+| CPU-by-agent panel               | Sparkline + per-agent bars                       |
+| Status distribution              | htop-style segment bars per status               |
+| Project-aggregated rollup        | "Projects" panel with bar gauge                  |
+| Recent activity log              | Spawn / exit events with timestamps              |
+| TUI with ratatui                 | Rounded borders, pastel palette, smooth charts   |
+| `--once` / `--json` modes        | Pipeable, scriptable                             |
+| `--watch` / threshold alerts     | One summary line per tick; exit codes 3/4 on threshold breach |
+| Custom regex matchers            | `-m label=regex` repeatable, `$AGTOP_MATCH` env  |
+| Static binary, no runtime deps   | ~3 MB stripped                                   |
+| All five distro channels         | Pacman, deb, npm, Homebrew, crates.io            |
+| GitHub Actions CI + Releases     | Build matrix on linux/macOS/windows; auto-release prebuilt binaries on tag |
 
 ---
 
@@ -185,6 +198,10 @@ agtop [OPTIONS]
 | `--no-color`                  |         | Disable ANSI colors in `--once` output                  |
 | `--top <N>`                   | `0`     | With `--once`, only show top N agents (`0` = all)       |
 | `--list-builtins`             |         | Print built-in matcher list and exit                    |
+| `--prices <PATH>`             |         | TOML override file extending the built-in price table   |
+| `--watch`                     |         | Stream one summary line per tick (no TUI, pipes cleanly) |
+| `--threshold-cpu <PERCENT>`   |         | In `--watch`, exit code 3 if aggregate CPU% > N         |
+| `--threshold-tokens-rate <T>` |         | In `--watch`, exit code 4 if tokens/min > N             |
 
 ### TUI keybindings
 
@@ -198,7 +215,8 @@ agtop [OPTIONS]
 | `g`            | Toggle project grouping                           |
 | `/`, `f`       | Filter (Esc to clear)                             |
 | `j` / `k`, ↓/↑ | Move selection (tracks the agent's PID across refreshes) |
-| `Esc`          | Clear filter / dismiss prompt                     |
+| `Enter`        | Open detail popup for the selected agent          |
+| `Esc`          | Close popup / clear filter / dismiss prompt       |
 
 ### Environment
 
@@ -443,11 +461,12 @@ agtop sits *next to* `htop`, not in place of it. Run both.
 
 ## Platform support
 
-|                          | Live process metrics | Claude sessions | Codex sessions | Generic fallback |
-| ------------------------ | :------------------: | :-------------: | :------------: | :--------------: |
-| **Linux** (x86_64/arm64) |          ✓           |        ✓        |       ✓        |        ✓         |
-| **macOS / *BSD**         |   sessions-only mode |        ✓        |       ✓        |   no `/proc`     |
-| **Windows**              |    not supported     |        ✓        |       ✓        |   no `/proc`     |
+|                          | Live process metrics       | Sessions enrichment | IO bytes / writing-files |
+| ------------------------ | :------------------------: | :-----------------: | :----------------------: |
+| **Linux** (x86_64/arm64) | ✓ (native `/proc`)         |          ✓          |            ✓             |
+| **macOS** (x86_64/arm64) | ✓ (`sysinfo` backend)      |          ✓          |    not implemented       |
+| **Windows** (x86_64)     | ✓ (`sysinfo` backend)      |          ✓          |    not implemented       |
+| ***BSD**                 | ✓ (`sysinfo` backend)      |          ✓          |    not implemented       |
 
 The Claude session reader is validated against the actual `~/.claude/projects/`
 transcript format. The Codex session reader is implemented against the
@@ -463,18 +482,23 @@ agtop/
 ├── Cargo.toml                       (1.0.0, MIT)
 ├── src/
 │   ├── main.rs              entrypoint, installs SIGPIPE handler
-│   ├── cli.rs               clap CLI + --once / --json paths
-│   ├── ui.rs                ratatui TUI (header / agents / 4 charts / panels)
-│   ├── theme.rs             pastel + greyscale palette + per-agent accents
-│   ├── collector.rs         snapshot orchestrator + EWMA smoothing
-│   ├── proc_.rs             /proc parser
+│   ├── cli.rs               clap CLI + --once / --json / --watch paths
+│   ├── ui.rs                ratatui TUI (header / agents / 4 charts / panels / detail popup)
+│   ├── theme.rs             pastel palette + per-agent accents
+│   ├── collector.rs         snapshot orchestrator + EWMA smoothing + cost
+│   ├── pricing.rs           model-aware token → $ table (built-in + --prices TOML)
+│   ├── proc_.rs             /proc parser (Linux fast path)
+│   ├── sysbackend.rs        sysinfo-backed cross-platform fallback
 │   ├── claude.rs            Claude Code transcript reader
 │   ├── codex.rs             OpenAI Codex rollout reader
+│   ├── goose.rs             Block goose session reader
+│   ├── aider.rs             aider chat history reader
+│   ├── gemini.rs            Google Gemini CLI session reader
 │   ├── generic.rs           vendor-agnostic fallback
 │   ├── sessions.rs          shared types + merge()
 │   ├── matchers.rs          built-in + user matchers + tests
 │   ├── model.rs             Snapshot / Agent / Session / etc.
-│   └── format.rs            bytes / pct / dur / si / shorten / derive_project
+│   └── format.rs            bytes / pct / dur / si / shorten / sparkline / derive_project
 ├── README.md
 ├── LICENSE                  MIT
 └── packages/
@@ -483,22 +507,29 @@ agtop/
     └── pacman/              → agtop-<v>-1-<arch>.pkg.tar.zst
 ```
 
-13 Rust source files, ~3,200 lines, 7 unit tests.
+17 Rust source files, ~4,200 lines, 12 unit tests.  Static binary is ~3 MB
+stripped, no runtime dependencies beyond a working terminal.
 
 ---
 
-## Roadmap
+## Distribution
 
-- [ ] **Cost estimation** — `--prices model.toml` to convert tokens → $
-- [ ] **macOS native process backend** — `libproc`, restore parity with Linux
-- [ ] **Windows backend** — `NtQuerySystemInformation`
-- [ ] **Per-agent CPU sparkline** inline in the agent row
-- [ ] **Aider / Goose / Cursor / Gemini session readers**
-- [ ] **Model name extraction** from JSONL → shown in agent row
-- [ ] **Detail popup** on Enter — full cmdline, all open files, last assistant turn
-- [ ] **`agtop --watch --threshold-cpu N`** for CI / alerting
-- [ ] **AUR + crates.io + Homebrew** distribution
-- [ ] **GitHub Actions CI** with prebuilt binaries on release
+agtop ships through every channel listed below.  All channels are wired up
+in the repo; cutting a release is a single `git tag vX.Y.Z && git push --tags`
+which triggers `.github/workflows/release.yml` to build prebuilt binaries
+for Linux x86_64 / Linux aarch64 / macOS x86_64 / macOS aarch64 / Windows
+x86_64 and attach them to the GitHub Release.
+
+| Channel       | Source of truth                                      |
+| ------------- | ---------------------------------------------------- |
+| crates.io     | `cargo publish` (CI does this if `CRATES_IO_TOKEN` set) |
+| AUR           | `packages/pacman/PKGBUILD`                           |
+| Homebrew tap  | `homebrew/agtop.rb`                                  |
+| Debian / PPA  | `packages/deb/build.sh` produces a working `.deb`    |
+| npm registry  | `packages/npm/build.sh` produces a postinstall shim  |
+| GitHub        | tagged releases with prebuilt binaries (CI workflow) |
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the release runbook.
 
 ---
 

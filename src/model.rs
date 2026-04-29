@@ -65,6 +65,10 @@ pub struct Agent {
     pub tokens_total: u64,
     pub tokens_input: u64,
     pub tokens_output: u64,
+    pub cost_usd: f64,
+    pub model: Option<String>,
+    /// Recent CPU% samples for the inline sparkline (oldest → newest).
+    pub cpu_history: Vec<f64>,
     pub cpu: f64,
     pub cpu_raw: f64,
     pub rss: u64,
@@ -90,6 +94,7 @@ pub struct ProjectAgg {
     pub rss: u64,
     pub subagents: u32,
     pub tokens_total: u64,
+    pub cost_usd: f64,
     pub statuses: HashMap<&'static str, u32>,
     pub cwd: String,
 }
@@ -114,6 +119,8 @@ pub struct Session {
     pub tokens_total: u64,
     pub tokens_input: u64,
     pub tokens_output: u64,
+    pub cost_usd: f64,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -164,6 +171,7 @@ pub struct Aggregates {
     pub tokens_total: u64,
     pub tokens_input: u64,
     pub tokens_output: u64,
+    pub cost_usd: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

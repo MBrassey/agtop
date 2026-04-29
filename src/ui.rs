@@ -15,7 +15,8 @@
 
 use crate::cli::Args;
 use crate::collector::Collector;
-use crate::format::{bytes, dur, pct, project_basename, shorten, si};
+use crate::format::{bytes, dur, pct, project_basename, shorten, si, sparkline};
+use crate::pricing::format_cost;
 use crate::model::{ActivityKind, Agent, Snapshot, Status};
 use crate::theme;
 
@@ -75,6 +76,7 @@ struct App {
     filter: String,
     typing_filter: bool,
     show_help: bool,
+    show_detail: bool,
     selected_pid: Option<u32>,
     visible_pid_order: Vec<u32>,
     quit: bool,
@@ -108,6 +110,7 @@ pub fn run(collector: Collector, args: Args) -> Result<()> {
         filter: args.filter.unwrap_or_default(),
         typing_filter: false,
         show_help: false,
+        show_detail: false,
         selected_pid: None,
         visible_pid_order: Vec::new(),
         quit: false,
@@ -167,9 +170,14 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
     match key.code {
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => {
+            if app.show_detail { app.show_detail = false; }
+            else if app.show_help { app.show_help = false; }
+            else { app.quit = true; }
+        }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('?') | KeyCode::Char('h') => app.show_help = !app.show_help,
+        KeyCode::Enter => app.show_detail = !app.show_detail,
         KeyCode::Char('p') => app.paused = !app.paused,
         KeyCode::Char('r') => {
             app.snap = app.collector.snapshot();
@@ -253,9 +261,98 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     if app.show_help {
         draw_help(f, area);
+    } else if app.show_detail {
+        draw_detail(f, area, app);
     } else if app.typing_filter {
         draw_filter_input(f, area, &app.filter);
     }
+}
+
+fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
+    let agent = app.snap.agents.iter().find(|a| Some(a.pid) == app.selected_pid);
+    let Some(a) = agent else { return; };
+
+    let w = 90.min(area.width.saturating_sub(4));
+    let h = 24.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let r = Rect { x, y, width: w, height: h };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::BORDER))
+        .title(Line::from(vec![
+            Span::styled(format!(" {} {} ", a.status.glyph(), a.status.label()),
+                theme::status_style(a.status)),
+            Span::styled(format!("{} ", a.label),
+                Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("pid {} ", a.pid), Style::default().fg(theme::FG_DIM)),
+            Span::styled(format!("· {} ", a.project),
+                Style::default().fg(theme::BORDER).add_modifier(Modifier::BOLD)),
+        ]));
+    let inner = block.inner(r);
+    f.render_widget(ratatui::widgets::Clear, r);
+    f.render_widget(block, r);
+
+    let dim   = |s: String| Span::styled(s, Style::default().fg(theme::FG_DIM));
+    let lab   = |s: &str| Span::styled(format!("{:<10}", s), Style::default().fg(theme::FG_DIM));
+    let val   = |s: String, c: ratatui::style::Color| Span::styled(s, Style::default().fg(c).add_modifier(Modifier::BOLD));
+
+    let cpu_spark = sparkline(&a.cpu_history, 100.0, 24);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![lab("model"),
+        a.model.as_deref().map(|m| val(m.into(), theme::C_CHART_TOK)).unwrap_or_else(|| dim("(unknown)".into()))]));
+    lines.push(Line::from(vec![lab("cpu"),
+        val(pct(a.cpu), theme::cpu_color(a.cpu)), Span::raw(" "),
+        Span::styled(cpu_spark, Style::default().fg(theme::cpu_color(a.cpu)))]));
+    lines.push(Line::from(vec![lab("memory"),
+        val(bytes(a.rss), theme::C_CHART_MEM), dim(format!(" rss · {} vsize", bytes(a.vsize)))]));
+    lines.push(Line::from(vec![lab("uptime"),  val(dur(a.uptime_sec), theme::FG)]));
+    lines.push(Line::from(vec![lab("threads"), val(a.threads.to_string(), theme::FG),
+        dim(format!("  state {}  ppid {}", a.state, a.ppid))]));
+    lines.push(Line::from(vec![lab("tokens"),
+        val(si(a.tokens_total), theme::C_CHART_TOK),
+        dim(format!(" ({} in / {} out)", si(a.tokens_input), si(a.tokens_output)))]));
+    if a.cost_usd > 0.0 {
+        lines.push(Line::from(vec![lab("cost"), val(format_cost(a.cost_usd), theme::C_WAIT)]));
+    }
+    if a.subagents > 0 {
+        lines.push(Line::from(vec![lab("subagents"),
+            val(format!("{} in flight", a.subagents), theme::C_SPAWN)]));
+    }
+    if let Some(sid) = &a.session_id {
+        lines.push(Line::from(vec![lab("session"), dim(sid.clone())]));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(vec![lab("exe"),  Span::styled(shorten(&a.exe, (w as usize).saturating_sub(12)),
+        Style::default().fg(theme::FG))]));
+    lines.push(Line::from(vec![lab("cwd"),  Span::styled(shorten(&a.cwd, (w as usize).saturating_sub(12)),
+        Style::default().fg(theme::FG))]));
+    lines.push(Line::from(vec![lab("cmd"),  Span::styled(shorten(&a.cmdline, (w as usize).saturating_sub(12)),
+        Style::default().fg(theme::FG_DIM))]));
+    if let Some(tool) = &a.current_tool {
+        lines.push(Line::from(vec![lab("tool"),
+            val(tool.clone(), theme::C_SPAWN)]));
+    }
+    if let Some(task) = &a.current_task {
+        lines.push(Line::from(vec![lab("task"),
+            Span::styled(shorten(task, (w as usize).saturating_sub(12)),
+                Style::default().fg(theme::FG))]));
+    }
+    if !a.writing_files.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(lab("writing")));
+        for f in a.writing_files.iter().take(4) {
+            lines.push(Line::from(vec![Span::raw("    "),
+                Span::styled(shorten(f, (w as usize).saturating_sub(6)),
+                    Style::default().fg(theme::FG_DIM))]));
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled("  Esc / Enter to close", Style::default().fg(theme::FG_DIM))));
+
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App) {
@@ -283,6 +380,9 @@ fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App) {
                                                theme::C_CHART_MEM);
     if a.tokens_total > 0 {
         chip("tokens", si(a.tokens_total),     theme::C_CHART_TOK);
+    }
+    if a.cost_usd > 0.0 {
+        chip("cost",   format_cost(a.cost_usd), theme::C_WAIT);
     }
     spans.push(Span::styled(format!(" sort:{}  group:{}  ", app.sort.label(), if app.grouped {"on"} else {"off"}),
                             Style::default().fg(theme::FG_DIM)));
@@ -458,6 +558,11 @@ fn agent_row<'a>(a: &'a Agent, selected: bool) -> Row<'a> {
         spans.push(Span::styled(si(a.tokens_total),
                                 Style::default().fg(theme::C_CHART_TOK)));
     }
+    // Inline 8-cell CPU sparkline.
+    spans.push(Span::raw(" "));
+    let spark = sparkline(&a.cpu_history, 100.0, 8);
+    spans.push(Span::styled(spark,
+        Style::default().fg(theme::cpu_color(a.cpu))));
     spans.push(Span::raw("  "));
     // Doing
     spans.push(describe_doing_span(a));

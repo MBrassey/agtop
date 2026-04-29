@@ -50,6 +50,31 @@ pub fn si(n: u64) -> String {
     format!("{:.1}B", n as f64 / 1_000_000_000.0)
 }
 
+/// 8-cell unicode sparkline ▁▂▃▄▅▆▇█ for an arbitrary slice of values.
+/// `max` should be a stable upper bound (e.g. observed peak) so sparklines
+/// across rows are visually comparable.  `width` is the number of glyphs.
+pub fn sparkline(values: &[f64], max: f64, width: usize) -> String {
+    const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let max = if max <= 0.0 { 1.0 } else { max };
+    let n = values.len();
+    if n == 0 { return " ".repeat(width); }
+    let step = (n as f64 / width as f64).max(1.0);
+    let mut out = String::with_capacity(width);
+    for i in 0..width {
+        let start = (i as f64 * step) as usize;
+        let end_raw = ((i + 1) as f64 * step) as usize;
+        let end = end_raw.min(n);
+        if start >= end {
+            out.push(BLOCKS[0]);
+            continue;
+        }
+        let avg: f64 = values[start..end].iter().copied().sum::<f64>() / (end - start) as f64;
+        let idx = ((avg.max(0.0) / max) * (BLOCKS.len() - 1) as f64).round() as usize;
+        out.push(BLOCKS[idx.min(BLOCKS.len() - 1)]);
+    }
+    out
+}
+
 pub fn shorten(s: &str, n: usize) -> String {
     let count = s.chars().count();
     if count <= n {
@@ -123,6 +148,17 @@ mod tests {
     fn project_falls_back_to_label_for_bare_invocation() {
         let p = derive_project("/proc/self", "/usr/bin/claude", "claude", "claude");
         assert_eq!(p, "claude");
+    }
+
+    #[test]
+    fn sparkline_handles_empty_and_uniform() {
+        assert_eq!(sparkline(&[], 100.0, 8), "        ");
+        let s = sparkline(&[50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0], 100.0, 8);
+        assert_eq!(s.chars().count(), 8);
+        // 50/100 → mid-block.
+        for c in s.chars() {
+            assert!("▁▂▃▄▅".contains(c), "got {}", c);
+        }
     }
 
     #[test]
