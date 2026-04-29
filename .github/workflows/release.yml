@@ -66,11 +66,16 @@ jobs:
     name: Publish to crates.io
     needs: build
     runs-on: ubuntu-latest
-    if: ${{ env.CRATES_IO_TOKEN != '' }}
-    env:
-      CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --token "${CRATES_IO_TOKEN}"
+      - name: cargo publish (skip if no token)
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          if [ -n "$CRATES_IO_TOKEN" ]; then
+            cargo publish --token "$CRATES_IO_TOKEN"
+          else
+            echo "CRATES_IO_TOKEN secret not set — skipping crates.io publish"
+          fi
         continue-on-error: true
