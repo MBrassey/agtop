@@ -39,14 +39,15 @@ use std::io::{self, stdout};
 use std::time::{Duration, Instant};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
-enum Sort { Smart, Cpu, Mem, Uptime, Agent }
+enum Sort { Smart, Cpu, Mem, Uptime, Tokens, Agent }
 
 impl Sort {
     fn cycle(self) -> Self {
         match self {
             Sort::Smart  => Sort::Cpu,
             Sort::Cpu    => Sort::Mem,
-            Sort::Mem    => Sort::Uptime,
+            Sort::Mem    => Sort::Tokens,
+            Sort::Tokens => Sort::Uptime,
             Sort::Uptime => Sort::Agent,
             Sort::Agent  => Sort::Smart,
         }
@@ -56,6 +57,7 @@ impl Sort {
             Sort::Smart  => "smart",
             Sort::Cpu    => "cpu",
             Sort::Mem    => "mem",
+            Sort::Tokens => "tokens",
             Sort::Uptime => "uptime",
             Sort::Agent  => "agent",
         }
@@ -89,6 +91,7 @@ pub fn run(collector: Collector, args: Args) -> Result<()> {
     let initial_sort = match args.sort.as_str() {
         "cpu" => Sort::Cpu,
         "mem" => Sort::Mem,
+        "tokens" => Sort::Tokens,
         "uptime" => Sort::Uptime,
         "agent" => Sort::Agent,
         _ => Sort::Smart,
@@ -230,9 +233,10 @@ fn draw(f: &mut Frame, app: &mut App) {
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(11),    // CPU panel: sparkline + per-agent bars
-            Constraint::Length(11),    // Memory by agent (top-N) + system gauge
-            Constraint::Length(9),     // Status distribution bars
+            Constraint::Length(10),    // CPU panel: sparkline + per-agent bars
+            Constraint::Length(10),    // Memory by agent + system gauge
+            Constraint::Length(8),     // Tokens panel: rate sparkline + per-agent
+            Constraint::Length(8),     // Status distribution bars
             Constraint::Min(6),        // Claude sessions panel
         ])
         .split(body[1]);
@@ -241,8 +245,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     draw_left_bottom(f, left[1], &app.snap);
     draw_cpu_panel(f, right[0], &app.snap);
     draw_memory_panel(f, right[1], &app.snap);
-    draw_status_distribution(f, right[2], &app.snap);
-    draw_sessions(f, right[3], &app.snap);
+    draw_tokens_panel(f, right[2], &app.snap, app.interval);
+    draw_status_distribution(f, right[3], &app.snap);
+    draw_sessions(f, right[4], &app.snap);
 
     draw_footer(f, chunks[2], app);
 
@@ -315,6 +320,7 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
         Sort::Smart => {} // already sorted by collector
         Sort::Cpu     => agents.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)),
         Sort::Mem     => agents.sort_by(|a, b| b.rss.cmp(&a.rss)),
+        Sort::Tokens  => agents.sort_by(|a, b| b.tokens_total.cmp(&a.tokens_total)),
         Sort::Uptime  => agents.sort_by(|a, b| b.uptime_sec.cmp(&a.uptime_sec)),
         Sort::Agent   => agents.sort_by(|a, b| a.label.cmp(&b.label)),
     }
@@ -781,6 +787,81 @@ fn draw_memory_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
     }
 }
 
+// Tokens panel: rate sparkline at top, top-N agents by tokens beneath. Same
+// horizontal-bar visual language as Memory panel.
+fn draw_tokens_panel(f: &mut Frame, area: Rect, snap: &Snapshot, interval: Duration) {
+    // Rate over the last ~30s, in tokens/min.
+    let recent: Vec<f64> = snap.history.tokens_rate.iter().rev().take(20).copied().collect();
+    let rate_per_tick = if !recent.is_empty() {
+        recent.iter().sum::<f64>() / recent.len() as f64
+    } else { 0.0 };
+    let tick_secs = interval.as_secs_f64().max(0.1);
+    let rate_per_min = rate_per_tick * 60.0 / tick_secs;
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::BORDER))
+        .title(Line::from(vec![
+            Span::styled(" Tokens ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled("total ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(si(snap.aggregates.tokens_total),
+                Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)),
+            Span::styled("  rate ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(format!("{}/min", si(rate_per_min as u64)),
+                Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)),
+            Span::styled(" ", Style::default().fg(theme::FG_DIM)),
+        ]));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(inner);
+
+    // Sparkline of tokens-per-tick. Auto-scaled — bursts read as spikes.
+    let spark_data: Vec<u64> = snap.history.tokens_rate.iter().map(|v| *v as u64).collect();
+    let sparkline = Sparkline::default()
+        .data(&spark_data)
+        .style(Style::default().fg(theme::C_CHART_TOK));
+    f.render_widget(sparkline, split[0]);
+
+    // Per-agent tokens bars (only agents with tokens > 0).
+    let mut agents: Vec<&Agent> = snap.agents.iter().filter(|a| a.tokens_total > 0).collect();
+    agents.sort_by(|a, b| b.tokens_total.cmp(&a.tokens_total));
+    let max = agents.first().map(|a| a.tokens_total).unwrap_or(1).max(1);
+    let bar_width = (split[1].width as usize).saturating_sub(34).max(8);
+    let mut items: Vec<ListItem> = Vec::new();
+    let take = (split[1].height as usize).saturating_sub(0);
+    for a in agents.iter().take(take) {
+        let frac = a.tokens_total as f64 / max as f64;
+        let filled = ((frac * bar_width as f64).round() as usize).min(bar_width);
+        let bar_full  = "█".repeat(filled);
+        let bar_empty = "·".repeat(bar_width - filled);
+        let mut spans: Vec<Span> = Vec::new();
+        spans.push(Span::styled(format!("{} ", a.status.glyph()), theme::status_style(a.status)));
+        spans.push(Span::styled(format!("{:<10}", shorten(&a.project, 10)),
+            Style::default().fg(theme::FG)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!("{:<8}", shorten(&a.label, 8)),
+            Style::default().fg(theme::agent_color(&a.label))));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(bar_full,  Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(bar_empty, Style::default().fg(theme::BORDER_DIM)));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(format!("{:>6}", si(a.tokens_total)),
+            Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)));
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  (no token usage detected — open a Claude/Codex session)",
+            Style::default().fg(theme::FG_DIM)))));
+    }
+    f.render_widget(List::new(items), split[1]);
+}
+
 // Status distribution: htop-style horizontal segment bars, one per status.
 fn draw_status_distribution(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let block = Block::default()
@@ -949,7 +1030,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         line(vec![key("  ?, h        "), dim("toggle this help")]),
         line(vec![key("  p           "), dim("pause / resume refresh")]),
         line(vec![key("  r           "), dim("refresh now")]),
-        line(vec![key("  s           "), dim("cycle sort (smart / cpu / mem / uptime / agent)")]),
+        line(vec![key("  s           "), dim("cycle sort (smart / cpu / mem / tokens / uptime / agent)")]),
         line(vec![key("  g           "), dim("toggle project grouping")]),
         line(vec![key("  /, f        "), dim("filter agents by substring")]),
         line(vec![key("  Esc         "), dim("clear filter")]),

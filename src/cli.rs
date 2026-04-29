@@ -23,7 +23,7 @@ KEY BINDINGS (TUI):
   ?, h        toggle help
   p           pause / resume refresh
   r           refresh now
-  s           cycle sort (smart / cpu / mem / uptime / agent)
+  s           cycle sort (smart / cpu / mem / tokens / uptime / agent)
   g           toggle project grouping
   /           filter by substring (Esc to clear)
   j/k, ↓/↑    move selection
@@ -72,7 +72,7 @@ pub struct Args {
 
     /// Sort key.
     #[arg(short = 's', long, default_value = "smart",
-          value_parser = ["smart", "cpu", "mem", "uptime", "agent"])]
+          value_parser = ["smart", "cpu", "mem", "tokens", "uptime", "agent"])]
     pub sort: String,
 
     /// Additional agent matchers, repeatable.  e.g. `-m mybot=python.*bot\.py`

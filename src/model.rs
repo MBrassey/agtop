@@ -173,6 +173,8 @@ pub struct History {
     pub busy: Vec<f64>,
     pub cpu: Vec<f64>,
     pub mem: Vec<f64>,
+    /// Per-tick *delta* in cumulative tokens — gives a true activity pulse.
+    pub tokens_rate: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

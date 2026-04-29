@@ -27,11 +27,13 @@ pub struct Collector {
     num_cpus: usize,
     known_pids: HashMap<u32, String>,
     activity: VecDeque<ActivityEvent>,
-    history_total:  VecDeque<f64>,
-    history_active: VecDeque<f64>,
-    history_busy:   VecDeque<f64>,
-    history_cpu:    VecDeque<f64>,
-    history_mem:    VecDeque<f64>,
+    history_total:        VecDeque<f64>,
+    history_active:       VecDeque<f64>,
+    history_busy:         VecDeque<f64>,
+    history_cpu:          VecDeque<f64>,
+    history_mem:          VecDeque<f64>,
+    history_tokens_rate:  VecDeque<f64>,
+    prev_tokens_total:    u64,
 }
 
 struct PrevCpu {
@@ -50,11 +52,13 @@ impl Collector {
             num_cpus: proc_::num_cpus(),
             known_pids: HashMap::new(),
             activity: VecDeque::with_capacity(MAX_ACTIVITY),
-            history_total:  VecDeque::with_capacity(HISTORY),
-            history_active: VecDeque::with_capacity(HISTORY),
-            history_busy:   VecDeque::with_capacity(HISTORY),
-            history_cpu:    VecDeque::with_capacity(HISTORY),
-            history_mem:    VecDeque::with_capacity(HISTORY),
+            history_total:        VecDeque::with_capacity(HISTORY),
+            history_active:       VecDeque::with_capacity(HISTORY),
+            history_busy:         VecDeque::with_capacity(HISTORY),
+            history_cpu:          VecDeque::with_capacity(HISTORY),
+            history_mem:          VecDeque::with_capacity(HISTORY),
+            history_tokens_rate:  VecDeque::with_capacity(HISTORY),
+            prev_tokens_total:    0,
         }
     }
 
@@ -279,6 +283,15 @@ impl Collector {
         push_bounded(&mut self.history_busy,   busy_count as f64, HISTORY);
         push_bounded(&mut self.history_cpu,    (agg_cpu * 10.0).round() / 10.0, HISTORY);
         push_bounded(&mut self.history_mem,    ((agg_mem as f64 / 1_048_576.0) * 10.0).round() / 10.0, HISTORY);
+        // Token rate = tokens added since last tick. First tick yields 0
+        // because we don't yet have a baseline.
+        let tokens_delta = if self.prev_tokens_total == 0 {
+            0.0
+        } else {
+            tokens_grand_total.saturating_sub(self.prev_tokens_total) as f64
+        };
+        self.prev_tokens_total = tokens_grand_total;
+        push_bounded(&mut self.history_tokens_rate, tokens_delta, HISTORY);
 
         let project_count = projects.len() as u32;
         Snapshot {
@@ -305,11 +318,12 @@ impl Collector {
             projects,
             sessions: sessions.sessions,
             history: History {
-                total:  self.history_total.iter().copied().collect(),
-                active: self.history_active.iter().copied().collect(),
-                busy:   self.history_busy.iter().copied().collect(),
-                cpu:    self.history_cpu.iter().copied().collect(),
-                mem:    self.history_mem.iter().copied().collect(),
+                total:       self.history_total.iter().copied().collect(),
+                active:      self.history_active.iter().copied().collect(),
+                busy:        self.history_busy.iter().copied().collect(),
+                cpu:         self.history_cpu.iter().copied().collect(),
+                mem:         self.history_mem.iter().copied().collect(),
+                tokens_rate: self.history_tokens_rate.iter().copied().collect(),
             },
             activity: self.activity.iter().rev().take(80).cloned().collect(),
         }
