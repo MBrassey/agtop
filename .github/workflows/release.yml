@@ -88,15 +88,27 @@ jobs:
             echo "::error::CRATES_IO_TOKEN secret not set"
             exit 1
           fi
-          # Skip cleanly if the version is already on crates.io (e.g. the
-          # tag was re-pushed for a docs-only re-roll).  Hard-fail on any
-          # other publish error so silent breakage can't ship.
           version=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
-          if cargo search "agtop" --limit 1 | grep -qE "^agtop = \"$version\""; then
+          # Direct API check (cargo search has index-propagation lag of
+          # several minutes after a fresh upload).
+          if curl -sfo /dev/null "https://crates.io/api/v1/crates/agtop/$version"; then
             echo "agtop $version already on crates.io — skipping"
             exit 0
           fi
-          cargo publish --token "$CRATES_IO_TOKEN"
+          # Even with the API check above, a re-dispatched run can race
+          # against a still-propagating publish.  Trap the canonical
+          # "already exists" error and treat as success; hard-fail on
+          # anything else so silent breakage can't ship.
+          if out=$(cargo publish --token "$CRATES_IO_TOKEN" 2>&1); then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out"
+          if echo "$out" | grep -q "already exists on crates.io index"; then
+            echo "agtop $version already on crates.io (caught via publish error) — treating as success"
+            exit 0
+          fi
+          exit 1
 
   publish-npm:
     name: Publish to npm (@mbrassey/agtop)
