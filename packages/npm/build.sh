@@ -18,7 +18,7 @@ mkdir -p "$build"
 
 cat > "$build/package.json" <<EOF
 {
-  "name": "@blueprint.xyz/agtop",
+  "name": "@mbrassey/agtop",
   "version": "${version}",
   "description": "Terminal UI for monitoring AI coding agents — like top, but for agents.",
   "keywords": ["agent","ai","monitor","tui","terminal","top","htop","btop","claude","codex","aider","cursor","observability"],
