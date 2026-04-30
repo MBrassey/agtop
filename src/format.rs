@@ -157,9 +157,12 @@ fn derive_project_raw(cwd: &str, exe: &str, cmdline: &str, label: &str) -> Strin
     let cwd_path = std::path::Path::new(cwd);
     let is_root = cwd_path.parent().is_none()    // unix root, win drive root
         || cwd == "/" || cwd == "\\";
+    // `/proc` is a Linux convention — but checking it on every platform
+    // is harmless (no other OS uses it) and keeps the unit tests
+    // passing identically across linux / macOS / Windows runners.
     let cwd_bad = cwd_basename.is_empty()
         || is_root
-        || (cfg!(target_os = "linux") && cwd.starts_with("/proc"))
+        || cwd.starts_with("/proc")
         || cwd_basename == "tmp"
         || cwd_basename == "?";
     if !cwd_bad {

@@ -49,3 +49,14 @@ jobs:
           git config user.email "matt@brassey.io"
           git tag -a "${{ steps.ver.outputs.tag }}" -m "agtop ${{ steps.ver.outputs.version }}"
           git push origin "${{ steps.ver.outputs.tag }}"
+
+      # Tags pushed by GITHUB_TOKEN don't fan out to other workflows
+      # (GitHub guards against infinite loops).  Explicitly dispatch
+      # the release workflow against the freshly-pushed ref so the
+      # build / publish-crates / publish-npm jobs actually run.
+      - name: Dispatch release workflow
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run release.yml --ref "${{ steps.ver.outputs.tag }}"

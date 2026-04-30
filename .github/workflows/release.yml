@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ['v*.*.*']
+  # Allow auto-tag.yml to invoke the release flow against a freshly-
+  # pushed tag — GITHUB_TOKEN-pushed tags don't trigger `on: push:tags`.
+  workflow_dispatch:
 
 permissions:
   contents: write
