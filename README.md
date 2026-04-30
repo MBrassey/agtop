@@ -10,7 +10,7 @@ and Aider, and renders per-agent CPU, memory, status, current tool,
 in-flight subagents, token usage, and estimated cost in a
 project-grouped TUI.
 
-[![Crate](https://img.shields.io/badge/version-2.1.7-1f6feb)](https://github.com/MBrassey/agtop/releases)
+[![Crate](https://img.shields.io/badge/version-2.1.8-1f6feb)](https://github.com/MBrassey/agtop/releases)
 [![License](https://img.shields.io/badge/license-MIT-1f6feb)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.74%2B-1f6feb)](https://www.rust-lang.org)
 [![Platform](https://img.shields.io/badge/platform-linux%20·%20macOS%20·%20windows-1f6feb)](#platforms)
