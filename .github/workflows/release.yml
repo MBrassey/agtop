@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  suffix: linux-x86_64,  ext: ''     }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, suffix: linux-aarch64, ext: '',    cross: true }
+          - { os: macos-latest,   target: x86_64-apple-darwin,       suffix: macos-x86_64,  ext: ''     }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      suffix: macos-aarch64, ext: ''     }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    suffix: windows-x86_64, ext: '.exe' }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compile toolchain (linux/aarch64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="agtop-${{ matrix.suffix }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/agtop${{ matrix.ext }}" "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          cd dist
+          tar -czf "${name}.tar.gz" "$name"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "agtop-${{ matrix.suffix }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/agtop${{ matrix.ext }}" "dist/$name/"
+          Copy-Item "README.md","LICENSE" "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip" -Force
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/agtop-${{ matrix.suffix }}.tar.gz
+            dist/agtop-${{ matrix.suffix }}.zip
+          fail_on_unmatched_files: false
+          generate_release_notes: true
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo publish (skip if no token)
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          if [ -n "$CRATES_IO_TOKEN" ]; then
+            cargo publish --token "$CRATES_IO_TOKEN"
+          else
+            echo "CRATES_IO_TOKEN secret not set — skipping crates.io publish"
+          fi
+        continue-on-error: true

@@ -1,0 +1,17 @@
+# agtop pricing override file.
+#
+# Pass with:   agtop --prices ~/.config/agtop/prices.toml
+# Or set env:  AGTOP_PRICES=~/.config/agtop/prices.toml
+#
+# Values are USD per 1,000,000 tokens.  Any model not listed here falls back
+# to agtop's built-in defaults; lookups are suffix-tolerant so you don't have
+# to enumerate every dated revision (e.g. claude-sonnet-4-7-20260101 will
+# resolve to claude-sonnet-4-7 if only the latter is defined).
+
+[models."my-private-model"]
+input_per_mtok  = 0.50
+output_per_mtok = 2.00
+
+[models."claude-opus-4-7"]
+input_per_mtok  = 15.00
+output_per_mtok = 75.00
