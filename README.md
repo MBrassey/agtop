@@ -351,7 +351,7 @@ agtop/
 │   └── sync_prices.py                LiteLLM → pricing_data.rs sync
 ├── packages/{npm,deb,pacman}/        build.sh per format
 ├── homebrew/agtop.rb                 formula + tap setup
-├── .github/workflows/                ci.yml · release.yml · sync-prices.yml
+├── .github/workflows/                ci.yml · release.yml · auto-tag.yml · sync-prices.yml
 └── docs/                             screenshots + capture pipeline
 ```
 
@@ -359,14 +359,22 @@ agtop/
 
 ## Distribution channels
 
-| Channel        | Source of truth                                                |
-| -------------- | -------------------------------------------------------------- |
-| GitHub Release | tagged `vX.Y.Z`; `release.yml` builds prebuilts for 5 targets  |
-| crates.io      | `Cargo.toml`                                                   |
-| AUR            | `packages/pacman/PKGBUILD`                                     |
-| Homebrew tap   | `homebrew/agtop.rb`                                            |
-| Debian PPA     | `packages/deb/build.sh`                                        |
-| npm            | `packages/npm/build.sh` (prebuilt-fetching shim)               |
+A version bump in `Cargo.toml` is the only manual step: `auto-tag.yml`
+watches the file on `main`, pushes a matching `vX.Y.Z` tag, and the
+release workflow fans out to all three primary registries in parallel.
+
+| Channel        | Source of truth                          | Auto-published on tag |
+| -------------- | ---------------------------------------- | :-------------------: |
+| GitHub Release | `release.yml` build matrix (5 targets)   | ✓                     |
+| crates.io      | `Cargo.toml`                             | ✓                     |
+| npm            | `packages/npm/build.sh` (prebuilt shim)  | ✓                     |
+| AUR            | `packages/pacman/PKGBUILD`               |                       |
+| Homebrew tap   | `homebrew/agtop.rb`                      |                       |
+| Debian PPA     | `packages/deb/build.sh`                  |                       |
+
+CI publishes use repo secrets `CRATES_IO_TOKEN` and `NPM_TOKEN`; the
+publish jobs idempotently skip when the version is already on the
+destination registry, so re-pushing or re-tagging is safe.
 
 ---
 
