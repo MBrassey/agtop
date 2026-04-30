@@ -127,3 +127,60 @@ jobs:
             exit 0
           fi
           npm publish --access public
+
+  publish-aur:
+    name: Publish to AUR
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: ver
+        run: |
+          v=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      # Pull the GH-archive tarball that the AUR PKGBUILD will reference,
+      # then sha256 it.  The archive endpoint becomes available the
+      # instant the tag is pushed, so retry a few times in case GitHub's
+      # CDN is briefly cold for a fresh tag.
+      - name: Compute release tarball sha256
+        id: sha
+        run: |
+          url="https://github.com/mbrassey/agtop/archive/v${{ steps.ver.outputs.version }}.tar.gz"
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -sfL -o /tmp/agtop.tar.gz "$url"; then
+              break
+            fi
+            echo "tarball not ready (attempt $i) — sleeping 10s"
+            sleep 10
+          done
+          sha=$(sha256sum /tmp/agtop.tar.gz | awk '{print $1}')
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tarball $sha"
+
+      # The in-repo PKGBUILD is wired for local `packages/pacman/build.sh`
+      # builds (source is a tarball staged by the build script).  For AUR
+      # we rewrite source= to fetch the GH archive and stamp the real
+      # sha256.  Output goes to a temp directory the AUR action picks up.
+      - name: Prepare AUR PKGBUILD
+        run: |
+          mkdir -p aur-pkg
+          cp packages/pacman/PKGBUILD aur-pkg/PKGBUILD
+          sed -i 's|^source=.*|source=("agtop-${pkgver}.tar.gz::https://github.com/mbrassey/agtop/archive/v${pkgver}.tar.gz")|' aur-pkg/PKGBUILD
+          sed -i "s|^sha256sums=.*|sha256sums=('${{ steps.sha.outputs.sha }}')|" aur-pkg/PKGBUILD
+          echo "── final PKGBUILD ──"
+          cat aur-pkg/PKGBUILD
+
+      - name: Push to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
+        with:
+          pkgname: agtop
+          pkgbuild: aur-pkg/PKGBUILD
+          commit_username: mbrassey
+          commit_email: matt@brassey.io
+          commit_message: "agtop ${{ steps.ver.outputs.version }}"
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          force_push: false
+          allow_empty_commits: false
