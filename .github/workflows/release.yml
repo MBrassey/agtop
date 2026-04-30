@@ -132,8 +132,42 @@ jobs:
     name: Publish to AUR
     needs: build
     runs-on: ubuntu-latest
+    # Run inside an Arch container so makepkg / .SRCINFO regeneration
+    # is native rather than chained through a third-party action.
+    container:
+      image: archlinux:latest
     steps:
+      - name: Install host deps
+        run: |
+          pacman -Sy --noconfirm --needed git openssh sudo base-devel curl awk
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Setup SSH for AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "::error::AUR_SSH_PRIVATE_KEY secret not set"
+            exit 1
+          fi
+          mkdir -p /home/builder/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > /home/builder/.ssh/id_aur
+          chmod 600 /home/builder/.ssh/id_aur
+          ssh-keyscan -t ed25519,rsa,ecdsa aur.archlinux.org > /home/builder/.ssh/known_hosts 2>/dev/null
+          cat > /home/builder/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/id_aur
+            User aur
+            StrictHostKeyChecking yes
+            IdentitiesOnly yes
+          EOF
+          chmod 600 /home/builder/.ssh/config /home/builder/.ssh/known_hosts
+          chown -R builder:builder /home/builder/.ssh
 
       - name: Resolve version
         id: ver
@@ -141,46 +175,47 @@ jobs:
           v=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
-      # Pull the GH-archive tarball that the AUR PKGBUILD will reference,
-      # then sha256 it.  The archive endpoint becomes available the
-      # instant the tag is pushed, so retry a few times in case GitHub's
-      # CDN is briefly cold for a fresh tag.
       - name: Compute release tarball sha256
         id: sha
         run: |
           url="https://github.com/mbrassey/agtop/archive/v${{ steps.ver.outputs.version }}.tar.gz"
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if curl -sfL -o /tmp/agtop.tar.gz "$url"; then
-              break
-            fi
+          for i in $(seq 1 10); do
+            if curl -sfL -o /tmp/agtop.tar.gz "$url"; then break; fi
             echo "tarball not ready (attempt $i) — sleeping 10s"
             sleep 10
           done
           sha=$(sha256sum /tmp/agtop.tar.gz | awk '{print $1}')
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "tarball $sha"
 
-      # The in-repo PKGBUILD is wired for local `packages/pacman/build.sh`
-      # builds (source is a tarball staged by the build script).  For AUR
-      # we rewrite source= to fetch the GH archive and stamp the real
-      # sha256.  Output goes to a temp directory the AUR action picks up.
-      - name: Prepare AUR PKGBUILD
+      - name: Update AUR repo
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          SHA256:  ${{ steps.sha.outputs.sha }}
         run: |
-          mkdir -p aur-pkg
-          cp packages/pacman/PKGBUILD aur-pkg/PKGBUILD
-          sed -i 's|^source=.*|source=("agtop-${pkgver}.tar.gz::https://github.com/mbrassey/agtop/archive/v${pkgver}.tar.gz")|' aur-pkg/PKGBUILD
-          sed -i "s|^sha256sums=.*|sha256sums=('${{ steps.sha.outputs.sha }}')|" aur-pkg/PKGBUILD
-          echo "── final PKGBUILD ──"
-          cat aur-pkg/PKGBUILD
-
-      - name: Push to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v4.1.1
-        with:
-          pkgname: agtop
-          pkgbuild: aur-pkg/PKGBUILD
-          commit_username: mbrassey
-          commit_email: matt@brassey.io
-          commit_message: "agtop ${{ steps.ver.outputs.version }}"
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          force_push: false
-          allow_empty_commits: false
+          # The Actions checkout lives at $GITHUB_WORKSPACE inside the
+          # container.  Stage the PKGBUILD into builder's homedir so
+          # makepkg can run as the unprivileged user (it refuses root).
+          cp packages/pacman/PKGBUILD /home/builder/PKGBUILD.in
+          chown builder:builder /home/builder/PKGBUILD.in
+          sudo -u builder -H bash -se <<INNER
+          set -euo pipefail
+          cd "\$HOME"
+          git clone ssh://aur@aur.archlinux.org/agtop.git aur-repo
+          cd aur-repo
+          cp ../PKGBUILD.in PKGBUILD
+          # Rewrite source line to fetch from GH archive, stamp real sha256.
+          # \\\${pkgver} stays literal (PKGBUILD-side variable); \${SHA256}
+          # and \${VERSION} substitute here from the outer GH Actions step.
+          sed -i 's|^source=.*|source=("agtop-\${pkgver}.tar.gz::https://github.com/mbrassey/agtop/archive/v\${pkgver}.tar.gz")|' PKGBUILD
+          sed -i "s|^sha256sums=.*|sha256sums=('${SHA256}')|" PKGBUILD
+          makepkg --printsrcinfo > .SRCINFO
+          git config user.name  'mbrassey'
+          git config user.email 'matt@brassey.io'
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR repo already at this version — skipping push"
+            exit 0
+          fi
+          git commit -m "agtop ${VERSION}"
+          git push
+          INNER
