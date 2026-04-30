@@ -1,0 +1,51 @@
+name: Auto-tag on version bump
+
+# When the version in Cargo.toml changes on main, push a matching
+# vX.Y.Z tag.  That tag triggers release.yml, which builds prebuilts,
+# publishes the GitHub Release, and pushes to crates.io + npm.
+#
+# Net effect: bumping Cargo.toml version + push is the only manual
+# step required to ship a new release across all channels.
+
+on:
+  push:
+    branches: [main]
+    paths: [Cargo.toml]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0     # need full history to enumerate tags
+
+      - name: Determine version
+        id: ver
+        run: |
+          version=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version"   >> "$GITHUB_OUTPUT"
+
+      - name: Skip if tag already exists
+        id: gate
+        run: |
+          if git rev-parse "refs/tags/${{ steps.ver.outputs.tag }}" >/dev/null 2>&1; then
+            echo "tag ${{ steps.ver.outputs.tag }} already exists — nothing to do"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag and push
+        if: steps.gate.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name  "mbrassey"
+          git config user.email "matt@brassey.io"
+          git tag -a "${{ steps.ver.outputs.tag }}" -m "agtop ${{ steps.ver.outputs.version }}"
+          git push origin "${{ steps.ver.outputs.tag }}"

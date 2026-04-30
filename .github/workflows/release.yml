@@ -77,13 +77,50 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: cargo publish (skip if no token)
+      - name: cargo publish
         env:
           CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
-          if [ -n "$CRATES_IO_TOKEN" ]; then
-            cargo publish --token "$CRATES_IO_TOKEN"
-          else
-            echo "CRATES_IO_TOKEN secret not set — skipping crates.io publish"
+          if [ -z "$CRATES_IO_TOKEN" ]; then
+            echo "::error::CRATES_IO_TOKEN secret not set"
+            exit 1
           fi
-        continue-on-error: true
+          # Skip cleanly if the version is already on crates.io (e.g. the
+          # tag was re-pushed for a docs-only re-roll).  Hard-fail on any
+          # other publish error so silent breakage can't ship.
+          version=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          if cargo search "agtop" --limit 1 | grep -qE "^agtop = \"$version\""; then
+            echo "agtop $version already on crates.io — skipping"
+            exit 0
+          fi
+          cargo publish --token "$CRATES_IO_TOKEN"
+
+  publish-npm:
+    name: Publish to npm (@mbrassey/agtop)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Build npm tarball
+        run: bash packages/npm/build.sh
+      - name: Publish (skip if version already on npm)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN secret not set"
+            exit 1
+          fi
+          cd packages/npm/build
+          version=$(node -p "require('./package.json').version")
+          name=$(node -p "require('./package.json').name")
+          published=$(npm view "$name@$version" version 2>/dev/null || true)
+          if [ -n "$published" ]; then
+            echo "$name@$version already on npm — skipping"
+            exit 0
+          fi
+          npm publish --access public
