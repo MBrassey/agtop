@@ -32,7 +32,12 @@ pub fn group_tint(i: usize) -> Color {
 pub const C_BUSY:   Color = Color::Rgb(120, 215, 150);     // sage green (deeper)
 pub const C_SPAWN:  Color = Color::Rgb(140, 215, 185);     // teal-sage (shifted warmer for tritanopia)
 pub const C_ACTIVE: Color = Color::Rgb(195, 210, 130);     // yellow-sage (distinct from BUSY)
-pub const C_IDLE:   Color = Color::Rgb(155, 155, 155);     // neutral gray
+// Brighter than the original 155-grey so the `idle` label stays
+// legible in the status-distribution bar and the agent rows on
+// terminals with low-contrast or backlit-light themes.  Still
+// distinct from FG (225) so an idle row doesn't visually compete
+// with active rows.
+pub const C_IDLE:   Color = Color::Rgb(195, 195, 195);     // soft gray, readable on any bg
 pub const C_WAIT:   Color = Color::Rgb(225, 175, 110);     // amber (shifted to break tie with cpu_color tier-2)
 pub const C_DONE:   Color = Color::Rgb(200, 175, 215);     // soft lavender
 pub const C_STALE:  Color = Color::Rgb(110, 105, 108);     // dim gray
@@ -63,7 +68,11 @@ pub fn status_style(s: Status) -> Style {
     let st = Style::default().fg(status_color(s));
     if matches!(s, Status::Busy | Status::Spawning) {
         st.add_modifier(Modifier::BOLD)
-    } else if matches!(s, Status::Idle | Status::Stale) {
+    } else if matches!(s, Status::Stale) {
+        // Stale agents legitimately recede.  Idle does NOT — the brighter
+        // C_IDLE colour already conveys "quiet" without needing the DIM
+        // modifier to stack on top, which made the label invisible on
+        // some terminals.
         st.add_modifier(Modifier::DIM)
     } else {
         st

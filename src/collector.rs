@@ -70,6 +70,11 @@ const PER_AGENT_HISTORY: usize = 24;
 
 struct PrevCpu {
     total: u64,
+    /// Process start-time in clock ticks since boot, used to detect PID
+    /// reuse: if a new pid lookup finds the same numeric pid but a
+    /// different starttime, it's a different process and we must
+    /// discard the previous CPU sample to avoid a wildly wrong delta.
+    starttime: u64,
 }
 
 impl Collector {
@@ -130,8 +135,13 @@ impl Collector {
             let io = proc_::read_io(pid).unwrap_or_default();
             let writing = proc_::read_writing_files(pid, 4);
 
-            let proc_total = stat.utime + stat.stime;
-            let prev_total = self.prev.get(&pid).map(|p| p.total);
+            let proc_total = stat.utime.saturating_add(stat.stime);
+            // PID-reuse guard: only trust the previous sample if its
+            // recorded starttime matches the current /proc/<pid>/stat.
+            // Otherwise a recycled pid would produce a fictitious delta.
+            let prev_total = self.prev.get(&pid)
+                .filter(|p| p.starttime == stat.starttime)
+                .map(|p| p.total);
             let cpu_raw = match prev_total {
                 Some(pt) => {
                     let proc_delta = proc_total.saturating_sub(pt) as f64;
@@ -139,18 +149,27 @@ impl Collector {
                 }
                 None => 0.0,
             }.max(0.0);
-            self.prev.insert(pid, PrevCpu { total: proc_total });
+            self.prev.insert(pid, PrevCpu { total: proc_total, starttime: stat.starttime });
 
-            let smoothed = match self.cpu_smooth.get(&pid) {
-                Some(prev) => prev * 0.6 + cpu_raw * 0.4,
-                None => cpu_raw,
+            let smoothed = if prev_total.is_some() {
+                match self.cpu_smooth.get(&pid) {
+                    Some(prev) => prev * 0.6 + cpu_raw * 0.4,
+                    None => cpu_raw,
+                }
+            } else {
+                // Reset smoothing when we discarded the previous sample
+                // (first sight or pid-reuse).
+                cpu_raw
             };
             self.cpu_smooth.insert(pid, smoothed);
 
             let rss_bytes = stat.rss_pages * proc_::PAGE_SIZE;
-            let started_at_sec = self.boot_time + stat.starttime / proc_::CLK_TCK;
+            let started_at_sec = self.boot_time
+                .saturating_add(stat.starttime / proc_::CLK_TCK);
             let now_sec = now / 1000;
-            let uptime_sec = now_sec.saturating_sub(started_at_sec);
+            // boot_time == 0 means /proc/stat was unreadable; skip the
+            // uptime computation rather than reporting a multi-decade value.
+            let uptime_sec = if self.boot_time == 0 { 0 } else { now_sec.saturating_sub(started_at_sec) };
 
             let cwd = cwd_path.to_string_lossy().into_owned();
             let exe = exe_path.to_string_lossy().into_owned();
@@ -177,6 +196,9 @@ impl Collector {
                 tokens_output: 0,
                 cost_usd: 0.0,
                 cost_basis: "unknown".into(),
+                context_used: 0,
+                context_limit: 0,
+                loaded_skills: Vec::new(),
                 model: None,
                 dangerous: is_dangerous_invocation(&cmdline),
                 in_flight_subagents: Vec::new(),
@@ -210,8 +232,8 @@ impl Collector {
         // Spawn / exit events.
         let live_pids: std::collections::HashSet<u32> = agents.iter().map(|a| a.pid).collect();
         for a in &agents {
-            if !self.known_pids.contains_key(&a.pid) {
-                self.known_pids.insert(a.pid, a.label.clone());
+            if let std::collections::hash_map::Entry::Vacant(e) = self.known_pids.entry(a.pid) {
+                e.insert(a.label.clone());
                 self.push_activity(ActivityEvent {
                     t: now,
                     kind: ActivityKind::Spawn,
@@ -278,9 +300,11 @@ impl Collector {
 
         let busy_count = agents.iter().filter(|a| matches!(a.status, Status::Busy | Status::Spawning)).count() as u32;
         let subagents_total: u32 = agents.iter().map(|a| a.subagents).sum();
-        let tokens_input_total:  u64 = agents.iter().map(|a| a.tokens_input).sum();
-        let tokens_output_total: u64 = agents.iter().map(|a| a.tokens_output).sum();
-        let tokens_grand_total = tokens_input_total + tokens_output_total;
+        // Saturating sums — defensive against pathological cumulative
+        // session counters; real totals never come close to u64::MAX.
+        let tokens_input_total:  u64 = agents.iter().map(|a| a.tokens_input).fold(0u64, u64::saturating_add);
+        let tokens_output_total: u64 = agents.iter().map(|a| a.tokens_output).fold(0u64, u64::saturating_add);
+        let tokens_grand_total = tokens_input_total.saturating_add(tokens_output_total);
         let cost_grand_total: f64 = agents.iter().map(|a| a.cost_usd).sum();
 
         push_bounded(&mut self.history_total,  agents.len() as f64, HISTORY);
@@ -390,6 +414,20 @@ impl Collector {
                     crate::pricing::CostBasis::Local   => "local".into(),
                     crate::pricing::CostBasis::Unknown => "unknown".into(),
                 };
+                a.context_limit = self.pricing.context_limit(model);
+            }
+            // Context-window usage from the latest assistant turn (set
+            // by the vendor enrichers above).  Defaults to 0 when
+            // unknown.
+            if let Some(s) = merged.by_pid.get(&a.pid) {
+                a.context_used = s.context_used;
+            }
+            // Claude Code skills loaded for this session — scan the
+            // project-local + user-global skill roots.  Cheap (one
+            // readdir per scope, no recursion) so safe to do every
+            // tick; also gracefully empty for non-Claude vendors.
+            if a.label == "claude" {
+                a.loaded_skills = crate::skills::skills_for_cwd(&a.cwd);
             }
         }
 
@@ -436,8 +474,8 @@ impl Collector {
         // Spawn / exit events.
         let live_pids: std::collections::HashSet<u32> = agents.iter().map(|a| a.pid).collect();
         for a in &agents {
-            if !self.known_pids.contains_key(&a.pid) {
-                self.known_pids.insert(a.pid, a.label.clone());
+            if let std::collections::hash_map::Entry::Vacant(e) = self.known_pids.entry(a.pid) {
+                e.insert(a.label.clone());
                 self.push_activity(ActivityEvent {
                     t: now, kind: ActivityKind::Spawn,
                     label: a.label.clone(), pid: a.pid, cwd: Some(a.cwd.clone()),
@@ -500,9 +538,11 @@ impl Collector {
 
         let busy_count = agents.iter().filter(|a| matches!(a.status, Status::Busy | Status::Spawning)).count() as u32;
         let subagents_total: u32 = agents.iter().map(|a| a.subagents).sum();
-        let tokens_input_total:  u64 = agents.iter().map(|a| a.tokens_input).sum();
-        let tokens_output_total: u64 = agents.iter().map(|a| a.tokens_output).sum();
-        let tokens_grand_total = tokens_input_total + tokens_output_total;
+        // Saturating sums — defensive against pathological cumulative
+        // session counters; real totals never come close to u64::MAX.
+        let tokens_input_total:  u64 = agents.iter().map(|a| a.tokens_input).fold(0u64, u64::saturating_add);
+        let tokens_output_total: u64 = agents.iter().map(|a| a.tokens_output).fold(0u64, u64::saturating_add);
+        let tokens_grand_total = tokens_input_total.saturating_add(tokens_output_total);
         let cost_grand_total: f64 = agents.iter().map(|a| a.cost_usd).sum();
 
         push_bounded(&mut self.history_total,  agents.len() as f64, HISTORY);
@@ -521,8 +561,8 @@ impl Collector {
             platform: std::env::consts::OS.to_string(),
             note: Some("running via sysinfo backend (no /proc) — IO bytes and writing-files unavailable".into()),
             sys_cpus: self.num_cpus as u32,
-            mem_total: 0,
-            mem_available: 0,
+            mem_total: self.sys.as_ref().map(|s| s.total_memory()).unwrap_or(0),
+            mem_available: self.sys.as_ref().map(|s| s.available_memory()).unwrap_or(0),
             aggregates: Aggregates {
                 cpu: agg_cpu, mem_bytes: agg_mem,
                 active: agents.len() as u32, busy: busy_count,

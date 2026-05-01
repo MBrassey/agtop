@@ -85,6 +85,13 @@ pub fn sparkline(values: &[f64], max: f64, width: usize) -> String {
 /// corrupted JSONL transcript can otherwise hijack the cursor / clipboard /
 /// title via embedded ANSI sequences.
 pub fn sanitize_control(s: &str) -> String {
+    /// Hard cap on how far we'll scan for a CSI/OSC terminator.  A
+    /// pathological transcript with a bare `ESC[` followed by 1 MiB
+    /// of digits and no terminator would otherwise let those bytes
+    /// fall through to the output (they look like parameter chars,
+    /// not the final byte).  256 is well above the longest legitimate
+    /// CSI/OSC sequence (~80 chars for a real terminal-control op).
+    const MAX_ESC_RUN: usize = 256;
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -92,17 +99,31 @@ pub fn sanitize_control(s: &str) -> String {
             '\t' => out.push(' '),
             '\x1b' => {
                 // Eat any CSI / OSC parameter run + final byte / terminator.
-                if let Some(&n) = chars.peek() {
-                    if n == '[' || n == ']' || n == '(' || n == ')' || n == 'P' || n == '_' || n == '^' {
-                        chars.next();
-                        for c2 in chars.by_ref() {
-                            if c2 == '\x07' || c2 == '\x1b' { break; }
-                            if c2.is_ascii_alphabetic() || c2 == '\\' { break; }
+                let intro = chars.peek().copied();
+                let is_csi_or_osc = matches!(intro, Some('[' | ']' | '(' | ')' | 'P' | '_' | '^'));
+                if is_csi_or_osc {
+                    chars.next();
+                    let mut consumed = 0usize;
+                    let mut terminated = false;
+                    for c2 in chars.by_ref() {
+                        consumed += 1;
+                        if c2 == '\x07' || c2 == '\x1b' || c2.is_ascii_alphabetic() || c2 == '\\' {
+                            terminated = true;
+                            break;
                         }
-                    } else {
-                        chars.next();
+                        if consumed >= MAX_ESC_RUN {
+                            // Bail out — drop everything that followed.
+                            // Already consumed the parameter bytes silently.
+                            break;
+                        }
                     }
+                    let _ = terminated;
+                } else if intro.is_some() {
+                    // Two-byte ESC sequence (like ESC + 'D') — drop both.
+                    chars.next();
                 }
+                // Bare trailing ESC at end of string — already consumed,
+                // nothing emitted.
             }
             c if (c as u32) < 0x20 || c == '\x7f' => { /* drop */ }
             // C1 controls 0x80..=0x9f are dropped.
@@ -136,7 +157,7 @@ pub fn project_basename(cwd: &str) -> String {
         // hands us with a trailing slash.
         .unwrap_or_else(|| {
             let trimmed = cwd.trim_end_matches(&['/', '\\'][..]);
-            trimmed.rsplit(|c| c == '/' || c == '\\')
+            trimmed.rsplit(['/', '\\'])
                 .find(|s| !s.is_empty()).unwrap_or("").to_string()
         })
 }

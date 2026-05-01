@@ -69,6 +69,7 @@ pub fn summarise(agents: &[Agent], live_agents: &[LiveAgentRef], _now_ms: u64) -
                 tokens_output: 0,
                 tokens_total: 0,
                 cost_usd: 0.0,
+                context_used: 0,
                 model: None,
             });
         }

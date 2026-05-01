@@ -23,10 +23,15 @@ pub fn root() -> PathBuf {
 }
 
 fn read_tail(path: &Path, bytes: u64) -> String {
+    // Hard-cap below i64::MAX and below usize::MAX on 32-bit targets so the
+    // subsequent casts can't wrap.  64 MiB is generous — real callers pass
+    // ~256 KiB; this just keeps a malformed/symlinked file from triggering
+    // a panic-via-cast on tiny architectures.
+    const MAX_TAIL: u64 = 64 * 1024 * 1024;
     let mut f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
     let len = match f.metadata() { Ok(m) => m.len(), Err(_) => return String::new() };
     if len == 0 { return String::new(); }
-    let take = bytes.min(len);
+    let take = bytes.min(len).min(MAX_TAIL);
     if f.seek(SeekFrom::End(-(take as i64))).is_err() {
         return String::new();
     }
@@ -61,6 +66,13 @@ struct AnalysisOut {
     recent_activity: Vec<String>,
     tokens_input: u64,
     tokens_output: u64,
+    /// Latest assistant turn's input window size in tokens.  Computed
+    /// as `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`
+    /// of the *last* usage block in the transcript — represents the
+    /// total prompt size on the next request, i.e. how full the
+    /// model's context window is right now.  Drives the popup's
+    /// "Context: X% used" indicator.
+    context_used: u64,
     model: Option<String>,
 }
 
@@ -93,8 +105,14 @@ fn analyse(records: &[Value]) -> AnalysisOut {
             // Cache-read counts as charged input under most pricing schemes.
             let cr = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             let cc = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            out.tokens_input  += it + cr + cc;
-            out.tokens_output += ot;
+            out.tokens_input  = out.tokens_input.saturating_add(it + cr + cc);
+            out.tokens_output = out.tokens_output.saturating_add(ot);
+            // The most recent usage block's input window IS the current
+            // context fill (cumulative-prompt size on the next request).
+            // Records iterate oldest → newest, so the last assignment
+            // wins.  cache_creation_input_tokens is included because
+            // those tokens are part of the prompt the model just saw.
+            out.context_used = it.saturating_add(cr).saturating_add(cc);
         }
 
         // Model — most recent assistant message wins.
@@ -239,17 +257,53 @@ fn analyse(records: &[Value]) -> AnalysisOut {
     out
 }
 
+/// Decode a Claude Code session-path-encoded project name back into the
+/// original cwd.  Encoding rules differ by host OS:
+///
+///   POSIX:  `/home/u/code/proj` → `-home-u-code-proj`
+///   Windows: `C:\Users\u\proj`  → `C--Users-u-proj`
+///                                  ^─ bare drive letter, then `--`
+///
+/// Both have a single consistent separator (`-`) standing in for the
+/// path separator, but Windows preserves the drive letter as a literal
+/// prefix.  We detect the Windows shape via a leading `[A-Za-z]--` and
+/// emit `C:\` (backslashes) so the project label is recognisable to
+/// Windows users; otherwise we fall back to the POSIX rule.
+///
+/// Path-traversal hardening: refuse decoded paths that contain `..`
+/// segments — a directory crafted as `-..--..--etc-passwd` would
+/// otherwise surface `/../../etc/passwd` as the row label.
 fn decode_project(name: &str) -> String {
-    if name.is_empty() {
-        return String::new();
-    }
-    if name.starts_with('-') {
-        let mut s = String::from("/");
-        s.push_str(&name[1..].replace('-', "/"));
+    if name.is_empty() { return String::new(); }
+    let decoded = if let Some(rest) = windows_drive_split(name) {
+        let (drive, body) = rest;
+        let mut s = String::with_capacity(name.len() + 2);
+        s.push(drive);
+        s.push(':');
+        s.push('\\');
+        s.push_str(&body.replace('-', "\\"));
+        s
+    } else if let Some(rest) = name.strip_prefix('-') {
+        let mut s = String::with_capacity(rest.len() + 1);
+        s.push('/');
+        s.push_str(&rest.replace('-', "/"));
         s
     } else {
         name.to_string()
-    }
+    };
+    // Reject paths with `..` segments to prevent display-side traversal.
+    let bad = decoded.split(['/', '\\']).any(|seg| seg == "..");
+    if bad { String::new() } else { decoded }
+}
+
+/// Detect the Windows-encoded shape `<drive>--rest`, returning
+/// `(drive, rest)` where rest is the path body with `-` separators.
+fn windows_drive_split(name: &str) -> Option<(char, &str)> {
+    let mut chars = name.chars();
+    let drive = chars.next()?;
+    if !drive.is_ascii_alphabetic() { return None; }
+    let rest = chars.as_str();
+    rest.strip_prefix("--").map(|body| (drive, body))
 }
 
 fn classify_status(
@@ -365,8 +419,9 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 is_most_recent,
                 tokens_input: info.tokens_input,
                 tokens_output: info.tokens_output,
-                tokens_total: info.tokens_input + info.tokens_output,
+                tokens_total: info.tokens_input.saturating_add(info.tokens_output),
                 cost_usd: 0.0,
+                context_used: info.context_used,
                 model: info.model.as_deref().map(sanitize_control),
             };
 

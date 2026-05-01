@@ -83,6 +83,20 @@ pub struct Agent {
     ///   - "unknown" — no model name, or no price-table match (treated as $0 but flagged)
     pub cost_basis: String,
     pub model: Option<String>,
+    /// Latest-turn input window size in tokens (input_tokens +
+    /// cache_read_input_tokens for Anthropic, prompt_tokens for
+    /// OpenAI / Codex).  Drives the per-agent context-fill bar in the
+    /// detail popup so the user can see how close they are to
+    /// auto-compaction.  0 if unknown.
+    pub context_used: u64,
+    /// Maximum input window in tokens for this agent's model, looked
+    /// up via the bundled price table (LiteLLM-derived).  0 if unknown.
+    pub context_limit: u64,
+    /// Names of Claude Code agent skills loaded for this session.
+    /// Populated by scanning `~/.claude/skills/<name>/SKILL.md` plus
+    /// `<cwd>/.claude/skills/<name>/SKILL.md`.  Empty for non-Claude
+    /// vendors.
+    pub loaded_skills: Vec<String>,
     /// Process is running with elevated / unsafe permissions
     /// (e.g. `claude --dangerously-skip-permissions`, `--yolo`, `--no-permissions`).
     /// The TUI surfaces this as a pulsating "GOD" tag on the row.
@@ -143,6 +157,8 @@ pub struct Session {
     pub tokens_output: u64,
     pub cost_usd: f64,
     pub model: Option<String>,
+    /// Latest-turn input window size (see `Agent::context_used`).
+    pub context_used: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

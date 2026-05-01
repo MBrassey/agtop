@@ -144,6 +144,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             tokens_output: info.tokens_output,
             tokens_total: info.tokens_input + info.tokens_output,
             cost_usd: 0.0,
+            context_used: 0,
             model: info.model.as_deref().map(sanitize_control),
         };
         if let Some(pid) = live_pid {

@@ -33,11 +33,15 @@ fn candidate_roots() -> Vec<PathBuf> {
     v
 }
 
+/// Tail-read cap (real callers use 64 KiB).  Hard-clamped to keep `take as
+/// i64` and `take as usize` safe on 32-bit + against pathological inputs.
+const MAX_TAIL: u64 = 64 * 1024 * 1024;
+
 fn read_tail(path: &Path, bytes: u64) -> String {
     let mut f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
     let len = match f.metadata() { Ok(m) => m.len(), Err(_) => return String::new() };
     if len == 0 { return String::new(); }
-    let take = bytes.min(len);
+    let take = bytes.min(len).min(MAX_TAIL);
     if f.seek(SeekFrom::End(-(take as i64))).is_err() { return String::new(); }
     let mut buf = String::with_capacity(take as usize);
     let _ = f.take(take).read_to_string(&mut buf);
@@ -244,6 +248,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 tokens_output: info.tokens_output,
                 tokens_total: info.tokens_input + info.tokens_output,
                 cost_usd: 0.0,
+                context_used: 0,
                 model: info.model.as_deref().map(sanitize_control),
             };
             if let Some(pid) = live_pid {

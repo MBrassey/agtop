@@ -153,14 +153,11 @@ pub fn run() -> Result<ExitCode> {
         return run_once(&mut collector, &args);
     }
 
-    if !crate::proc_::is_linux() {
-        eprintln!("agtop: live process metrics require Linux /proc.");
-        eprintln!("       Falling back to a single Claude-sessions snapshot.");
-        let snap = collector.snapshot();
-        println!("{}", serde_json::to_string_pretty(&snap.sessions)?);
-        return Ok(ExitCode::SUCCESS);
-    }
-
+    // Both Linux (/proc) and the sysinfo-backed targets (macOS, Windows,
+    // *BSD) populate the full Snapshot via Collector::snapshot, so the
+    // TUI renders identically across platforms.  Per-process IO bytes
+    // and writable open-file enumeration are still Linux-only and are
+    // surfaced as `—` cells on other platforms.
     ui::run(collector, args)?;
     Ok(ExitCode::SUCCESS)
 }
@@ -304,7 +301,7 @@ fn describe_doing(a: &crate::model::Agent) -> String {
     }
     if a.status == crate::model::Status::Idle {
         if let Some(age) = a.session_age_ms {
-            return format!("(idle {})", crate::format::dur((age / 1000) as u64));
+            return format!("(idle {})", crate::format::dur(age / 1000));
         }
     }
     if a.status == crate::model::Status::Waiting   { return "(awaiting input)".into(); }

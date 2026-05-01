@@ -73,6 +73,33 @@ jobs:
           fail_on_unmatched_files: false
           generate_release_notes: true
 
+  sha256sums:
+    name: Aggregate SHA256SUMS
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download release assets, hash, and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          tag="v$version"
+          mkdir -p sums
+          cd sums
+          # gh release download retries internally; the build matrix has
+          # already completed by the time we get here so all 5 assets exist.
+          gh release download "$tag" --repo "${{ github.repository }}" \
+            --pattern 'agtop-*.tar.gz' --pattern 'agtop-*.zip'
+          # Standard `sha256sum`-format file: `<sha>  <filename>` per line.
+          # Sort for determinism so re-runs produce identical bytes.
+          sha256sum agtop-*.tar.gz agtop-*.zip 2>/dev/null | sort > SHA256SUMS
+          echo "── SHA256SUMS ──"
+          cat SHA256SUMS
+          gh release upload "$tag" SHA256SUMS --clobber \
+            --repo "${{ github.repository }}"
+
   publish-crates:
     name: Publish to crates.io
     needs: build
@@ -112,7 +139,9 @@ jobs:
 
   publish-npm:
     name: Publish to npm (@mbrassey/agtop)
-    needs: build
+    # SHA256SUMS must exist before npm publishes — the install.js
+    # postinstall fetches it to verify the downloaded prebuilt.
+    needs: [build, sha256sums]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -231,3 +260,58 @@ jobs:
           git commit -m "agtop ${VERSION}"
           git push
           INNER
+
+  publish-homebrew:
+    name: Publish to Homebrew tap
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version + sha256
+        id: meta
+        run: |
+          set -euo pipefail
+          v=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          url="https://github.com/mbrassey/agtop/archive/refs/tags/v${v}.tar.gz"
+          for i in $(seq 1 10); do
+            if curl -sfL -o /tmp/src.tar.gz "$url"; then break; fi
+            sleep 10
+          done
+          sha=$(sha256sum /tmp/src.tar.gz | awk '{print $1}')
+          echo "version=$v"  >> "$GITHUB_OUTPUT"
+          echo "sha=$sha"    >> "$GITHUB_OUTPUT"
+          echo "url=$url"    >> "$GITHUB_OUTPUT"
+
+      - name: Template formula
+        run: |
+          mkdir -p homebrew-out
+          sed \
+            -e "s|^  url \".*\"\$|  url \"${{ steps.meta.outputs.url }}\"|" \
+            -e "s|^  sha256 \".*\"\$|  sha256 \"${{ steps.meta.outputs.sha }}\"|" \
+            homebrew/agtop.rb > homebrew-out/agtop.rb
+          echo "── final formula ──"
+          cat homebrew-out/agtop.rb
+
+      - name: Push to mbrassey/homebrew-tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN secret not set — skipping tap push (formula was templated above for inspection)"
+            exit 0
+          fi
+          git config --global user.name  mbrassey
+          git config --global user.email matt@brassey.io
+          tap_dir=$(mktemp -d)
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/MBrassey/homebrew-tap.git" "$tap_dir"
+          mkdir -p "$tap_dir/Formula"
+          cp homebrew-out/agtop.rb "$tap_dir/Formula/agtop.rb"
+          cd "$tap_dir"
+          git add Formula/agtop.rb
+          if git diff --cached --quiet; then
+            echo "tap formula unchanged — skipping push"
+            exit 0
+          fi
+          git commit -m "agtop ${{ steps.meta.outputs.version }}"
+          git push

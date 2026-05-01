@@ -26,12 +26,15 @@ const RECENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 const BUSY_WINDOW_MS:   u64 = 30 * 1000;
 const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;
 const TAIL_BYTES:       u64 = 64 * 1024;
+/// Hard-cap tail reads at 64 MiB (real call sites use 64 KiB).  Defensive
+/// against pathological / symlinked aider history files.
+const MAX_TAIL:         u64 = 64 * 1024 * 1024;
 
 fn read_tail(path: &Path, bytes: u64) -> String {
     let mut f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
     let len = match f.metadata() { Ok(m) => m.len(), Err(_) => return String::new() };
     if len == 0 { return String::new(); }
-    let take = bytes.min(len);
+    let take = bytes.min(len).min(MAX_TAIL);
     if f.seek(SeekFrom::End(-(take as i64))).is_err() { return String::new(); }
     let mut buf = String::with_capacity(take as usize);
     let _ = f.take(take).read_to_string(&mut buf);
@@ -152,6 +155,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             is_most_recent: true,
             tokens_input: 0, tokens_output: 0, tokens_total: 0,
             cost_usd: 0.0,
+            context_used: 0,
             model: None,
         };
         if let Some(p) = pid {

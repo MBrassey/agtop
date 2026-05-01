@@ -29,6 +29,13 @@ pub struct ModelPrice {
     pub input_per_mtok:  f64,
     /// USD per 1,000,000 output tokens.
     pub output_per_mtok: f64,
+    /// Maximum input-window size in tokens.  Sourced from LiteLLM's
+    /// `max_input_tokens` field; `None` when the registry doesn't list
+    /// one (rare; older closed-source models).  Used by the TUI to
+    /// render a per-agent "Context: X% used (used/limit)" indicator
+    /// and to warn when a session is approaching compaction.
+    #[serde(default)]
+    pub max_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -77,35 +84,49 @@ impl PriceTable {
         }
         // Layer 2: curated overlay for the SKUs we want canonical
         // pricing on regardless of what LiteLLM happens to ship.
-        let put = |m: &mut HashMap<String, ModelPrice>, k: &str, i: f64, o: f64| {
-            m.insert(k.into(), ModelPrice { input_per_mtok: i, output_per_mtok: o });
+        let put = |m: &mut HashMap<String, ModelPrice>, k: &str, i: f64, o: f64, ctx: u64| {
+            m.insert(k.into(), ModelPrice {
+                input_per_mtok: i,
+                output_per_mtok: o,
+                max_input_tokens: Some(ctx),
+            });
         };
-        // Anthropic
-        put(&mut m, "claude-sonnet-4-5", 3.00, 15.00);
-        put(&mut m, "claude-sonnet-4-6", 3.00, 15.00);
-        put(&mut m, "claude-sonnet-4-7", 3.00, 15.00);
-        put(&mut m, "claude-opus-4-1",  15.00, 75.00);
-        put(&mut m, "claude-opus-4-7",  15.00, 75.00);
-        put(&mut m, "claude-haiku-4-5",  0.80,  4.00);
-        put(&mut m, "claude-3-5-sonnet", 3.00, 15.00);
-        put(&mut m, "claude-3-5-haiku",  0.80,  4.00);
-        put(&mut m, "claude-3-opus",    15.00, 75.00);
+        // Anthropic — Claude 4 family ships with 200 K context, with a
+        // 1 M variant on Sonnet 4 (model id ends in `-1m`).
+        put(&mut m, "claude-sonnet-4-5", 3.00, 15.00, 200_000);
+        put(&mut m, "claude-sonnet-4-6", 3.00, 15.00, 200_000);
+        put(&mut m, "claude-sonnet-4-7", 3.00, 15.00, 200_000);
+        put(&mut m, "claude-opus-4-1",  15.00, 75.00, 200_000);
+        put(&mut m, "claude-opus-4-7",  15.00, 75.00, 200_000);
+        put(&mut m, "claude-haiku-4-5",  0.80,  4.00, 200_000);
+        put(&mut m, "claude-3-5-sonnet", 3.00, 15.00, 200_000);
+        put(&mut m, "claude-3-5-haiku",  0.80,  4.00, 200_000);
+        put(&mut m, "claude-3-opus",    15.00, 75.00, 200_000);
         // OpenAI
-        put(&mut m, "gpt-5",          1.25, 10.00);
-        put(&mut m, "gpt-5-mini",     0.25,  2.00);
-        put(&mut m, "gpt-5-nano",     0.05,  0.40);
-        put(&mut m, "gpt-4o",         2.50, 10.00);
-        put(&mut m, "gpt-4o-mini",    0.15,  0.60);
-        put(&mut m, "gpt-4-turbo",   10.00, 30.00);
-        put(&mut m, "o1",            15.00, 60.00);
-        put(&mut m, "o1-mini",        1.10,  4.40);
-        put(&mut m, "o3",             2.00,  8.00);
-        put(&mut m, "o3-mini",        1.10,  4.40);
+        put(&mut m, "gpt-5",          1.25, 10.00, 256_000);
+        put(&mut m, "gpt-5-mini",     0.25,  2.00, 256_000);
+        put(&mut m, "gpt-5-nano",     0.05,  0.40, 256_000);
+        put(&mut m, "gpt-4o",         2.50, 10.00, 128_000);
+        put(&mut m, "gpt-4o-mini",    0.15,  0.60, 128_000);
+        put(&mut m, "gpt-4-turbo",   10.00, 30.00, 128_000);
+        put(&mut m, "o1",            15.00, 60.00, 200_000);
+        put(&mut m, "o1-mini",        1.10,  4.40, 128_000);
+        put(&mut m, "o3",             2.00,  8.00, 200_000);
+        put(&mut m, "o3-mini",        1.10,  4.40, 200_000);
         // Google
-        put(&mut m, "gemini-2.0-flash",  0.10,  0.40);
-        put(&mut m, "gemini-1.5-pro",    1.25,  5.00);
-        put(&mut m, "gemini-1.5-flash",  0.075, 0.30);
+        put(&mut m, "gemini-2.0-flash",  0.10,  0.40, 1_000_000);
+        put(&mut m, "gemini-1.5-pro",    1.25,  5.00, 2_000_000);
+        put(&mut m, "gemini-1.5-flash",  0.075, 0.30, 1_000_000);
         Self { models: m }
+    }
+
+    /// Look up the model's input-context window in tokens, falling back
+    /// to a conservative 200K when the model isn't in the registry.
+    /// Used by the TUI to render context-fill bars.
+    pub fn context_limit(&self, model: &str) -> u64 {
+        self.lookup(model)
+            .and_then(|p| p.max_input_tokens)
+            .unwrap_or(200_000)
     }
 
     /// Read user overrides from a TOML file.  Format:

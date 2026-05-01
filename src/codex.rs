@@ -44,11 +44,15 @@ fn root() -> PathBuf {
     dirs::home_dir().unwrap_or_default().join(".codex").join("sessions")
 }
 
+// 64 MiB hard-cap on tail reads — defensive against pathological / symlinked
+// session files.  All real call sites use ≤ 256 KiB.
+const MAX_TAIL: u64 = 64 * 1024 * 1024;
+
 fn read_tail(path: &Path, bytes: u64) -> String {
     let mut f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
     let len = match f.metadata() { Ok(m) => m.len(), Err(_) => return String::new() };
     if len == 0 { return String::new(); }
-    let take = bytes.min(len);
+    let take = bytes.min(len).min(MAX_TAIL);
     if f.seek(SeekFrom::End(-(take as i64))).is_err() {
         return String::new();
     }
@@ -58,9 +62,10 @@ fn read_tail(path: &Path, bytes: u64) -> String {
 }
 
 fn read_head(path: &Path, bytes: u64) -> String {
+    let take = bytes.min(MAX_TAIL);
     let f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
-    let mut buf = String::with_capacity(bytes as usize);
-    let _ = f.take(bytes).read_to_string(&mut buf);
+    let mut buf = String::with_capacity(take as usize);
+    let _ = f.take(take).read_to_string(&mut buf);
     buf
 }
 
@@ -81,6 +86,10 @@ fn walk_jsonls(root: &Path, max_depth: usize) -> Vec<PathBuf> {
         for ent in rd.flatten() {
             let p = ent.path();
             let ft = match ent.file_type() { Ok(f) => f, Err(_) => continue };
+            // Skip symlinks: a symlink inside ~/.codex/sessions pointing
+            // at `/` would otherwise let the walker traverse the whole
+            // filesystem (capped only by max_depth).
+            if ft.is_symlink() { continue; }
             if ft.is_dir() {
                 rec(&p, depth + 1, max, out);
             } else if ft.is_file() && p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
@@ -101,10 +110,8 @@ fn extract_cwd_from_meta(text: &str) -> Option<String> {
             r.get("payload").and_then(|p| p.get("workspace")).and_then(|v| v.as_str()),
             r.get("workspace").and_then(|v| v.as_str()),
         ];
-        for c in candidates {
-            if let Some(s) = c {
-                if !s.is_empty() { return Some(s.to_string()); }
-            }
+        for s in candidates.into_iter().flatten() {
+            if !s.is_empty() { return Some(s.to_string()); }
         }
     }
     None
@@ -122,6 +129,8 @@ struct AnalysisOut {
     finished: bool,
     tokens_input: u64,
     tokens_output: u64,
+    /// Latest assistant turn's prompt size — see Claude::context_used.
+    context_used: u64,
     model: Option<String>,
     /// Capped, prefix-tagged tail (`›` prose, `→` tool, `←` result) for
     /// the detail-popup live preview.
@@ -232,8 +241,11 @@ fn analyse(records: &[Value]) -> AnalysisOut {
             let cr = u.get("input_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
                 .and_then(|v| v.as_u64()).unwrap_or(0);
-            out.tokens_input  += it + cr;
-            out.tokens_output += ot;
+            out.tokens_input  = out.tokens_input.saturating_add(it.saturating_add(cr));
+            out.tokens_output = out.tokens_output.saturating_add(ot);
+            // Latest-turn prompt size = current context fill.  Records
+            // iterate oldest → newest so the last assignment wins.
+            out.context_used = it.saturating_add(cr);
         }
 
         // Model — try every place codex might mention it.
@@ -376,8 +388,9 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 is_most_recent,
                 tokens_input: info.tokens_input,
                 tokens_output: info.tokens_output,
-                tokens_total: info.tokens_input + info.tokens_output,
+                tokens_total: info.tokens_input.saturating_add(info.tokens_output),
                 cost_usd: 0.0,
+                context_used: info.context_used,
                 model: info.model.as_deref().map(sanitize_control),
             };
 
@@ -422,7 +435,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             live_pid: None,
             is_most_recent: false,
             tokens_input: 0, tokens_output: 0, tokens_total: 0,
-            cost_usd: 0.0, model: None,
+            cost_usd: 0.0, context_used: 0, model: None,
         });
     }
 

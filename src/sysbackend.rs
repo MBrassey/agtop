@@ -17,7 +17,7 @@ use crate::format::derive_project;
 use crate::matchers::{classify, Matcher, UserMatcher};
 use crate::model::{Agent, Status};
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 pub struct SysBackend {
     sys: System,
@@ -26,15 +26,25 @@ pub struct SysBackend {
 impl SysBackend {
     pub fn new() -> Self {
         let mut sys = System::new_with_specifics(
-            RefreshKind::default().with_processes(ProcessRefreshKind::default()),
+            RefreshKind::default()
+                .with_processes(ProcessRefreshKind::default())
+                .with_memory(MemoryRefreshKind::everything()),
         );
         sys.refresh_processes(ProcessesToUpdate::All, true);
+        sys.refresh_memory();
         Self { sys }
     }
 
     pub fn refresh(&mut self) {
         self.sys.refresh_processes(ProcessesToUpdate::All, true);
+        self.sys.refresh_memory();
     }
+
+    /// Total system memory in bytes.  0 if sysinfo couldn't read it.
+    pub fn total_memory(&self) -> u64 { self.sys.total_memory() }
+
+    /// Available (free + reclaimable) memory in bytes.  0 if unknown.
+    pub fn available_memory(&self) -> u64 { self.sys.available_memory() }
 
     /// Walk every process and return Agents that match a known matcher.
     pub fn collect_agents(
@@ -76,6 +86,9 @@ impl SysBackend {
                 tokens_output: 0,
                 cost_usd: 0.0,
                 cost_basis: "unknown".into(),
+                context_used: 0,
+                context_limit: 0,
+                loaded_skills: Vec::new(),
                 model: None,
                 dangerous: crate::collector::is_dangerous_for_cmdline(&cmdline),
                 in_flight_subagents: Vec::new(),
@@ -85,7 +98,7 @@ impl SysBackend {
                 cpu_raw: cpu,
                 rss: proc.memory(),
                 vsize: proc.virtual_memory(),
-                threads: 1,
+                threads: proc.tasks().map(|t| t.len() as u64).unwrap_or(1),
                 state: format!("{:?}", proc.status()),
                 ppid: proc.parent().map(|p| p.as_u32()).unwrap_or(0),
                 uptime_sec,

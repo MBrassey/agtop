@@ -17,6 +17,7 @@ mod pricing;
 mod pricing_data;
 mod proc_;
 mod sessions;
+mod skills;
 mod sysbackend;
 mod theme;
 mod ui;

@@ -407,6 +407,45 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         }
         _ => {}
     }
+    // Context-window fill — only meaningful when we know both used and
+    // limit.  Renders a 24-cell tinted bar plus "X% used (used / limit)".
+    if a.context_used > 0 && a.context_limit > 0 {
+        let pct_used = (a.context_used as f64 / a.context_limit as f64).clamp(0.0, 1.0);
+        let pct_int = (pct_used * 100.0) as u32;
+        let bar_w   = 24usize;
+        let filled  = ((pct_used * bar_w as f64).round() as usize).min(bar_w);
+        let empty   = bar_w.saturating_sub(filled);
+        // Colour-code the bar against compaction proximity.  Claude
+        // Code triggers auto-compaction around 95% of the model's
+        // context window; agtop nudges amber at 70% and red at 90%
+        // so the user has time to act.
+        let bar_color = if pct_used >= 0.90 { theme::C_BUSY }
+                        else if pct_used >= 0.70 { theme::C_WAIT }
+                        else { theme::C_ACTIVE };
+        let mut spans = vec![lab("context")];
+        spans.push(Span::styled("█".repeat(filled), Style::default().fg(bar_color)));
+        spans.push(Span::styled("░".repeat(empty),  Style::default().fg(theme::FG_DIM)));
+        spans.push(Span::styled(
+            format!(" {}% ", pct_int),
+            Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(dim(format!("({} / {} tok)", si(a.context_used), si(a.context_limit))));
+        if pct_used >= 0.90 {
+            spans.push(dim("  · approaching auto-compaction".to_string()));
+        }
+        lines.push(Line::from(spans));
+    }
+    // Skills loaded for this session (Claude Code only — populated by
+    // collector::skills::skills_for_cwd which scans the project-local
+    // and user-global skills dirs).
+    if !a.loaded_skills.is_empty() {
+        lines.push(Line::from(vec![
+            lab("skills"),
+            val(format!("{} loaded", a.loaded_skills.len()), theme::C_CHART_TOK),
+            dim(format!("  {}", shorten(&a.loaded_skills.join(", "),
+                (w as usize).saturating_sub(28)))),
+        ]));
+    }
     if a.subagents > 0 {
         lines.push(Line::from(vec![lab("subagents"),
             val(format!("{} in flight", a.subagents), theme::C_SPAWN)]));
@@ -537,6 +576,13 @@ fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App) {
     if app.paused {
         spans.push(Span::styled(" PAUSED ",
                                 Style::default().bg(theme::C_WAIT).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)));
+    }
+    // Surface the platform note (e.g. "running via sysinfo backend — IO
+    // bytes and writing-files unavailable") so non-Linux users know why
+    // certain columns will read `—` instead of misleadingly showing 0.
+    if let Some(note) = snap.note.as_deref() {
+        spans.push(Span::styled(format!("  ⓘ {} ", note),
+                                Style::default().fg(theme::FG_DIM)));
     }
 
     let block = Block::default()
@@ -917,7 +963,7 @@ fn draw_activity(f: &mut Frame, area: Rect, snap: &Snapshot) {
             ActivityKind::Exit  => ("◌", Style::default().fg(theme::FG_DIM)),
         };
         let kind = match e.kind { ActivityKind::Spawn => "spawn", ActivityKind::Exit => "exit " };
-        let cwd = e.cwd.as_deref().map(|c| project_basename(c)).unwrap_or_default();
+        let cwd = e.cwd.as_deref().map(project_basename).unwrap_or_default();
         let mut spans: Vec<Span> = vec![
             Span::styled(t, Style::default().fg(theme::FG_DIM)),
             Span::raw("  "),
@@ -1374,15 +1420,19 @@ fn draw_help(f: &mut Frame, area: Rect) {
             crate::pricing::prices_updated(),
             crate::pricing::prices_source()))]),
         Line::raw(""),
-        line(vec![key("  q, Ctrl-C   "), dim("quit")]),
+        line(vec![key("  q, Ctrl-C   "), dim("quit (closes popup first if open)")]),
         line(vec![key("  ?, h        "), dim("toggle this help")]),
-        line(vec![key("  p           "), dim("pause / resume refresh")]),
+        line(vec![key("  p, Space    "), dim("pause / resume refresh")]),
         line(vec![key("  r           "), dim("refresh now")]),
         line(vec![key("  s           "), dim("cycle sort (smart / cpu / mem / tokens / uptime / agent)")]),
         line(vec![key("  g           "), dim("toggle project grouping")]),
-        line(vec![key("  /, f        "), dim("filter agents by substring")]),
-        line(vec![key("  Esc         "), dim("clear filter")]),
+        line(vec![key("  /, f        "), dim("filter (Ctrl-U clears, Ctrl-W deletes word)")]),
+        line(vec![key("  Esc         "), dim("close popup, clear filter")]),
         line(vec![key("  j/k, ↓/↑    "), dim("move selection")]),
+        line(vec![key("  PgUp/PgDn   "), dim("move 10 rows")]),
+        line(vec![key("  Home/End    "), dim("first / last agent")]),
+        line(vec![key("  Enter       "), dim("open / close detail popup for selected agent")]),
+        line(vec![key("  Mouse       "), dim("click row → select; double-click → detail; wheel → scroll")]),
         Line::raw(""),
         line(vec![hdr("  Status legend:")]),
         line(vec![Span::styled("    ● BUSY ", Style::default().fg(theme::C_BUSY).add_modifier(Modifier::BOLD)),
