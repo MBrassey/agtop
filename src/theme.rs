@@ -12,14 +12,21 @@ pub const FG:         Color = Color::Rgb(225, 222, 215);   // warm off-white
 pub const FG_DIM:     Color = Color::Rgb(165, 170, 178);   // neutral mid-gray (>4.8:1 contrast)
 pub const HL_BG:      Color = Color::Rgb( 50,  85, 120);   // bright slate-cyan for selection (high contrast)
 
-/// Two subtle bg tints used to differentiate adjacent project groups.
-/// Same project → same tint within a single render (alternates with the
-/// next group), so the eye reads "this row belongs with that row" without
-/// the rainbow distraction of per-name hashing.  Both tints sit very
-/// close to the terminal's default panel background so the agents panel
-/// matches the rest of the app instead of looking like a darker box.
-pub const GROUP_TINT_A: Color = Color::Rgb(16, 18, 22);   // a hair lighter
-pub const GROUP_TINT_B: Color = Color::Rgb(12, 14, 18);   // a hair darker
+/// Alternating bg tints for adjacent project groups (also used for
+/// the projects + activity panels' striping).  Same project / row
+/// pair → same tint within a single render so the eye reads "this
+/// belongs with that" without the rainbow distraction of per-name
+/// hashing.
+///
+/// Tint A is `Color::Reset` — i.e. no override, just the panel /
+/// terminal background.  This means the *first* row in any panel
+/// matches the surrounding chrome exactly, and a sparsely-populated
+/// panel (1–3 items) doesn't get visible bands of color sitting on
+/// top of the panel block.  Tint B is a barely-perceptible warmer
+/// nudge — visible as alternation when the panel is full, invisible
+/// when it isn't.
+pub const GROUP_TINT_A: Color = Color::Reset;
+pub const GROUP_TINT_B: Color = Color::Rgb(20, 22, 26);
 
 /// Pick the alternating tint for the group at index `i` (0-based).
 pub fn group_tint(i: usize) -> Color {
