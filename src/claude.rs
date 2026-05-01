@@ -83,6 +83,12 @@ struct AnalysisOut {
     /// model's context window is right now.  Drives the popup's
     /// "Context: X% used" indicator.
     context_used: u64,
+    /// First-record timestamp parsed from the JSONL.  Unix ms.
+    session_started_ms: u64,
+    /// Tool-use counter — name → call count, summed across all
+    /// `tool_use` records in the session.  Used to surface the
+    /// "tools: Bash 47 · Edit 23 · …" line in the popup.
+    tool_counts: HashMap<String, u32>,
     model: Option<String>,
 }
 
@@ -101,6 +107,17 @@ fn analyse(records: &[Value]) -> AnalysisOut {
     let mut completed: HashMap<String, ()> = HashMap::new();
 
     for r in records {
+        // Capture the first parseable record timestamp as the
+        // session's wall-clock start.  Useful when `claude --resume`
+        // produces a process whose uptime != session age.
+        if out.session_started_ms == 0 {
+            if let Some(ts) = r.get("timestamp").and_then(|v| v.as_str()) {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                    out.session_started_ms = dt.timestamp_millis().max(0) as u64;
+                }
+            }
+        }
+
         if let Some(sr) = r.get("stop_reason").and_then(|v| v.as_str()) {
             out.stop_reason = Some(sr.to_string());
         } else if let Some(sr) = r.get("message").and_then(|m| m.get("stop_reason")).and_then(|v| v.as_str()) {
@@ -146,6 +163,7 @@ fn analyse(records: &[Value]) -> AnalysisOut {
                             if !name.is_empty() {
                                 out.last_tool = Some(name.to_string());
                                 out.current_tool = Some(name.to_string());
+                                *out.tool_counts.entry(name.to_string()).or_insert(0) += 1;
                                 // Recent-activity preview entry.
                                 let arg_hint = c.get("input").and_then(|i| {
                                     i.get("command").and_then(|v| v.as_str())
@@ -438,6 +456,14 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 tokens_cache_write: info.tokens_cache_write,
                 cost_usd: 0.0,
                 context_used: info.context_used,
+                session_started_ms: info.session_started_ms,
+                tool_counts: {
+                    let mut v: Vec<(String, u32)> = info.tool_counts.iter()
+                        .map(|(k, v)| (k.clone(), *v)).collect();
+                    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                    v.truncate(8);
+                    v
+                },
                 model: info.model.as_deref().map(sanitize_control),
             };
 

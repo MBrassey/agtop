@@ -43,7 +43,10 @@ sed -i "s|MBrassey-agtop-v2\\.[0-9]*\\.[0-9]*_GH0|MBrassey-agtop-v${VER}_GH0|g" 
 
 echo "== Step 3: fork freebsd/freebsd-ports (or reuse) =="
 if ! gh repo view MBrassey/freebsd-ports >/dev/null 2>&1; then
-  gh repo fork freebsd/freebsd-ports --clone=false --remote=false
+  # `gh repo fork <repo>` mutually excludes --remote (newer gh versions);
+  # we don't want a remote on this machine anyway since we shallow-
+  # clone the fork directly in step 4.
+  gh repo fork freebsd/freebsd-ports --clone=false --default-branch-only
 fi
 
 echo "== Step 4: shallow-clone the fork =="

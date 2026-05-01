@@ -88,6 +88,17 @@ pub fn read_link(pid: u32, name: &str) -> Option<PathBuf> {
     fs::read_link(format!("/proc/{pid}/{name}")).ok()
 }
 
+/// Read the kernel-recorded comm name (basename of the binary as the
+/// task started it) for any pid.  Used to resolve PPIDs to a
+/// human-readable shell / launcher name (`zsh`, `bash`, `fish`,
+/// `nu`, `tmux`, `code`, `kitty`, …).  Shell-agnostic — whatever
+/// the kernel sees.  Returns None if the pid is gone or unreadable.
+pub fn read_comm(pid: u32) -> Option<String> {
+    let s = fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
 pub fn read_cwd(pid: u32) -> Option<PathBuf> { read_link(pid, "cwd") }
 pub fn read_exe(pid: u32) -> Option<PathBuf> { read_link(pid, "exe") }
 

@@ -110,6 +110,28 @@ pub struct Agent {
     /// `<cwd>/.claude/skills/<name>/SKILL.md`.  Empty for non-Claude
     /// vendors.
     pub loaded_skills: Vec<String>,
+    /// Tool-use frequency over the lifetime of this session — top
+    /// tools by call count.  Populated by the vendor enricher;
+    /// surfaced in the detail popup as `tools: Bash 47 · Edit 23 · …`.
+    #[serde(default)]
+    pub tool_counts: Vec<(String, u32)>,
+    /// Parent process command name (e.g. `zsh`, `bash`, `fish`,
+    /// `tmux`, `code`).  Resolved from `/proc/<ppid>/comm` on Linux
+    /// or `sysinfo::Process::name()` elsewhere.  Useful for tracing
+    /// how the agent was launched.  Empty if unresolvable.
+    #[serde(default)]
+    pub ppid_name: String,
+    /// Wall-clock start time of the session itself (vs `uptime_sec`
+    /// which is process start).  These diverge when the agent was
+    /// invoked with `claude --resume` against an older session.
+    /// Unix milliseconds; 0 if unknown.
+    #[serde(default)]
+    pub session_started_ms: u64,
+    /// When `dangerous = true`, the specific flag that triggered the
+    /// classifier (`--dangerously-skip-permissions`, `--yolo`, etc.)
+    /// so the user knows what's actually in play.  Empty otherwise.
+    #[serde(default)]
+    pub dangerous_flag: String,
     /// Process is running with elevated / unsafe permissions
     /// (e.g. `claude --dangerously-skip-permissions`, `--yolo`, `--no-permissions`).
     /// The TUI surfaces this as a pulsating "GOD" tag on the row.
@@ -178,6 +200,14 @@ pub struct Session {
     pub model: Option<String>,
     /// Latest-turn input window size (see `Agent::context_used`).
     pub context_used: u64,
+    /// First-record timestamp from the JSONL transcript.  Unix ms.
+    /// 0 when not parseable.
+    #[serde(default)]
+    pub session_started_ms: u64,
+    /// Tool-use counter over the session.  Top entries surfaced in
+    /// the popup.
+    #[serde(default)]
+    pub tool_counts: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

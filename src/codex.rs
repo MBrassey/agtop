@@ -393,6 +393,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 tokens_cache_write: 0,
                 cost_usd: 0.0,
                 context_used: info.context_used,
+                session_started_ms: 0,
+                tool_counts: Vec::new(),
                 model: info.model.as_deref().map(sanitize_control),
             };
 
@@ -438,7 +440,9 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             is_most_recent: false,
             tokens_input: 0, tokens_output: 0, tokens_total: 0,
             tokens_cache_read: 0, tokens_cache_write: 0,
-            cost_usd: 0.0, context_used: 0, model: None,
+            cost_usd: 0.0, context_used: 0,
+            session_started_ms: 0, tool_counts: Vec::new(),
+            model: None,
         });
     }
 

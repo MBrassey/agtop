@@ -72,6 +72,8 @@ pub fn summarise(agents: &[Agent], live_agents: &[LiveAgentRef], _now_ms: u64) -
                 tokens_cache_write: 0,
                 cost_usd: 0.0,
                 context_used: 0,
+                session_started_ms: 0,
+                tool_counts: Vec::new(),
                 model: None,
             });
         }

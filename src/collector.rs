@@ -15,15 +15,33 @@ use crate::sysbackend::SysBackend;
 /// without the collector context.
 pub fn is_dangerous_for_cmdline(s: &str) -> bool { is_dangerous_invocation(s) }
 
-fn is_dangerous_invocation(cmdline: &str) -> bool {
+/// Identify the *specific* dangerous flag in a cmdline so the TUI can
+/// surface it (rather than just a generic "GOD" marker).  Returns the
+/// matched substring or empty when the cmdline is benign.
+pub fn dangerous_flag_for_cmdline(cmdline: &str) -> String {
     let s = cmdline.to_ascii_lowercase();
-    s.contains("--dangerously")
-        || s.contains("--no-permissions")
-        || s.contains("--no-permission-prompt")
-        || s.contains("--allow-dangerous")
-        || s.contains("--yolo")
-        || s.starts_with("sudo claude") || s.contains(" sudo claude")
-        || s.starts_with("sudo codex")  || s.contains(" sudo codex")
+    for pat in [
+        "--dangerously-skip-permissions",
+        "--dangerously",
+        "--no-permission-prompt",
+        "--no-permissions",
+        "--allow-dangerously-",
+        "--allow-dangerous",
+        "--yolo",
+    ] {
+        if s.contains(pat) { return pat.to_string(); }
+    }
+    if s.starts_with("sudo claude") || s.contains(" sudo claude") {
+        return "sudo claude".into();
+    }
+    if s.starts_with("sudo codex") || s.contains(" sudo codex") {
+        return "sudo codex".into();
+    }
+    String::new()
+}
+
+fn is_dangerous_invocation(cmdline: &str) -> bool {
+    !dangerous_flag_for_cmdline(cmdline).is_empty()
 }
 use crate::matchers::{builtin, classify, Matcher, UserMatcher};
 use crate::model::{
@@ -59,6 +77,10 @@ pub struct Collector {
     cpu_smooth: HashMap<u32, f64>,
     /// Per-pid CPU% history for the inline sparkline column.
     agent_cpu_hist: HashMap<u32, VecDeque<f64>>,
+    /// Per-pid (timestamp_ms, context_used) ring used to extrapolate
+    /// time-to-compaction in the detail popup.  Same size cap as the
+    /// CPU ring; entries are evicted when the pid exits.
+    agent_ctx_hist: HashMap<u32, VecDeque<(u64, u64)>>,
     boot_time: u64,
     num_cpus: usize,
     known_pids: HashMap<u32, String>,
@@ -98,6 +120,7 @@ impl Collector {
             prev_total: 0,
             cpu_smooth: HashMap::new(),
             agent_cpu_hist: HashMap::new(),
+            agent_ctx_hist: HashMap::new(),
             boot_time: proc_::read_boot_time(),
             num_cpus,
             known_pids: HashMap::new(),
@@ -112,6 +135,46 @@ impl Collector {
             pricing,
             sys,
         }
+    }
+
+    /// Read-only access to the price table for the UI's cache-savings
+    /// stat (which needs the per-model input rate to compute the
+    /// dollars-saved-vs-uncached number).
+    pub fn pricing(&self) -> &PriceTable { &self.pricing }
+
+    /// Extrapolate seconds remaining until the agent's context-window
+    /// hits 95% (Claude Code's auto-compaction trigger), based on the
+    /// per-pid context-history ring.  Returns `None` when there's
+    /// less than 3 samples or growth is non-positive.
+    pub fn time_to_compaction_secs(&self, pid: u32, limit: u64) -> Option<u64> {
+        let ring = self.agent_ctx_hist.get(&pid)?;
+        if ring.len() < 3 || limit == 0 { return None; }
+        let (t0, c0) = *ring.front()?;
+        let (t1, c1) = *ring.back()?;
+        if t1 <= t0 || c1 <= c0 { return None; }
+        let dt_s   = (t1 - t0) as f64 / 1000.0;
+        let dctx   = (c1 - c0) as f64;
+        let target = (limit as f64) * 0.95;
+        if (c1 as f64) >= target { return Some(0); }
+        let rate   = dctx / dt_s;        // tokens / second
+        if rate <= 0.0 { return None; }
+        let need   = target - (c1 as f64);
+        Some((need / rate) as u64)
+    }
+
+    /// Per-tick growth rate of the agent's context-window in tokens
+    /// per minute, computed from the same ring.  Used to render the
+    /// `+28k/min` annotation alongside the time-to-compaction line.
+    pub fn context_growth_per_min(&self, pid: u32) -> Option<u64> {
+        let ring = self.agent_ctx_hist.get(&pid)?;
+        if ring.len() < 3 { return None; }
+        let (t0, c0) = *ring.front()?;
+        let (t1, c1) = *ring.back()?;
+        if t1 <= t0 || c1 <= c0 { return None; }
+        let dt_min = (t1 - t0) as f64 / 60_000.0;
+        let dctx   = (c1 - c0) as f64;
+        if dt_min <= 0.0 { return None; }
+        Some((dctx / dt_min) as u64)
     }
 
     pub fn snapshot(&mut self) -> Snapshot {
@@ -209,6 +272,10 @@ impl Collector {
                 context_used: 0,
                 context_limit: 0,
                 loaded_skills: Vec::new(),
+                tool_counts: Vec::new(),
+                ppid_name: proc_::read_comm(stat.ppid).unwrap_or_default(),
+                session_started_ms: 0,
+                dangerous_flag: dangerous_flag_for_cmdline(&cmdline),
                 model: None,
                 dangerous: is_dangerous_invocation(&cmdline),
                 in_flight_subagents: Vec::new(),
@@ -268,6 +335,7 @@ impl Collector {
             self.known_pids.remove(pid);
             self.prev.remove(pid);
             self.cpu_smooth.remove(pid);
+            self.agent_ctx_hist.remove(pid);
         }
 
         self.prev_total = total_cpu;
@@ -377,7 +445,7 @@ impl Collector {
     /// Enriches `agents` in-place with vendor session info, applies the
     /// universal CPU% override, fills in cost from the price table, and
     /// returns the merged sessions block ready to put on the snapshot.
-    fn enrich_and_score(&self, agents: &mut [Agent], now: u64) -> crate::model::Sessions {
+    fn enrich_and_score(&mut self, agents: &mut [Agent], now: u64) -> crate::model::Sessions {
         let live_refs: Vec<LiveAgentRef> = agents.iter()
             .map(|a| LiveAgentRef { pid: a.pid, cwd: a.cwd.as_str(), label: a.label.as_str() })
             .collect();
@@ -403,6 +471,8 @@ impl Collector {
                 a.tokens_total       = s.tokens_total;
                 a.tokens_cache_read  = s.tokens_cache_read;
                 a.tokens_cache_write = s.tokens_cache_write;
+                a.session_started_ms = s.session_started_ms;
+                a.tool_counts        = s.tool_counts.clone();
                 a.model = s.model.clone();
                 a.in_flight_subagents = s.in_flight_subagents.clone();
                 a.recent_activity = s.recent_activity.clone();
@@ -452,6 +522,14 @@ impl Collector {
                 a.context_limit = STANDARD_WINDOWS.iter().copied()
                     .find(|w| *w >= need)
                     .unwrap_or(need);
+            }
+            // Per-pid context history — push the current sample, cap
+            // at PER_AGENT_HISTORY entries.  Used by the popup's
+            // time-to-compaction estimator (see `extrapolate_compaction`).
+            if a.context_used > 0 {
+                let ring = self.agent_ctx_hist.entry(a.pid).or_default();
+                ring.push_back((now, a.context_used));
+                while ring.len() > PER_AGENT_HISTORY { ring.pop_front(); }
             }
             // Claude Code skills loaded for this session — scan the
             // project-local + user-global skill roots.  Cheap (one
@@ -521,6 +599,7 @@ impl Collector {
                 label: label.clone(), pid: *pid, cwd: None });
             self.known_pids.remove(pid);
             self.cpu_smooth.remove(pid);
+            self.agent_ctx_hist.remove(pid);
         }
         if self.activity.len() > MAX_ACTIVITY {
             let drop = self.activity.len() - MAX_ACTIVITY;

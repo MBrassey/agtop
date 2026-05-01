@@ -147,6 +147,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             tokens_cache_write: 0,
             cost_usd: 0.0,
             context_used: 0,
+            session_started_ms: 0,
+            tool_counts: Vec::new(),
             model: info.model.as_deref().map(sanitize_control),
         };
         if let Some(pid) = live_pid {

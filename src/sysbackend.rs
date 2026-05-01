@@ -120,6 +120,13 @@ impl SysBackend {
                 context_used: 0,
                 context_limit: 0,
                 loaded_skills: Vec::new(),
+                tool_counts: Vec::new(),
+                ppid_name: proc.parent()
+                    .and_then(|pp| self.sys.process(pp))
+                    .map(|p| p.name().to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                session_started_ms: 0,
+                dangerous_flag: crate::collector::dangerous_flag_for_cmdline(&cmdline),
                 model: None,
                 dangerous: crate::collector::is_dangerous_for_cmdline(&cmdline),
                 in_flight_subagents: Vec::new(),

@@ -374,9 +374,36 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(cpu_spark, Style::default().fg(theme::cpu_color(a.cpu)))]));
     lines.push(Line::from(vec![lab("memory"),
         val(bytes(a.rss), theme::C_CHART_MEM), dim(format!(" rss · {} vsize", bytes(a.vsize)))]));
-    lines.push(Line::from(vec![lab("uptime"),  val(dur(a.uptime_sec), theme::FG)]));
-    lines.push(Line::from(vec![lab("threads"), val(a.threads.to_string(), theme::FG),
-        dim(format!("  state {}  ppid {}", a.state, a.ppid))]));
+    // Uptime + session-start divergence: when claude --resume is used,
+    // the process is brand new but the session is days old.  Show both.
+    let mut uptime_spans = vec![lab("uptime"), val(dur(a.uptime_sec), theme::FG)];
+    if a.session_started_ms > 0 {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64).unwrap_or(0);
+        let session_age_s = now_ms.saturating_sub(a.session_started_ms) / 1000;
+        let resumed = session_age_s > a.uptime_sec.saturating_add(60);
+        let suffix = if resumed { " (resumed)" } else { "" };
+        uptime_spans.push(dim(format!("  ·  session {}{}", dur(session_age_s), suffix)));
+    }
+    lines.push(Line::from(uptime_spans));
+    let mut thread_spans = vec![lab("threads"), val(a.threads.to_string(), theme::FG)];
+    let ppid_label = if a.ppid_name.is_empty() {
+        format!("  state {}  ppid {}", a.state, a.ppid)
+    } else {
+        format!("  state {}  ppid {} ({})", a.state, a.ppid, a.ppid_name)
+    };
+    thread_spans.push(dim(ppid_label));
+    lines.push(Line::from(thread_spans));
+    // Permission flag breakdown — when dangerous=true, surface WHICH
+    // flag triggered the classifier so the user knows what's actually
+    // in play (vs. just a generic GOD-mode marker).
+    if a.dangerous && !a.dangerous_flag.is_empty() {
+        lines.push(Line::from(vec![
+            lab("dangerous"),
+            val(a.dangerous_flag.clone(), theme::C_WAIT),
+        ]));
+    }
     lines.push(Line::from(vec![lab("tokens"),
         val(si(a.tokens_total), theme::C_CHART_TOK),
         dim(format!(" ({} in / {} out)", si(a.tokens_input), si(a.tokens_output)))]));
@@ -407,6 +434,29 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         }
         _ => {}
     }
+    // Cache-hit ratio + dollars saved.  Only meaningful when we have
+    // a known model price + non-trivial cache reads.  Computed
+    // independently of the cost row so it shows even on local /
+    // unknown rows where cost_usd is 0.
+    if a.tokens_cache_read > 0 && a.tokens_input > 0 {
+        let hit_pct = (a.tokens_cache_read as f64 / a.tokens_input as f64) * 100.0;
+        let mut spans = vec![lab("cache"),
+            val(format!("{:.0}% hit", hit_pct), theme::C_CHART_TOK),
+            dim(format!("  ({} of {} input tok cached)",
+                si(a.tokens_cache_read), si(a.tokens_input)))];
+        // Anthropic prompt-cache reads are billed at 0.1× input rate;
+        // the savings are 0.9× the input rate × cache_read tokens.
+        if let Some(model) = a.model.as_deref() {
+            if let Some(p) = app.collector.pricing().lookup(model) {
+                let saved = (a.tokens_cache_read as f64 / 1_000_000.0)
+                    * p.input_per_mtok * 0.90;
+                if saved >= 0.01 {
+                    spans.push(dim(format!("  · saved {} vs uncached", format_cost(saved))));
+                }
+            }
+        }
+        lines.push(Line::from(spans));
+    }
     // Context-window fill — only meaningful when we know both used and
     // limit.  Renders a 24-cell tinted bar plus "X% used (used / limit)".
     if a.context_used > 0 && a.context_limit > 0 {
@@ -432,6 +482,14 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         spans.push(dim(format!("({} / {} tok)", si(a.context_used), si(a.context_limit))));
         if pct_used >= 0.90 {
             spans.push(dim("  · approaching auto-compaction".to_string()));
+        }
+        // Time-to-compaction extrapolation (only when we have enough
+        // history and the trend is positive).  Shows next to the bar
+        // for the visual at-a-glance read.
+        if let Some(secs) = app.collector.time_to_compaction_secs(a.pid, a.context_limit) {
+            let rate = app.collector.context_growth_per_min(a.pid).unwrap_or(0);
+            spans.push(dim(format!("  · ≈{} to compaction (+{}/min)",
+                dur(secs), si(rate))));
         }
         lines.push(Line::from(spans));
     }
@@ -476,6 +534,19 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     }
     if let Some(sid) = &a.session_id {
         lines.push(Line::from(vec![lab("session"), dim(sid.clone())]));
+    }
+    // Top tools used in this session (already pre-sorted descending by
+    // count in the vendor enricher).  Surfaces effort allocation —
+    // surprisingly informative for understanding what the agent
+    // actually spent its time doing.
+    if !a.tool_counts.is_empty() {
+        let parts: Vec<String> = a.tool_counts.iter().take(5)
+            .map(|(name, n)| format!("{} {}", name, n))
+            .collect();
+        lines.push(Line::from(vec![
+            lab("tools"),
+            Span::styled(parts.join(" · "), Style::default().fg(theme::C_CHART_TOK)),
+        ]));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![lab("bin"),  Span::styled(shorten(&a.exe, (w as usize).saturating_sub(12)),
