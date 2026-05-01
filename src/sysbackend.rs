@@ -17,26 +17,39 @@ use crate::format::derive_project;
 use crate::matchers::{classify, Matcher, UserMatcher};
 use crate::model::{Agent, Status};
 
-use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
+use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 
 pub struct SysBackend {
     sys: System,
+    /// Per-tick refresh spec: full process metadata (cpu, mem, cmd,
+    /// cwd, exe) plus disk-usage IO so we can fill the read_bytes /
+    /// write_bytes columns on macOS + Windows like the Linux /proc
+    /// path does.
+    refresh_kind: ProcessRefreshKind,
 }
 
 impl SysBackend {
     pub fn new() -> Self {
+        let refresh_kind = ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory()
+            .with_exe(UpdateKind::OnlyIfNotSet)
+            .with_cmd(UpdateKind::OnlyIfNotSet)
+            .with_cwd(UpdateKind::OnlyIfNotSet)
+            .with_disk_usage()
+            .with_tasks();
         let mut sys = System::new_with_specifics(
             RefreshKind::default()
-                .with_processes(ProcessRefreshKind::default())
+                .with_processes(refresh_kind)
                 .with_memory(MemoryRefreshKind::everything()),
         );
-        sys.refresh_processes(ProcessesToUpdate::All, true);
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
         sys.refresh_memory();
-        Self { sys }
+        Self { sys, refresh_kind }
     }
 
     pub fn refresh(&mut self) {
-        self.sys.refresh_processes(ProcessesToUpdate::All, true);
+        self.sys.refresh_processes_specifics(ProcessesToUpdate::All, true, self.refresh_kind);
         self.sys.refresh_memory();
     }
 
@@ -105,8 +118,16 @@ impl SysBackend {
                 cwd,
                 exe,
                 cmdline,
-                read_bytes: 0,
-                write_bytes: 0,
+                // sysinfo exposes per-process disk IO on Linux + macOS +
+                // Windows (FreeBSD returns 0).  `total_*` are
+                // cumulative since process start, which matches the
+                // semantics of /proc/<pid>/io that the Linux backend
+                // returns.
+                read_bytes:  proc.disk_usage().total_read_bytes,
+                write_bytes: proc.disk_usage().total_written_bytes,
+                // Writable-FD enumeration is /proc-only.  Empty on
+                // sysinfo backends; the TUI dashes the column out via
+                // the snap.note hint surfaced in the header.
                 writing_files: Vec::new(),
                 writing_dirs: Vec::new(),
             });

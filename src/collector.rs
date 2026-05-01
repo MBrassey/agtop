@@ -559,7 +559,10 @@ impl Collector {
         Snapshot {
             now,
             platform: std::env::consts::OS.to_string(),
-            note: Some("running via sysinfo backend (no /proc) — IO bytes and writing-files unavailable".into()),
+            // sysinfo backend covers everything except writable-FD
+            // enumeration (which agtop surfaces as "writing files");
+            // IO bytes ARE available via sysinfo on macOS + Windows.
+            note: Some("running via sysinfo backend — writing-files column unavailable".into()),
             sys_cpus: self.num_cpus as u32,
             mem_total: self.sys.as_ref().map(|s| s.total_memory()).unwrap_or(0),
             mem_available: self.sys.as_ref().map(|s| s.available_memory()).unwrap_or(0),
