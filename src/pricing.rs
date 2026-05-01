@@ -124,6 +124,20 @@ impl PriceTable {
     /// to a conservative 200K when the model isn't in the registry.
     /// Used by the TUI to render context-fill bars.
     pub fn context_limit(&self, model: &str) -> u64 {
+        // The price table can't distinguish standard SKUs from their
+        // 1M-context variants — both report `claude-opus-4-7` /
+        // `claude-sonnet-4-7` in the session JSONL.  Heuristic: if the
+        // model id explicitly mentions a long-context flag, treat it
+        // as the larger window.  The collector also auto-promotes the
+        // limit when an observed prompt exceeds it (see
+        // collector::enrich_context).
+        let lower = model.to_ascii_lowercase();
+        if lower.contains("-1m") || lower.contains("1m-context") || lower.contains("-1000k") {
+            return 1_000_000;
+        }
+        if lower.contains("-2m") {
+            return 2_000_000;
+        }
         self.lookup(model)
             .and_then(|p| p.max_input_tokens)
             .unwrap_or(200_000)
@@ -171,15 +185,37 @@ impl PriceTable {
     /// Returns `0.0` (not None) for both unknown models *and* models
     /// classified as local.  The UI distinguishes the two via
     /// `is_local_model()` — local rows render as `local` instead of `—`.
+    /// Legacy two-arg cost (treats every input token at the standard
+    /// rate).  Kept for callers that don't track cache splits — but
+    /// agent enrichers should prefer `cost_with_cache` so cache hits
+    /// don't get billed at full price.
     pub fn cost(&self, model: &str, in_tok: u64, out_tok: u64) -> f64 {
-        if is_local_model(model) {
-            return 0.0;
-        }
-        match self.lookup(model) {
-            Some(p) => (in_tok as f64 / 1_000_000.0) * p.input_per_mtok
-                     + (out_tok as f64 / 1_000_000.0) * p.output_per_mtok,
-            None => 0.0,
-        }
+        self.cost_with_cache(model, in_tok, out_tok, 0, 0)
+    }
+
+    /// Cost with Anthropic-style prompt-cache rate adjustments:
+    ///   - cache-read tokens billed at 0.1× input rate
+    ///   - cache-write tokens billed at 1.25× input rate
+    ///   - everything else billed at the standard input / output rate
+    ///
+    /// `in_tok` is the *total* input bucket (including cache_read +
+    /// cache_write); the formula subtracts the cached portion before
+    /// applying the standard rate.  Returns 0.0 for local models and
+    /// for unknown SKUs.
+    pub fn cost_with_cache(
+        &self, model: &str,
+        in_tok: u64, out_tok: u64,
+        cache_read: u64, cache_write: u64,
+    ) -> f64 {
+        if is_local_model(model) { return 0.0; }
+        let p = match self.lookup(model) { Some(p) => p, None => return 0.0 };
+        let cached = cache_read.saturating_add(cache_write);
+        let raw_input = in_tok.saturating_sub(cached);
+        const M: f64 = 1_000_000.0;
+        (raw_input    as f64 / M) * p.input_per_mtok
+            + (cache_read  as f64 / M) * p.input_per_mtok * 0.10
+            + (cache_write as f64 / M) * p.input_per_mtok * 1.25
+            + (out_tok     as f64 / M) * p.output_per_mtok
     }
 }
 

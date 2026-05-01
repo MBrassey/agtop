@@ -436,15 +436,23 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(spans));
     }
     // Skills loaded for this session (Claude Code only — populated by
-    // collector::skills::skills_for_cwd which scans the project-local
-    // and user-global skills dirs).
-    if !a.loaded_skills.is_empty() {
-        lines.push(Line::from(vec![
-            lab("skills"),
-            val(format!("{} loaded", a.loaded_skills.len()), theme::C_CHART_TOK),
-            dim(format!("  {}", shorten(&a.loaded_skills.join(", "),
-                (w as usize).saturating_sub(28)))),
-        ]));
+    // skills::skills_for_cwd which scans <cwd>/.claude/skills/ +
+    // ~/.claude/skills/).  Always show the row for Claude agents so
+    // a "0 loaded" line is discoverable; non-Claude vendors omit.
+    if a.label == "claude" {
+        if a.loaded_skills.is_empty() {
+            lines.push(Line::from(vec![
+                lab("skills"),
+                dim("0 loaded — drop one in ~/.claude/skills/<name>/SKILL.md".to_string()),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                lab("skills"),
+                val(format!("{} loaded", a.loaded_skills.len()), theme::C_CHART_TOK),
+                dim(format!("  {}", shorten(&a.loaded_skills.join(", "),
+                    (w as usize).saturating_sub(28)))),
+            ]));
+        }
     }
     if a.subagents > 0 {
         lines.push(Line::from(vec![lab("subagents"),

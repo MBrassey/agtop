@@ -389,6 +389,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 tokens_input: info.tokens_input,
                 tokens_output: info.tokens_output,
                 tokens_total: info.tokens_input.saturating_add(info.tokens_output),
+                tokens_cache_read: 0,
+                tokens_cache_write: 0,
                 cost_usd: 0.0,
                 context_used: info.context_used,
                 model: info.model.as_deref().map(sanitize_control),
@@ -435,6 +437,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             live_pid: None,
             is_most_recent: false,
             tokens_input: 0, tokens_output: 0, tokens_total: 0,
+            tokens_cache_read: 0, tokens_cache_write: 0,
             cost_usd: 0.0, context_used: 0, model: None,
         });
     }

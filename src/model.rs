@@ -74,8 +74,21 @@ pub struct Agent {
     pub session_age_ms: Option<u64>,
     /// Sum of input + output (+ cache) tokens charged to this agent's session.
     pub tokens_total: u64,
+    /// Total input bucket: standard_input + cache_read + cache_creation.
+    /// (Use `tokens_input - tokens_cache_read - tokens_cache_write` if
+    /// you specifically want the *uncached* portion.)
     pub tokens_input: u64,
     pub tokens_output: u64,
+    /// Cache-read tokens, charged at ~10% of the standard input rate
+    /// under Anthropic prompt-caching pricing.  Tracked separately so
+    /// `cost_usd` applies the discount instead of over-billing cache
+    /// hits at the full input rate.
+    #[serde(default)]
+    pub tokens_cache_read: u64,
+    /// Cache-creation / cache-write tokens, charged at ~125% of the
+    /// standard input rate.
+    #[serde(default)]
+    pub tokens_cache_write: u64,
     pub cost_usd: f64,
     /// How `cost_usd` was computed.  One of:
     ///   - "api"     — known per-token rate looked up in the price table
@@ -155,6 +168,12 @@ pub struct Session {
     pub tokens_total: u64,
     pub tokens_input: u64,
     pub tokens_output: u64,
+    /// See `Agent::tokens_cache_read`.
+    #[serde(default)]
+    pub tokens_cache_read: u64,
+    /// See `Agent::tokens_cache_write`.
+    #[serde(default)]
+    pub tokens_cache_write: u64,
     pub cost_usd: f64,
     pub model: Option<String>,
     /// Latest-turn input window size (see `Agent::context_used`).

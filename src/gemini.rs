@@ -143,6 +143,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             tokens_input: info.tokens_input,
             tokens_output: info.tokens_output,
             tokens_total: info.tokens_input + info.tokens_output,
+            tokens_cache_read: 0,
+            tokens_cache_write: 0,
             cost_usd: 0.0,
             context_used: 0,
             model: info.model.as_deref().map(sanitize_control),

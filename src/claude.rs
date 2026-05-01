@@ -64,8 +64,18 @@ struct AnalysisOut {
     /// Capped, prefix-tagged tail of session activity for the detail popup
     /// preview.  Each entry already starts with `› `, `→ `, or `← `.
     recent_activity: Vec<String>,
+    /// Sum of input_tokens + cache_creation + cache_read across the
+    /// whole transcript — used by the rough "tokens" column.  For
+    /// accurate cost we track the three buckets separately below.
     tokens_input: u64,
     tokens_output: u64,
+    /// Cumulative cache-read tokens (charged at ~10% of input rate
+    /// under Anthropic's prompt-caching pricing).  Tracked separately
+    /// so the cost calc doesn't bill cache hits at full input rate.
+    tokens_cache_read: u64,
+    /// Cumulative cache-creation tokens (charged at ~125% of input
+    /// rate — the prompt-cache write surcharge).
+    tokens_cache_write: u64,
     /// Latest assistant turn's input window size in tokens.  Computed
     /// as `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`
     /// of the *last* usage block in the transcript — represents the
@@ -98,20 +108,24 @@ fn analyse(records: &[Value]) -> AnalysisOut {
         }
 
         // Token usage — Claude attaches a usage block to each assistant
-        // message. Sum across the whole transcript.
+        // message.  We track input / output / cache-read / cache-write
+        // separately so the cost calc can apply Anthropic's distinct
+        // rates: standard input @ 1×, cache-write @ 1.25×, cache-read
+        // @ 0.1× (prompt caching).  `tokens_input` is the rolled-up
+        // total displayed in the table.
         if let Some(usage) = r.get("message").and_then(|m| m.get("usage")) {
             let it = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             let ot = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            // Cache-read counts as charged input under most pricing schemes.
             let cr = usage.get("cache_read_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             let cc = usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            out.tokens_input  = out.tokens_input.saturating_add(it + cr + cc);
-            out.tokens_output = out.tokens_output.saturating_add(ot);
+            out.tokens_input        = out.tokens_input.saturating_add(it.saturating_add(cr).saturating_add(cc));
+            out.tokens_output       = out.tokens_output.saturating_add(ot);
+            out.tokens_cache_read   = out.tokens_cache_read.saturating_add(cr);
+            out.tokens_cache_write  = out.tokens_cache_write.saturating_add(cc);
             // The most recent usage block's input window IS the current
             // context fill (cumulative-prompt size on the next request).
             // Records iterate oldest → newest, so the last assignment
-            // wins.  cache_creation_input_tokens is included because
-            // those tokens are part of the prompt the model just saw.
+            // wins.
             out.context_used = it.saturating_add(cr).saturating_add(cc);
         }
 
@@ -420,6 +434,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 tokens_input: info.tokens_input,
                 tokens_output: info.tokens_output,
                 tokens_total: info.tokens_input.saturating_add(info.tokens_output),
+                tokens_cache_read:  info.tokens_cache_read,
+                tokens_cache_write: info.tokens_cache_write,
                 cost_usd: 0.0,
                 context_used: info.context_used,
                 model: info.model.as_deref().map(sanitize_control),

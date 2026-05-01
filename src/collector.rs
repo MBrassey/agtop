@@ -38,6 +38,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const HISTORY: usize = 60;
 const MAX_ACTIVITY: usize = 300;
 
+/// Anthropic / OpenAI / Google publish their context windows at
+/// these standard sizes.  Used to round an observed-larger-than-table
+/// prompt up to the next published window so the bar reads cleanly
+/// (e.g. 515k observed → snap to 1M, not 541k).
+const STANDARD_WINDOWS: &[u64] = &[
+    128_000, 200_000, 256_000, 400_000, 1_000_000, 2_000_000,
+];
+
 pub struct Collector {
     builtins: Vec<Matcher>,
     user: Vec<UserMatcher>,
@@ -194,6 +202,8 @@ impl Collector {
                 tokens_total: 0,
                 tokens_input: 0,
                 tokens_output: 0,
+                tokens_cache_read: 0,
+                tokens_cache_write: 0,
                 cost_usd: 0.0,
                 cost_basis: "unknown".into(),
                 context_used: 0,
@@ -388,9 +398,11 @@ impl Collector {
                 a.subagents = s.in_flight_tasks;
                 a.session_id = Some(s.id.clone());
                 a.session_age_ms = Some(s.age_ms);
-                a.tokens_input  = s.tokens_input;
-                a.tokens_output = s.tokens_output;
-                a.tokens_total  = s.tokens_total;
+                a.tokens_input       = s.tokens_input;
+                a.tokens_output      = s.tokens_output;
+                a.tokens_total       = s.tokens_total;
+                a.tokens_cache_read  = s.tokens_cache_read;
+                a.tokens_cache_write = s.tokens_cache_write;
                 a.model = s.model.clone();
                 a.in_flight_subagents = s.in_flight_subagents.clone();
                 a.recent_activity = s.recent_activity.clone();
@@ -406,9 +418,15 @@ impl Collector {
             }
             // Cost.  Always classify the basis (api / local / unknown)
             // so the UI can label local-runtime rows as `local` instead
-            // of pretending they're free API calls.
+            // of pretending they're free API calls.  Use the
+            // cache-aware variant so prompt-cached tokens are billed
+            // at Anthropic's discounted rate (0.1× for reads, 1.25×
+            // for writes) instead of full input rate.
             if let Some(model) = &a.model {
-                a.cost_usd = self.pricing.cost(model, a.tokens_input, a.tokens_output);
+                a.cost_usd = self.pricing.cost_with_cache(
+                    model, a.tokens_input, a.tokens_output,
+                    a.tokens_cache_read, a.tokens_cache_write,
+                );
                 a.cost_basis = match crate::pricing::cost_basis(&self.pricing, model) {
                     crate::pricing::CostBasis::Api     => "api".into(),
                     crate::pricing::CostBasis::Local   => "local".into(),
@@ -421,6 +439,19 @@ impl Collector {
             // unknown.
             if let Some(s) = merged.by_pid.get(&a.pid) {
                 a.context_used = s.context_used;
+            }
+            // Self-calibrating limit: if the observed prompt size on the
+            // latest turn exceeds the table-derived limit, the model
+            // must be running with a larger window than the table knew
+            // about (e.g. an undeclared 1M-context variant).  Promote
+            // the limit to the next standard window-size that contains
+            // the observed value, with 5% headroom.  Prevents the
+            // popup from ever displaying a >100% fill.
+            if a.context_used > a.context_limit {
+                let need = (a.context_used as f64 * 1.05) as u64;
+                a.context_limit = STANDARD_WINDOWS.iter().copied()
+                    .find(|w| *w >= need)
+                    .unwrap_or(need);
             }
             // Claude Code skills loaded for this session — scan the
             // project-local + user-global skill roots.  Cheap (one
