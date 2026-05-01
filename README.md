@@ -49,11 +49,11 @@ transcript preview.
 | --------------------- | ------- |
 | Arch / CachyOS        | `yay -S agtop` |
 | Debian / Ubuntu       | `sudo apt install agtop` |
-| macOS (Homebrew)      | `brew install mbrassey/tap/agtop` |
+| macOS                 | `brew install mbrassey/tap/agtop` |
 | FreeBSD               | `sudo pkg install agtop` |
-| Cargo (any OS)        | `cargo install agtop` |
-| npm (any OS)          | `npm install -g @mbrassey/agtop` |
-| GitHub Releases       | [prebuilt binaries](https://github.com/MBrassey/agtop/releases/latest) for linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64 |
+| Cargo                 | `cargo install agtop` |
+| npm                   | `npm install -g @mbrassey/agtop` |
+| Prebuilts             | linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64 — [latest release](https://github.com/MBrassey/agtop/releases/latest) |
 
 The npm package is a Node shim that downloads the matching prebuilt
 from the GitHub Release and verifies it against the release's
