@@ -351,6 +351,20 @@ jobs:
           git commit -m "agtop ${VERSION}"
           git push
 
+      # Hardening: tear down the gpg-agent and shred the imported
+      # private key as soon as the publish step completes, so any
+      # later step in the same job (none today, but defensive
+      # against future additions) cannot inherit signing capability.
+      # Runs even on prior-step failure via `if: always()`.
+      - name: Wipe GPG signing material
+        if: always()
+        run: |
+          gpgconf --kill all 2>/dev/null || true
+          if [ -d "$HOME/.gnupg" ]; then
+            find "$HOME/.gnupg" -type f -exec shred -u {} + 2>/dev/null || true
+            rm -rf "$HOME/.gnupg"
+          fi
+
   publish-snap:
     name: Publish to Snap Store
     needs: build

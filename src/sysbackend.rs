@@ -75,8 +75,14 @@ impl SysBackend {
                 Some(l) => l.to_string(),
                 None => continue,
             };
-            let cwd = proc.cwd().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-            let exe = proc.exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            // Sanitise sysinfo-derived strings the same way the
+            // Linux backend does — argv[0] / cwd / exe come from
+            // attacker-influenced sources and could contain ANSI.
+            let cwd = crate::format::sanitize_control(
+                &proc.cwd().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
+            let exe = crate::format::sanitize_control(
+                &proc.exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
+            let cmdline = crate::format::sanitize_control(&cmdline);
             let project = derive_project(&cwd, &exe, &cmdline, &label);
             let cpu = proc.cpu_usage() as f64;
             let started_at = proc.start_time();   // unix seconds
@@ -90,12 +96,13 @@ impl SysBackend {
             // unique-dirs to mirror the Linux /proc path.
             let writing = crate::writing_files::read(pid.as_u32(), 4);
             let writing_files: Vec<String> = writing.iter()
-                .map(|p| p.to_string_lossy().into_owned())
+                .map(|p| crate::format::sanitize_control(&p.to_string_lossy()))
                 .collect();
             let writing_dirs: Vec<String> = {
                 let mut seen = std::collections::HashSet::new();
                 writing.iter()
-                    .filter_map(|p| p.parent().map(|d| d.to_string_lossy().into_owned()))
+                    .filter_map(|p| p.parent().map(|d|
+                        crate::format::sanitize_control(&d.to_string_lossy())))
                     .filter(|d| seen.insert(d.clone()))
                     .collect()
             };
@@ -123,7 +130,7 @@ impl SysBackend {
                 tool_counts: Vec::new(),
                 ppid_name: proc.parent()
                     .and_then(|pp| self.sys.process(pp))
-                    .map(|p| p.name().to_string_lossy().into_owned())
+                    .map(|p| crate::format::sanitize_control(&p.name().to_string_lossy()))
                     .unwrap_or_default(),
                 session_started_ms: 0,
                 dangerous_flag: crate::collector::dangerous_flag_for_cmdline(&cmdline),

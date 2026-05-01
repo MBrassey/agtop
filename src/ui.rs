@@ -210,7 +210,17 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 if let Some(pid) = app.confirm_kill.take() {
-                    send_sigterm(pid);
+                    // Re-validate the pid still maps to a known
+                    // agent in the *current* snapshot before signal
+                    // delivery.  Defends against pid recycling
+                    // between popup-open and key-press: if the
+                    // original process exited and the kernel
+                    // reassigned that pid to an unrelated process,
+                    // we'd otherwise SIGTERM the wrong target.
+                    let still_present = app.snap.agents.iter().any(|a| a.pid == pid);
+                    if still_present {
+                        send_sigterm(pid);
+                    }
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
