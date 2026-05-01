@@ -1,0 +1,43 @@
+Source: agtop
+Section: admin
+Priority: optional
+Maintainer: Matt Brassey <matt@brassey.io>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-cargo,
+ cargo,
+ rustc (>= 1.74),
+ librust-anyhow-1+default-dev,
+ librust-chrono-0.4+clock-dev,
+ librust-clap-4+derive-dev,
+ librust-crossterm-0.29+default-dev,
+ librust-dirs-6+default-dev,
+ librust-libc-0.2+default-dev,
+ librust-ratatui-0.30+default-dev,
+ librust-regex-1+default-dev,
+ librust-serde-1+derive-dev,
+ librust-serde-json-1+default-dev,
+ librust-sysinfo-0.38+default-dev,
+ librust-toml-1+parse+serde-dev,
+Standards-Version: 4.6.2
+Homepage: https://github.com/MBrassey/agtop
+Vcs-Git: https://github.com/MBrassey/agtop.git
+Vcs-Browser: https://github.com/MBrassey/agtop
+Rules-Requires-Root: no
+
+Package: agtop
+Architecture: any
+Multi-Arch: foreign
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: process monitor for AI coding agents
+ agtop is a top-style ratatui TUI that walks /proc plus the on-disk
+ session transcripts of Claude Code, OpenAI Codex, Block Goose, Aider,
+ and Google Gemini.  For each detected agent it reports CPU, RSS,
+ status, current tool / task, in-flight subagents, cumulative token
+ usage, estimated cost, context-window fill, loaded skills, and a live
+ transcript preview.
+ .
+ On Linux per-process IO bytes and writable-FD enumeration come from
+ /proc; on other platforms agtop falls back to sysinfo.  No network
+ access at runtime; the bundled price table is updated from the
+ LiteLLM community registry at build time only.

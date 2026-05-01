@@ -99,6 +99,94 @@ pub fn read_comm(pid: u32) -> Option<String> {
     if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
 }
 
+/// Enumerate the *read-mode* file descriptors of `pid` and resolve
+/// each to its on-disk path.  Mirror of [`read_writing_files`] but
+/// for `O_RDONLY` entries — surfaces what the agent is actively
+/// reading (project files during context indexing, MCP server
+/// configs, etc.) when nothing else explains where its CPU is going.
+pub fn read_reading_files(pid: u32, limit: usize) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let fdinfo_dir = format!("/proc/{pid}/fdinfo");
+    let fd_dir     = format!("/proc/{pid}/fd");
+    let entries = match fs::read_dir(&fdinfo_dir) { Ok(e) => e, Err(_) => return out };
+    for entry in entries.flatten() {
+        if out.len() >= limit { break; }
+        let name = entry.file_name();
+        let info = match fs::read_to_string(format!("{}/{}", fdinfo_dir, name.to_string_lossy())) {
+            Ok(s) => s, Err(_) => continue,
+        };
+        let flags_line = info.lines().find(|l| l.starts_with("flags:"));
+        let Some(line) = flags_line else { continue };
+        let flags = line.split_whitespace().nth(1)
+            .and_then(|s| u64::from_str_radix(s, 8).ok())
+            .unwrap_or(0);
+        // Skip write-mode entries (O_WRONLY = 1, O_RDWR = 2);
+        // those are covered by read_writing_files.
+        if (flags & 0x3) != 0 { continue; }
+        let target = match fs::read_link(format!("{}/{}", fd_dir, name.to_string_lossy())) {
+            Ok(t) => t, Err(_) => continue,
+        };
+        let s = target.to_string_lossy();
+        if s.starts_with("/dev/")
+            || s.starts_with("pipe:") || s.starts_with("socket:")
+            || s.starts_with("anon_inode:") || s.starts_with("memfd:")
+            || s.starts_with("dmabuf:")
+            || s.ends_with(" (deleted)")
+            || s == "/dev/null" {
+            continue;
+        }
+        out.push(target);
+    }
+    out
+}
+
+/// Enumerate the immediate child processes of `pid` (one level deep,
+/// not the whole descendant tree) and return `(child_pid, comm)`
+/// pairs.  Used to surface what an agent has spawned — Claude Code's
+/// hooks, MCP server processes, post-tool shell commands, etc.
+pub fn read_children(pid: u32, limit: usize) -> Vec<(u32, String)> {
+    let mut out: Vec<(u32, String)> = Vec::new();
+    // /proc/<pid>/task/<tid>/children lists the child pids of every
+    // thread in the process; the union is the process's child set.
+    let task_dir = format!("/proc/{pid}/task");
+    let tasks = match fs::read_dir(&task_dir) { Ok(e) => e, Err(_) => return out };
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for t in tasks.flatten() {
+        if out.len() >= limit { break; }
+        let path = t.path().join("children");
+        let s = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => continue };
+        for tok in s.split_whitespace() {
+            if out.len() >= limit { break; }
+            let Ok(cpid) = tok.parse::<u32>() else { continue };
+            if !seen.insert(cpid) { continue; }
+            let comm = read_comm(cpid).unwrap_or_else(|| "?".into());
+            out.push((cpid, comm));
+        }
+    }
+    out
+}
+
+/// Count the established network connections owned by `pid`.  Walks
+/// /proc/<pid>/net/{tcp,tcp6,udp,udp6} and counts the rows whose
+/// state is ESTABLISHED (state code `01` for TCP).  Surfaces "agent
+/// is talking to its API / an MCP server" in the popup.
+pub fn count_net_established(pid: u32) -> u32 {
+    let mut n = 0u32;
+    for proto in ["tcp", "tcp6"] {
+        let path = format!("/proc/{pid}/net/{proto}");
+        let Ok(text) = fs::read_to_string(&path) else { continue };
+        for line in text.lines().skip(1) {
+            let mut cols = line.split_whitespace();
+            let _local = cols.next();
+            let _remote = cols.next();
+            let state = cols.next().unwrap_or("");
+            // 01 = TCP_ESTABLISHED in the kernel's enum.
+            if state == "01" { n += 1; }
+        }
+    }
+    n
+}
+
 pub fn read_cwd(pid: u32) -> Option<PathBuf> { read_link(pid, "cwd") }
 pub fn read_exe(pid: u32) -> Option<PathBuf> { read_link(pid, "exe") }
 

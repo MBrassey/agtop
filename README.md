@@ -49,7 +49,8 @@ transcript preview.
 | Platform        | Command                                |
 | --------------- | -------------------------------------- |
 | Arch / CachyOS  | `yay -S agtop`                         |
-| Debian / Ubuntu | [add apt source][apt], then `sudo apt install agtop` |
+| Debian / Ubuntu | `sudo snap install agtop`              |
+| Mint / Pop!_OS  | `sudo apt install snapd && sudo snap install agtop` |
 | macOS           | `brew install mbrassey/tap/agtop`      |
 | Windows         | `winget install agtop`                 |
 | FreeBSD         | `sudo pkg install agtop`               |
@@ -58,17 +59,28 @@ transcript preview.
 | Prebuilts       | [latest release][rel] — linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64 |
 
 [rel]: https://github.com/MBrassey/agtop/releases/latest
-[apt]: #apt-source
 
-#### apt source
+> The Snap path is the recommended install on Ubuntu, Mint, and
+> Debian.  An optional self-hosted apt repo at
+> `https://mbrassey.github.io/apt` is also available for users who
+> prefer apt — see [apt source (optional)](#apt-source-optional)
+> below.
+
+#### apt source (optional)
 
 ```sh
+sudo install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://mbrassey.github.io/apt/pubkey.asc \
-  | sudo gpg --dearmor -o /etc/apt/keyrings/agtop.gpg
+  | sudo gpg --dearmor --yes -o /etc/apt/keyrings/agtop.gpg
 echo "deb [signed-by=/etc/apt/keyrings/agtop.gpg] https://mbrassey.github.io/apt ./" \
   | sudo tee /etc/apt/sources.list.d/agtop.list
 sudo apt update && sudo apt install agtop
 ```
+
+> The `install -d` line is required on Ubuntu 20.04 / older Debian
+> where `/etc/apt/keyrings/` doesn't exist by default — without it
+> the `gpg --dearmor` write fails silently and `apt update` skips
+> the source.
 
 Subsequent updates flow through `sudo apt update && sudo apt upgrade`
 like any other apt package.
@@ -199,7 +211,7 @@ exposed in `--json` as `agents[].dangerous: bool`.
 | ------------------ | ------ |
 | `q`, `Ctrl-C`      | Quit (closes popup first if open) |
 | `?`, `h`           | Toggle help overlay |
-| `p`, `Space`       | Pause / resume refresh |
+| `p`                | Pause / resume refresh |
 | `r`                | Refresh now |
 | `s`                | Cycle sort: smart → cpu → mem → tokens → uptime → agent |
 | `g`                | Toggle project grouping |
@@ -207,7 +219,7 @@ exposed in `--json` as `agents[].dangerous: bool`.
 | `j` / `k`, ↓ / ↑   | Move selection |
 | `PgUp` / `PgDn`    | Move by 10 |
 | `Home` / `End`     | First / last agent |
-| `Enter`            | Open / close detail popup |
+| `Enter`, `Space`   | Open / close detail popup |
 | `Esc`              | Close popup, clear filter |
 | Mouse              | Click row to select; double-click opens detail; wheel scrolls |
 
@@ -351,6 +363,10 @@ dashboards, or alerting.
       "read_bytes": 482344960, "write_bytes": 12189440,
       "writing_files": ["/home/matt/code/zk-rollup-prover/circuits/main.rs"],
       "writing_dirs":  ["/home/matt/code/zk-rollup-prover/circuits"],
+      "reading_files": ["/home/matt/code/zk-rollup-prover/Cargo.lock",
+                        "/home/matt/.claude/skills/plonk-prover/SKILL.md"],
+      "children":      [[404873, "bash"], [404874, "node"]],
+      "net_established": 3,
       "uptime_sec": 345600,
       "session_started_ms": 1777094281861,
       "recent_activity": [
@@ -382,6 +398,9 @@ Per-agent fields worth highlighting:
 | `loaded_skills` | Names of Claude Code skills resolvable from `<cwd>/.claude/skills/<name>/SKILL.md` and `~/.claude/skills/<name>/SKILL.md`. Empty for non-Claude vendors. |
 | `read_bytes` / `write_bytes` | Cumulative IO since process start. Linux `/proc/<pid>/io`; macOS / Windows `sysinfo::Process::disk_usage().total_*`. 0 on *BSD (sysinfo gap). |
 | `writing_files` / `writing_dirs` | Open files with write access (and their parent dirs). Linux `/proc/<pid>/fdinfo`; macOS direct FFI to `proc_pidfdinfo`; Windows `NtQuerySystemInformation` + `DuplicateHandle`. Empty on *BSD. |
+| `reading_files`  | Files the process has open in read-only mode. Linux only. Surfaces what the agent is reading right now (project files during context indexing, MCP server configs, hook scripts) — useful when CPU is up but no tokens are flowing. |
+| `children`       | Immediate child processes (`(pid, comm)` pairs) the agent has spawned. Captures hook invocations, MCP server processes, shell commands. Linux only. |
+| `net_established`| Count of established TCP connections (v4 + v6) the process owns. Non-zero indicates the agent is talking to an API / MCP server / network resource even when no tokens are visibly flowing. Linux only. |
 | `dangerous` | True when the cmdline includes `--dangerously-skip-permissions`, `--no-permissions`, `--allow-dangerous`, `--yolo`, or starts with `sudo claude` / `sudo codex`. |
 | `dangerous_flag` | When `dangerous` is true, the specific substring that triggered the classifier (e.g. `--dangerously-skip-permissions`). Empty otherwise. |
 | `tool_counts` | Top tools used in this session, sorted desc by call count: `[[name, count], ...]`. Capped at 8 entries. Vendor enrichers count `tool_use` records. |
@@ -765,8 +784,9 @@ release workflow fans out to all three primary registries in parallel.
 | AUR            | `packages/pacman/PKGBUILD`               | ✓                     |
 | Homebrew tap   | `homebrew/agtop.rb` → `MBrassey/homebrew-tap` | ✓                |
 | apt repo (deb) | `packages/deb/build.sh` → `MBrassey/apt` (gh-pages) | ✓                |
-| winget         | `~/code/agtop-winget-port/` → `microsoft/winget-pkgs`    | manual PR per release |
-| FreeBSD ports  | `~/code/agtop-freebsd-port/` → `freebsd/freebsd-ports`   | manual PR per release |
+| Snap Store     | `snap/snapcraft.yaml` → snapcraft.io        | ✓                     |
+| winget         | `~/code/agtop-winget-port/` → `microsoft/winget-pkgs`    | ✓ (one-line bump per release) |
+| FreeBSD ports  | `~/code/agtop-freebsd-port/` → `freebsd/freebsd-ports`   | ✓ (one-line bump per release) |
 
 CI publishes use repo secrets `CRATES_IO_TOKEN`, `NPM_TOKEN`,
 `AUR_SSH_PRIVATE_KEY`, `HOMEBREW_TAP_TOKEN`, `APT_REPO_TOKEN`, and

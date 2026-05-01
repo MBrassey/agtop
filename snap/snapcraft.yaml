@@ -1,0 +1,61 @@
+name: agtop
+title: agtop
+summary: Process monitor for AI coding agents
+description: |
+  agtop is a top-style ratatui TUI that walks /proc plus the on-disk
+  session transcripts of Claude Code, OpenAI Codex, Block Goose, Aider,
+  and Google Gemini.  For each detected agent it reports CPU, RSS,
+  status, current tool / task, in-flight subagents, cumulative token
+  usage, estimated cost, context-window fill, loaded skills, and a live
+  transcript preview.
+
+adopt-info: agtop
+license: MIT
+source-code: https://github.com/MBrassey/agtop
+issues: https://github.com/MBrassey/agtop/issues
+contact: matt@brassey.io
+website: https://github.com/MBrassey/agtop
+
+# Strict confinement: agtop is a read-only monitor.  The interfaces
+# below cover everything it needs:
+#   home            — read ~/.claude/projects/, ~/.codex/sessions/,
+#                     ~/.config/goose/sessions/, ~/.gemini/sessions/,
+#                     <cwd>/.aider.chat.history.md
+#   system-observe  — enumerate /proc/<pid>/{cmdline,cwd,exe,stat,io}
+#   process-control — read /proc/<pid>/fd/* for the writing-files column
+#   mount-observe   — read mount info needed to resolve /proc fd paths
+#
+# `home` and `system-observe` auto-connect; `process-control` and
+# `mount-observe` need a "auto-connect" snap-store request after the
+# first publish (one-time, granted to system-monitor tools).
+confinement: strict
+grade: stable
+base: core22
+
+parts:
+  agtop:
+    plugin: rust
+    source: .
+    rust-channel: stable
+    build-packages:
+      - libc6-dev
+    stage-packages:
+      - libc6
+    override-pull: |
+      craftctl default
+      # adopt-info: read the version from Cargo.toml so each snap
+      # release auto-tracks the agtop release without YAML edits.
+      version=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' \
+        "${CRAFT_PART_SRC}/Cargo.toml")
+      craftctl set version="${version}"
+
+apps:
+  agtop:
+    command: bin/agtop
+    plugs:
+      - home
+      - system-observe
+      - process-control
+      - mount-observe
+    environment:
+      RUST_BACKTRACE: "1"

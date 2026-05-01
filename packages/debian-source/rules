@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+%:
+	dh $@ --buildsystem cargo
+
+override_dh_auto_install:
+	dh_auto_install --
+	# dh-cargo installs the binary into target/release/agtop; relocate
+	# to /usr/bin/agtop in the package.
+	install -D -m 0755 debian/agtop/usr/lib/cargo/bin/agtop \
+		debian/agtop/usr/bin/agtop
+	rm -rf debian/agtop/usr/lib/cargo
