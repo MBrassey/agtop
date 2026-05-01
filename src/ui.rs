@@ -478,7 +478,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![lab("session"), dim(sid.clone())]));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![lab("exe"),  Span::styled(shorten(&a.exe, (w as usize).saturating_sub(12)),
+    lines.push(Line::from(vec![lab("bin"),  Span::styled(shorten(&a.exe, (w as usize).saturating_sub(12)),
         Style::default().fg(theme::FG))]));
     lines.push(Line::from(vec![lab("cwd"),  Span::styled(shorten(&a.cwd, (w as usize).saturating_sub(12)),
         Style::default().fg(theme::FG))]));
@@ -512,12 +512,27 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         "  ─ Live preview ".to_string() + &"─".repeat((w as usize).saturating_sub(20)),
         Style::default().fg(theme::BORDER_DIM))));
     if a.recent_activity.is_empty() {
-        // Non-Claude/Codex/Goose/Aider/Gemini agents (cursor, copilot,
-        // mods, llm, ollama, custom matchers, ...) don't have a vendor
-        // transcript reader yet, so the buffer is empty.  Be explicit
-        // rather than mysteriously blank.
-        let hint = if a.session_id.is_some() {
+        // Empty preview can mean three different things; spell each
+        // out explicitly so the user isn't staring at a mysteriously
+        // blank box.
+        let has_session   = a.session_id.is_some();
+        let has_reader    = matches!(a.label.as_str(),
+            "claude" | "codex" | "goose" | "aider" | "gemini");
+        let hint: &str = if has_session {
             "  (no recent activity in this session)"
+        } else if has_reader {
+            // We have a vendor reader but couldn't link any session
+            // JSONL to this PID's cwd.  Most common cause for Claude
+            // is the cwd-encoding mismatch (process cd'd after start)
+            // or the session being too new to have its first turn.
+            match a.label.as_str() {
+                "claude"  => "  (no Claude session found for this cwd — `ls ~/.claude/projects/` to inspect)",
+                "codex"   => "  (no Codex rollout found for this cwd in ~/.codex/sessions/)",
+                "goose"   => "  (no Goose session found in ~/.config/goose/sessions/)",
+                "aider"   => "  (no .aider.chat.history.md in this cwd yet)",
+                "gemini"  => "  (no Gemini session found in ~/.gemini/sessions/)",
+                _ => "  (no session found)",
+            }
         } else {
             "  (no transcript reader for this agent type — see /proc fields above)"
         };
