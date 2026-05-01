@@ -42,10 +42,11 @@ jobs:
       - run: cargo fmt --all -- --check
         continue-on-error: true
 
-  # Linux-host cross-compile coverage for the targets that don't need
-  # an Apple SDK.  macOS targets are covered by the `macos-latest`
-  # runner above (libproc's bindgen step needs the macOS SDK which
-  # isn't present on ubuntu-latest).
+  # Linux-host cross-compile coverage.  The macOS targets were
+  # historically excluded because libproc's bindgen step needed the
+  # Apple SDK; that's no longer true — we use direct FFI to libSystem
+  # for proc_pidinfo / proc_pidfdinfo, so the apple targets cross-
+  # compile from ubuntu-latest fine.
   cross-targets:
     name: cargo check ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -54,6 +55,8 @@ jobs:
       matrix:
         target:
           - aarch64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
           - x86_64-pc-windows-msvc
           - x86_64-pc-windows-gnu
           - x86_64-unknown-freebsd

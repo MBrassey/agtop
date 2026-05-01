@@ -36,45 +36,127 @@ mod impl_ {
 #[cfg(target_os = "macos")]
 mod impl_ {
     use super::*;
-    use libproc::libproc::file_info::{pidfdinfo, ListFDs, ProcFDType, VnodeFDInfoWithPath};
-    use libproc::libproc::proc_pid::listpidinfo;
+    use std::ffi::c_void;
+    use std::os::raw::{c_char, c_int, c_uint};
+
+    // Apple's libproc.h flavor constants (stable since 10.5).
+    const PROC_PIDLISTFDS:           c_int = 1;
+    const PROC_PIDFDVNODEPATHINFO:   c_int = 2;
+    const PROX_FDTYPE_VNODE:         u32   = 1;
+
+    // libSystem.dylib symbols.  Available on every macOS without an
+    // explicit `link` directive — the dynamic linker resolves them.
+    extern "C" {
+        fn proc_pidinfo(
+            pid: c_int, flavor: c_int, arg: u64,
+            buffer: *mut c_void, buffersize: c_int,
+        ) -> c_int;
+        fn proc_pidfdinfo(
+            pid: c_int, fd: c_int, flavor: c_int,
+            buffer: *mut c_void, buffersize: c_int,
+        ) -> c_int;
+    }
+
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct ProcFdInfo {
+        proc_fd: c_int,
+        proc_fdtype: c_uint,
+    }
+
+    /// Subset of `proc_fileinfo` from sys/proc_info.h.  We only read
+    /// `fi_openflags`; the surrounding fields are present so the
+    /// struct size matches what proc_pidfdinfo writes.
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct ProcFileInfo {
+        fi_openflags: u32,
+        fi_status:    u32,
+        fi_offset:    i64,
+        fi_type:      i32,
+        fi_guardflags: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct VnodeInfo {
+        // 152-byte stat block; we don't read any of it.
+        _opaque: [u8; 152],
+    }
+    impl Default for VnodeInfo {
+        fn default() -> Self { Self { _opaque: [0u8; 152] } }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct VnodeInfoPath {
+        vip_vi:   VnodeInfo,
+        vip_path: [c_char; 1024],   // MAXPATHLEN, NUL-terminated
+    }
+    impl Default for VnodeInfoPath {
+        fn default() -> Self { Self { vip_vi: VnodeInfo::default(), vip_path: [0; 1024] } }
+    }
+
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct VnodeFdInfoWithPath {
+        pfi:  ProcFileInfo,
+        pvip: VnodeInfoPath,
+    }
 
     pub fn read(pid: u32, limit: usize) -> Vec<PathBuf> {
-        let pid = pid as i32;
-        // First call sizes the buffer; the libproc wrapper handles the
-        // double-call dance internally.  Cap the requested count so a
-        // pathological process with millions of FDs doesn't OOM.
-        let fds = match listpidinfo::<ListFDs>(pid, 4096) {
-            Ok(v) => v,
-            Err(_) => return Vec::new(),
+        let pid = pid as c_int;
+
+        // Step 1: probe how big the FD list is.
+        let probe = unsafe {
+            proc_pidinfo(pid, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0)
         };
-        let mut out = Vec::with_capacity(limit.min(fds.len()));
-        for fd in fds.iter().take(4096) {
+        if probe <= 0 { return Vec::new(); }
+        // Cap at 4096 entries to avoid a runaway alloc on a process
+        // with millions of fds.
+        let needed = (probe as usize).min(4096 * std::mem::size_of::<ProcFdInfo>());
+        let entry_count = needed / std::mem::size_of::<ProcFdInfo>();
+        let mut buf: Vec<ProcFdInfo> = vec![ProcFdInfo::default(); entry_count];
+
+        // Step 2: fetch the actual FD list.
+        let written = unsafe {
+            proc_pidinfo(
+                pid, PROC_PIDLISTFDS, 0,
+                buf.as_mut_ptr() as *mut c_void,
+                (buf.len() * std::mem::size_of::<ProcFdInfo>()) as c_int,
+            )
+        };
+        if written <= 0 { return Vec::new(); }
+        let got = (written as usize) / std::mem::size_of::<ProcFdInfo>();
+
+        let mut out: Vec<PathBuf> = Vec::with_capacity(limit.min(got));
+        for fd in buf.iter().take(got) {
             if out.len() >= limit { break; }
-            // Only vnode (file-backed) FDs have a path; skip pipes,
-            // sockets, kqueues, etc.
-            if fd.proc_fdtype != ProcFDType::VNode as u32 { continue; }
-            let info: VnodeFDInfoWithPath = match pidfdinfo(pid, fd.proc_fd) {
-                Ok(i) => i,
-                Err(_) => continue,
+            if fd.proc_fdtype != PROX_FDTYPE_VNODE { continue; }
+
+            // Step 3: per-FD path + flags.
+            let mut info = VnodeFdInfoWithPath::default();
+            let n = unsafe {
+                proc_pidfdinfo(
+                    pid, fd.proc_fd, PROC_PIDFDVNODEPATHINFO,
+                    &mut info as *mut _ as *mut c_void,
+                    std::mem::size_of::<VnodeFdInfoWithPath>() as c_int,
+                )
             };
-            // O_WRONLY = 1, O_RDWR = 2 — same constants as POSIX.
+            if n <= 0 { continue; }
+            // O_WRONLY = 1, O_RDWR = 2 (POSIX).
             let flags = info.pfi.fi_openflags as i32;
             if flags & (libc::O_WRONLY | libc::O_RDWR) == 0 { continue; }
-            // VnodePathInfo carries a NUL-terminated MAXPATHLEN buffer.
-            let path_bytes = &info.pvip.vip_path;
-            let nul = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
-            // i8 → u8 reinterpret for the path bytes (libproc types as i8).
-            let bytes: Vec<u8> = path_bytes[..nul].iter().map(|&c| c as u8).collect();
+
+            // vip_path is NUL-terminated c_char (i8 on Apple).
+            let path = &info.pvip.vip_path;
+            let nul = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+            let bytes: Vec<u8> = path[..nul].iter().map(|&c| c as u8).collect();
             let s = match std::str::from_utf8(&bytes) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            // Filter device / pseudo paths the same way the Linux impl does.
-            if s.starts_with("/dev/") { continue; }
-            // macOS doesn't surface pipe:/socket:/anon_inode: as paths
-            // the way Linux does (those have empty vip_path), so the
-            // remaining filtering is just /dev/.
+            if s.is_empty() || s.starts_with("/dev/") { continue; }
             out.push(PathBuf::from(s));
         }
         out
