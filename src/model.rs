@@ -174,6 +174,27 @@ pub struct Agent {
     /// even when no tokens are visibly flowing.
     #[serde(default)]
     pub net_established: u32,
+
+    /// Bytes/sec read by this agent over the last tick interval.
+    /// Computed as Δ(read_bytes) ÷ Δt; 0 on the first sample for
+    /// any pid.  Linux-only.
+    #[serde(default)]
+    pub read_rate_bps: u64,
+    /// Bytes/sec written by this agent over the last tick interval.
+    /// Counterpart to `read_rate_bps`.  Linux-only.
+    #[serde(default)]
+    pub write_rate_bps: u64,
+
+    /// GPU utilisation (0-100%) attributed to this PID by NVIDIA
+    /// drivers.  Populated by parsing `nvidia-smi --query-compute-apps`
+    /// once per snapshot.  0 when the host has no NVIDIA GPU,
+    /// when nvidia-smi isn't on PATH, or when this PID isn't using
+    /// the GPU.  AMD GPUs aren't yet supported.
+    #[serde(default)]
+    pub gpu_pct: f64,
+    /// VRAM used by this PID in bytes.  See `gpu_pct`.
+    #[serde(default)]
+    pub gpu_mem_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

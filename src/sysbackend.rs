@@ -159,6 +159,10 @@ impl SysBackend {
                 reading_files: Vec::new(),
                 children: Vec::new(),
                 net_established: 0,
+                read_rate_bps: 0,
+                write_rate_bps: 0,
+                gpu_pct: 0.0,
+                gpu_mem_bytes: 0,
             });
         }
         out

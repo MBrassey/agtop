@@ -88,6 +88,13 @@ pub struct Args {
     #[arg(long, action = ArgAction::SetTrue)]
     pub no_color: bool,
 
+    /// Color theme for the TUI.  One of: default, dracula, nord,
+    /// gruvbox, monochrome.  Honored at startup; stays for the
+    /// session.
+    #[arg(long, value_name = "NAME",
+          value_parser = ["default", "dracula", "nord", "gruvbox", "monochrome", "mono"])]
+    pub theme: Option<String>,
+
     /// With --once, only show top N agents.
     #[arg(long, default_value_t = 0)]
     pub top: u32,
@@ -116,6 +123,13 @@ pub struct Args {
 
 pub fn run() -> Result<ExitCode> {
     let args = Args::parse();
+
+    // Install the active theme before any draw / print path runs so
+    // the very first frame uses the requested palette.  Idempotent
+    // — the OnceLock inside theme.rs accepts only the first writer.
+    if let Some(name) = &args.theme {
+        crate::theme::set_theme(name);
+    }
 
     if args.list_builtins {
         for m in matchers::builtin() {
