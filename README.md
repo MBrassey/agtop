@@ -46,16 +46,32 @@ transcript preview.
 
 ## Install
 
-| Platform              | Command |
-| --------------------- | ------- |
-| Arch / CachyOS        | `yay -S agtop` |
-| Debian / Ubuntu       | `curl -fsSL https://mbrassey.github.io/apt/pubkey.asc \| sudo gpg --dearmor -o /etc/apt/keyrings/agtop.gpg && echo "deb [signed-by=/etc/apt/keyrings/agtop.gpg] https://mbrassey.github.io/apt ./" \| sudo tee /etc/apt/sources.list.d/agtop.list && sudo apt update && sudo apt install agtop` |
-| macOS                 | `brew install mbrassey/tap/agtop` |
-| Windows               | `winget install agtop` |
-| FreeBSD               | `sudo pkg install agtop` |
-| Cargo                 | `cargo install agtop` |
-| npm                   | `npm install -g @mbrassey/agtop` |
-| Prebuilts             | linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64 — [latest release](https://github.com/MBrassey/agtop/releases/latest) |
+| Platform        | Command                                |
+| --------------- | -------------------------------------- |
+| Arch / CachyOS  | `yay -S agtop`                         |
+| Debian / Ubuntu | [add apt source][apt], then `sudo apt install agtop` |
+| macOS           | `brew install mbrassey/tap/agtop`      |
+| Windows         | `winget install agtop`                 |
+| FreeBSD         | `sudo pkg install agtop`               |
+| Cargo           | `cargo install agtop`                  |
+| npm             | `npm install -g @mbrassey/agtop`       |
+| Prebuilts       | [latest release][rel] — linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64 |
+
+[rel]: https://github.com/MBrassey/agtop/releases/latest
+[apt]: #apt-source
+
+#### apt source
+
+```sh
+curl -fsSL https://mbrassey.github.io/apt/pubkey.asc \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/agtop.gpg
+echo "deb [signed-by=/etc/apt/keyrings/agtop.gpg] https://mbrassey.github.io/apt ./" \
+  | sudo tee /etc/apt/sources.list.d/agtop.list
+sudo apt update && sudo apt install agtop
+```
+
+Subsequent updates flow through `sudo apt update && sudo apt upgrade`
+like any other apt package.
 
 The npm package is a Node shim that downloads the matching prebuilt
 from the GitHub Release and verifies it against the release's
@@ -330,7 +346,7 @@ dashboards, or alerting.
   ],
   "projects": [/* per-project rollups */],
   "sessions": {/* counts + recent_tasks */},
-  "history": {/* 60-tick series for cpu / mem / tokens_rate / etc. */},
+  "history": {/* up-to-240-tick series for cpu / mem / tokens_rate / etc. */},
   "activity": [/* spawn / exit events */]
 }
 ```
@@ -698,12 +714,12 @@ work normally.
 ```
 agtop/
 ├── Cargo.toml · Cargo.lock
-├── src/                              21 source files · ~6.0 k lines · 19 tests
+├── src/                              21 source files · ~8.4 k lines · 19 tests
 │   ├── main.rs · cli.rs · ui.rs · theme.rs · collector.rs
-│   ├── pricing.rs · pricing_data.rs (auto-generated)
+│   ├── pricing.rs · pricing_data.rs (auto-generated, ~1800 entries)
 │   ├── proc_.rs                     Linux /proc backend
 │   ├── sysbackend.rs                sysinfo backend (macOS / Windows / *BSD)
-│   ├── writing_files.rs             native FD enum (Linux / macOS FFI / Windows FFI)
+│   ├── writing_files.rs             native FD enum (Linux + macOS FFI + Windows FFI + FreeBSD libprocstat)
 │   ├── skills.rs                    Claude Code skill discovery
 │   ├── claude.rs · codex.rs · goose.rs · aider.rs · gemini.rs · generic.rs
 │   └── sessions.rs · matchers.rs · model.rs · format.rs

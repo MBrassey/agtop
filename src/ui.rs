@@ -1409,7 +1409,7 @@ fn draw_status_distribution(f: &mut Frame, area: Rect, snap: &Snapshot) {
         row("BUSY",   *counts.get("busy").unwrap_or(&0),     Status::Busy),
         row("SPWN",   *counts.get("spawning").unwrap_or(&0), Status::Spawning),
         row("ACTV",   *counts.get("active").unwrap_or(&0),   Status::Active),
-        row("idle",   *counts.get("idle").unwrap_or(&0),     Status::Idle),
+        row("IDLE",   *counts.get("idle").unwrap_or(&0),     Status::Idle),
         row("WAIT",   waiting,                               Status::Waiting),
         row("DONE",   done,                                  Status::Completed),
     ];
