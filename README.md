@@ -32,6 +32,7 @@ transcript preview.
 - [JSON output](#json-output)
 - [Cost estimation](#cost-estimation)
 - [Context window and skills](#context-window-and-skills)
+- [Detail popup](#detail-popup)
 - [Custom matchers](#custom-matchers)
 - [Platforms](#platforms)
 - [Implementation notes](#implementation-notes)
@@ -308,13 +309,17 @@ dashboards, or alerting.
       "context_used":   515708,
       "context_limit": 1000000,
       "loaded_skills": ["frontend-design", "slack-tooler"],
+      "tool_counts":   [["Bash", 47], ["Edit", 23], ["Read", 12], ["Grep", 8]],
 
       "dangerous": false,
+      "dangerous_flag": "",
       "cpu": 16.3, "rss": 626491392,
+      "ppid": 12345, "ppid_name": "zsh",
       "read_bytes": 482344960, "write_bytes": 12189440,
       "writing_files": ["/home/matt/code/zk-rollup-prover/circuits/main.rs"],
       "writing_dirs":  ["/home/matt/code/zk-rollup-prover/circuits"],
       "uptime_sec": 345600,
+      "session_started_ms": 1777094281861,
       "recent_activity": [
         "› Reviewing the diff",
         "→ Bash: nargo prove --witness witness.tr",
@@ -343,6 +348,10 @@ Per-agent fields worth highlighting:
 | `read_bytes` / `write_bytes` | Cumulative IO since process start. Linux `/proc/<pid>/io`; macOS / Windows `sysinfo::Process::disk_usage().total_*`. 0 on *BSD (sysinfo gap). |
 | `writing_files` / `writing_dirs` | Open files with write access (and their parent dirs). Linux `/proc/<pid>/fdinfo`; macOS direct FFI to `proc_pidfdinfo`; Windows `NtQuerySystemInformation` + `DuplicateHandle`. Empty on *BSD. |
 | `dangerous` | True when the cmdline includes `--dangerously-skip-permissions`, `--no-permissions`, `--allow-dangerous`, `--yolo`, or starts with `sudo claude` / `sudo codex`. |
+| `dangerous_flag` | When `dangerous` is true, the specific substring that triggered the classifier (e.g. `--dangerously-skip-permissions`). Empty otherwise. |
+| `tool_counts` | Top tools used in this session, sorted desc by call count: `[[name, count], ...]`. Capped at 8 entries. Vendor enrichers count `tool_use` records. |
+| `ppid_name` | Parent process command name — the launcher (`zsh`, `bash`, `fish`, `nu`, `tmux`, `code`, `kitty`, ...). Resolved from `/proc/<ppid>/comm` on Linux, `sysinfo::Process::name()` elsewhere. |
+| `session_started_ms` | Unix ms timestamp of the session's first transcript record. Diverges from process start time when the agent was invoked with `--resume` against an older session. 0 if unknown. |
 
 ---
 
@@ -487,6 +496,77 @@ The same data is in `--json` under `agents[].loaded_skills`.
 
 Skills detection is Claude Code-specific. Other vendors' skill
 formats aren't yet supported — PRs welcome.
+
+---
+
+## Detail popup
+
+`Enter` on any agent row opens the detail popup (or click the row).
+It assembles every signal agtop has on that PID into one screen:
+
+```
+● BUSY claude  pid 404872  · zk-rollup-prover
+model       claude-opus-4-7
+cpu         16.3%  ▁▂▃▅▇█▇▅▃▂▁▂▄▆█▇▅
+memory      598M rss · 2.1G vsize
+uptime      4m17s  ·  session 3d 7h (resumed)
+threads     14    state R  ppid 12345 (zsh)
+dangerous   --dangerously-skip-permissions
+tokens      9.5M (5.8M in / 46k out)
+cost        $4.21    api · prices as of 2026-04-30
+cache       97% hit  (5.7M of 5.8M input tok cached)  · saved $15.42 vs uncached
+context     ███████████████░░░░░░░░░  52%  (515k / 1M tok)  · ≈14m to compaction (+38k/min)
+skills      3 loaded   frontend-design, slack-tooler, sql-explorer
+subagents   1 in flight
+              · code-reviewer: review the auth refactor
+session     6163a95c-e18a-4a4c-a793
+tools       Bash 47 · Edit 23 · Read 12 · Grep 8 · Write 5
+
+bin         /usr/bin/claude
+cwd         /home/matt/code/zk-rollup-prover
+cmd         claude --dangerously-skip-permissions
+read        482M    write 12M
+writing     /home/matt/code/zk-rollup-prover/circuits/main.rs
+
+  ─ Live preview ─────────────────────────────────────
+  › Reviewing the diff
+  → Bash: nargo prove --witness witness.tr
+  ← witness verified
+  → Edit: src/circuit/poseidon.rs
+```
+
+Each line is also accessible from `agtop --json` under
+`agents[].<field>` so the same data drives dashboards.
+
+Notable computed values:
+
+- **`cache` line** — Anthropic prompt-caching saves ~90% on cached
+  input tokens. The "saved" figure is `cache_read × input_per_mtok ×
+  0.90` — the dollars you'd have spent at the standard input rate
+  minus what you actually spent at the discounted cache-read rate.
+- **`≈ Xm to compaction`** — collector keeps a per-PID
+  `(timestamp_ms, context_used)` ring (24 samples). When growth is
+  positive, slope-extrapolate to 95% of `context_limit` and render
+  the ETA + `+ tokens/min` rate. Goes silent when context isn't
+  growing.
+- **`uptime` vs `session`** — process uptime comes from `/proc`
+  (or sysinfo); session age comes from the JSONL's first record
+  timestamp. When they diverge by >60s the line tags `(resumed)` —
+  the user invoked `claude --resume` and is continuing an older
+  conversation.
+- **`tools` line** — vendor enricher increments a counter on every
+  `tool_use` record; sorted desc, capped at 8, top 5 displayed.
+  Surfaces actual effort allocation (Bash-heavy session vs
+  Edit-heavy session vs Read-heavy session).
+- **`ppid_name`** — resolved from `/proc/<ppid>/comm` (Linux) or
+  `sysinfo::Process::name()` (others). Reads the kernel's recorded
+  command name regardless of shell or launcher; works for `zsh`,
+  `bash`, `fish`, `nu`, `tmux`, `code`, `kitty`, `WindowsTerminal`,
+  whatever spawned the agent.
+- **`dangerous` line** — only present when the classifier flagged
+  the cmdline; shows the specific substring that triggered it
+  (e.g. `--yolo` vs `--dangerously-skip-permissions`) so the user
+  knows the exact permission level in play.
 
 ---
 
