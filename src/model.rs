@@ -153,6 +153,27 @@ pub struct Agent {
     pub write_bytes: u64,
     pub writing_files: Vec<String>,
     pub writing_dirs: Vec<String>,
+    /// Files the process currently has open in read-only mode.
+    /// Surfaces what the agent is reading right now (project files
+    /// during context indexing, MCP server configs, hook scripts,
+    /// etc.) — useful when CPU is up but no tokens are flowing
+    /// because Claude Code is doing background work.  Linux-only;
+    /// empty on other platforms (sysinfo doesn't expose foreign-
+    /// process file descriptors).
+    #[serde(default)]
+    pub reading_files: Vec<String>,
+    /// Immediate child processes spawned by the agent — `(pid, comm)`
+    /// pairs from /proc/<pid>/task/*/children.  Captures hook
+    /// invocations (`hook-pre-commit`, `bash`), MCP server processes,
+    /// and any shell commands the agent ran.  Linux-only.
+    #[serde(default)]
+    pub children: Vec<(u32, String)>,
+    /// Count of established TCP connections (v4 + v6).  Linux-only;
+    /// 0 when the count can't be read.  Non-zero indicates the
+    /// agent is talking to an API / MCP server / network resource
+    /// even when no tokens are visibly flowing.
+    #[serde(default)]
+    pub net_established: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

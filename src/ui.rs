@@ -198,7 +198,8 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // keys are honoured — j/k/s/g/f/r/p don't fall through.
     if app.show_detail || app.show_help {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+            KeyCode::Esc | KeyCode::Char('q')
+            | KeyCode::Enter | KeyCode::Char(' ') => {
                 app.show_detail = false;
                 app.show_help = false;
             }
@@ -213,8 +214,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('?') | KeyCode::Char('h') => app.show_help = true,
-        KeyCode::Enter => app.show_detail = true,
-        KeyCode::Char('p') | KeyCode::Char(' ') => app.paused = !app.paused,
+        // Both Enter AND Space open the detail popup (and Space also
+        // closes it when open — see the popup-gated branch above).
+        // Pause keeps `p` only.
+        KeyCode::Enter | KeyCode::Char(' ') => app.show_detail = true,
+        KeyCode::Char('p') => app.paused = !app.paused,
         KeyCode::Char('r') => {
             app.snap = app.collector.snapshot();
             app.last_tick = Instant::now();
@@ -571,6 +575,47 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(vec![Span::raw("    "),
                 Span::styled(shorten(f, (w as usize).saturating_sub(6)),
                     Style::default().fg(theme::FG_DIM))]));
+        }
+    }
+    // Background-activity surface — what's the agent actually doing
+    // when no tokens are flowing?  Reading FDs, spawned children,
+    // open network connections.  Only rendered when there's something
+    // to show, but the section header lights up whenever any of the
+    // three signals is present so the user has a single place to
+    // look for "why is this row at 15% CPU with nothing happening".
+    let has_bg = !a.reading_files.is_empty()
+        || !a.children.is_empty()
+        || a.net_established > 0;
+    if has_bg {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "  ─ Background activity ".to_string()
+                + &"─".repeat((w as usize).saturating_sub(26)),
+            Style::default().fg(theme::BORDER_DIM))));
+        if a.net_established > 0 {
+            lines.push(Line::from(vec![
+                lab("network"),
+                val(format!("{} established", a.net_established), theme::C_CHART_TOK),
+                dim("  (TCP — agent is talking to API / MCP / network)".to_string()),
+            ]));
+        }
+        if !a.children.is_empty() {
+            let parts: Vec<String> = a.children.iter().take(6)
+                .map(|(p, c)| format!("{} ({})", c, p)).collect();
+            lines.push(Line::from(vec![
+                lab("children"),
+                val(format!("{} spawned", a.children.len()), theme::C_SPAWN),
+                dim(format!("  {}", shorten(&parts.join(" · "),
+                    (w as usize).saturating_sub(28)))),
+            ]));
+        }
+        if !a.reading_files.is_empty() {
+            lines.push(Line::from(lab("reading")));
+            for f in a.reading_files.iter().take(4) {
+                lines.push(Line::from(vec![Span::raw("    "),
+                    Span::styled(shorten(f, (w as usize).saturating_sub(6)),
+                        Style::default().fg(theme::FG_DIM))]));
+            }
         }
     }
     // Live preview: a fenced box at the bottom showing the last few
@@ -1529,7 +1574,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Line::raw(""),
         line(vec![key("  q, Ctrl-C   "), dim("quit (closes popup first if open)")]),
         line(vec![key("  ?, h        "), dim("toggle this help")]),
-        line(vec![key("  p, Space    "), dim("pause / resume refresh")]),
+        line(vec![key("  p           "), dim("pause / resume refresh")]),
+        line(vec![key("  Enter, Space"), dim("open / close detail popup")]),
         line(vec![key("  r           "), dim("refresh now")]),
         line(vec![key("  s           "), dim("cycle sort (smart / cpu / mem / tokens / uptime / agent)")]),
         line(vec![key("  g           "), dim("toggle project grouping")]),
@@ -1538,7 +1584,6 @@ fn draw_help(f: &mut Frame, area: Rect) {
         line(vec![key("  j/k, ↓/↑    "), dim("move selection")]),
         line(vec![key("  PgUp/PgDn   "), dim("move 10 rows")]),
         line(vec![key("  Home/End    "), dim("first / last agent")]),
-        line(vec![key("  Enter       "), dim("open / close detail popup for selected agent")]),
         line(vec![key("  Mouse       "), dim("click row → select; double-click → detail; wheel → scroll")]),
         Line::raw(""),
         line(vec![hdr("  Status legend:")]),

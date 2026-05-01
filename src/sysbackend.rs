@@ -152,6 +152,13 @@ impl SysBackend {
                 write_bytes: proc.disk_usage().total_written_bytes,
                 writing_files,
                 writing_dirs,
+                // sysinfo doesn't expose per-process FD lists or
+                // child enumeration on macOS / Windows / *BSD;
+                // these stay empty.  /proc/<pid>/net/tcp is also
+                // Linux-only.
+                reading_files: Vec::new(),
+                children: Vec::new(),
+                net_established: 0,
             });
         }
         out

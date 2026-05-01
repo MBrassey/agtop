@@ -304,6 +304,16 @@ impl Collector {
                 write_bytes: io.write_bytes,
                 writing_files,
                 writing_dirs,
+                // Background-activity surface (Linux-only).  Reading
+                // FDs / spawned children / open TCP conns are the
+                // signals that explain CPU usage when no tokens are
+                // visibly flowing.  Caps are tight so a process with
+                // thousands of open files / children / sockets
+                // doesn't dominate one snapshot tick.
+                reading_files: proc_::read_reading_files(pid, 6).iter()
+                    .map(|p| p.to_string_lossy().into_owned()).collect(),
+                children: proc_::read_children(pid, 8),
+                net_established: proc_::count_net_established(pid),
             };
 
             agg_cpu += smoothed;
