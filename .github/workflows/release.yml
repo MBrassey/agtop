@@ -262,7 +262,7 @@ jobs:
           INNER
 
   publish-debian:
-    name: Publish .deb to Cloudsmith
+    name: Publish .deb to apt repo (mbrassey.github.io/apt)
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -274,8 +274,13 @@ jobs:
           v=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
-      # Pull the prebuilt linux-x86_64 binary that this run's matrix
-      # already produced, instead of recompiling — saves ~2 min.
+      - name: Install apt-repo tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dpkg-dev gpg
+
+      # Pull the prebuilt linux-x86_64 binary this run's matrix
+      # already produced — saves ~2 min vs recompiling.
       - name: Download linux-x86_64 prebuilt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -285,37 +290,66 @@ jobs:
             --repo "${{ github.repository }}" \
             --pattern 'agtop-linux-x86_64.tar.gz' --dir deb-bin
           tar -xzf deb-bin/agtop-linux-x86_64.tar.gz -C deb-bin
+          mkdir -p target/release
           install -m 0755 deb-bin/agtop-linux-x86_64/agtop target/release/agtop
-          mkdir -p target/release && touch target/release/.placeholder
 
       - name: Build .deb
-        run: |
-          # build.sh would normally `cargo build --release`; we already
-          # have the prebuilt installed at target/release/agtop above,
-          # so this just stages it into the .deb layout.
-          bash packages/deb/build.sh
+        run: bash packages/deb/build.sh
 
-      - name: Push to Cloudsmith
+      - name: Import GPG signing key
         env:
-          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          KEY: ${{ secrets.APT_REPO_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::APT_REPO_GPG_PRIVATE_KEY secret not set"; exit 1
+          fi
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          printf '%s' "$KEY" | gpg --batch --import 2>&1 | tail -3
+          echo "GPG_KEY_ID=$(gpg --list-secret-keys --with-colons \
+            | awk -F: '/^sec/{print $5; exit}')" >> "$GITHUB_ENV"
+
+      - name: Stage apt repo (clone + add deb + regen metadata)
+        env:
+          TOK: ${{ secrets.APT_REPO_TOKEN }}
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          if [ -z "$CLOUDSMITH_API_KEY" ]; then
-            echo "::warning::CLOUDSMITH_API_KEY secret not set — skipping (build artifact still attached to GitHub Release)"
-            exit 0
+          if [ -z "$TOK" ]; then
+            echo "::error::APT_REPO_TOKEN secret not set"; exit 1
           fi
-          pip install --quiet cloudsmith-cli
+          tap=$(mktemp -d)
+          git clone --depth=1 \
+            "https://x-access-token:${TOK}@github.com/MBrassey/apt.git" "$tap"
           DEB="packages/deb/agtop_${VERSION}_amd64.deb"
           [ -f "$DEB" ] || { echo "::error::missing $DEB"; ls packages/deb/; exit 1; }
-          # `any-distro/any-version` is Cloudsmith's universal slot;
-          # the .deb is statically linked so it installs identically
-          # on every Debian + Ubuntu LTS we care about.  Idempotent:
-          # `--no-republish` would skip-on-duplicate; we don't pass
-          # it because re-pushing the same version should fail loud
-          # (unlike the npm / crates jobs which dedupe silently).
-          cloudsmith push deb \
-            mbrassey/agtop/any-distro/any-version "$DEB" \
-            --api-key "$CLOUDSMITH_API_KEY"
+          # Flat repo layout — no dists/ tree.  Users add a single
+          # `deb [signed-by=...] https://mbrassey.github.io/apt ./` line.
+          mkdir -p "$tap/pool"
+          cp "$DEB" "$tap/pool/"
+          ( cd "$tap" && dpkg-scanpackages --multiversion pool /dev/null \
+              > Packages
+            gzip -9k -f Packages
+            apt-ftparchive release \
+              -o APT::FTPArchive::Release::Origin="MBrassey" \
+              -o APT::FTPArchive::Release::Label="agtop" \
+              -o APT::FTPArchive::Release::Suite="stable" \
+              -o APT::FTPArchive::Release::Codename="agtop" \
+              -o APT::FTPArchive::Release::Architectures="amd64" \
+              -o APT::FTPArchive::Release::Components="main" \
+              . > Release
+            gpg --batch --yes --default-key "${GPG_KEY_ID}" -abs -o Release.gpg Release
+            gpg --batch --yes --default-key "${GPG_KEY_ID}" --clearsign -o InRelease Release
+          )
+
+          cd "$tap"
+          git config user.name  "mbrassey"
+          git config user.email "matt@brassey.io"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes — apt repo already at v${VERSION}"
+            exit 0
+          fi
+          git commit -m "agtop ${VERSION}"
+          git push
 
   publish-homebrew:
     name: Publish to Homebrew tap

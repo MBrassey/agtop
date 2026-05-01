@@ -49,7 +49,7 @@ transcript preview.
 | Platform              | Command |
 | --------------------- | ------- |
 | Arch / CachyOS        | `yay -S agtop` |
-| Debian / Ubuntu       | `curl -1sLf 'https://dl.cloudsmith.io/public/mbrassey/agtop/setup.deb.sh' \| sudo -E bash && sudo apt install agtop` |
+| Debian / Ubuntu       | `curl -fsSL https://mbrassey.github.io/apt/pubkey.asc \| sudo gpg --dearmor -o /etc/apt/keyrings/agtop.gpg && echo "deb [signed-by=/etc/apt/keyrings/agtop.gpg] https://mbrassey.github.io/apt ./" \| sudo tee /etc/apt/sources.list.d/agtop.list && sudo apt update && sudo apt install agtop` |
 | macOS                 | `brew install mbrassey/tap/agtop` |
 | Windows               | `winget install agtop` |
 | FreeBSD               | `sudo pkg install agtop` |
@@ -730,29 +730,34 @@ release workflow fans out to all three primary registries in parallel.
 | npm            | `packages/npm/build.sh` (prebuilt shim)  | ✓                     |
 | AUR            | `packages/pacman/PKGBUILD`               | ✓                     |
 | Homebrew tap   | `homebrew/agtop.rb` → `MBrassey/homebrew-tap` | ✓                |
-| Cloudsmith deb | `packages/deb/build.sh` → `cloudsmith.io/mbrassey/agtop` | ✓     |
+| apt repo (deb) | `packages/deb/build.sh` → `MBrassey/apt` (gh-pages) | ✓                |
 | winget         | `~/code/agtop-winget-port/` → `microsoft/winget-pkgs`    | manual PR per release |
 | FreeBSD ports  | `~/code/agtop-freebsd-port/` → `freebsd/freebsd-ports`   | manual PR per release |
 
 CI publishes use repo secrets `CRATES_IO_TOKEN`, `NPM_TOKEN`,
-`AUR_SSH_PRIVATE_KEY`, `HOMEBREW_TAP_TOKEN`, and
-`CLOUDSMITH_API_KEY`; the publish jobs idempotently skip when the
-version is already on the destination registry, so re-pushing or
-re-tagging is safe.  The npm postinstall verifies the downloaded
+`AUR_SSH_PRIVATE_KEY`, `HOMEBREW_TAP_TOKEN`, `APT_REPO_TOKEN`, and
+`APT_REPO_GPG_PRIVATE_KEY`; the publish jobs idempotently skip when
+the version is already on the destination registry, so re-pushing
+or re-tagging is safe.  The npm postinstall verifies the downloaded
 prebuilt against the `SHA256SUMS` file attached to each GitHub
 Release before extracting.
 
-For first-time install, Debian / Ubuntu users run the Cloudsmith
-setup script once to add the apt source:
+For first-time install, Debian / Ubuntu users add the apt source
+once:
 
 ```sh
-curl -1sLf 'https://dl.cloudsmith.io/public/mbrassey/agtop/setup.deb.sh' \
-  | sudo -E bash
-sudo apt install agtop
+curl -fsSL https://mbrassey.github.io/apt/pubkey.asc \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/agtop.gpg
+echo "deb [signed-by=/etc/apt/keyrings/agtop.gpg] https://mbrassey.github.io/apt ./" \
+  | sudo tee /etc/apt/sources.list.d/agtop.list
+sudo apt update && sudo apt install agtop
 ```
 
 Subsequent updates flow through `sudo apt update && sudo apt upgrade`
-like any other apt package.
+like any other apt package.  The repo's `Release` file is signed
+with the key whose public half is at
+[mbrassey.github.io/apt/pubkey.asc](https://mbrassey.github.io/apt/pubkey.asc)
+(fingerprint `FC8BF673587134A114B205A0632F0658B478942A`).
 
 ---
 
