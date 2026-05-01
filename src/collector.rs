@@ -7,6 +7,59 @@ use crate::format::derive_project;
 use crate::pricing::PriceTable;
 use crate::sysbackend::SysBackend;
 
+/// One-shot per-tick lookup of NVIDIA GPU usage by PID.  Spawns
+/// `nvidia-smi --query-compute-apps=pid,used_gpu_memory --format=csv,noheader,nounits`
+/// plus a follow-up `--query-gpu` for utilisation.  Returns
+/// `pid → (utilisation_pct, used_vram_bytes)`.  Empty (no
+/// allocations) if nvidia-smi isn't on PATH or returns non-zero.
+///
+/// Cost: one fork+exec per snapshot.  The query itself takes
+/// ~30-60 ms on a Linux host with one GPU; safe to run inside the
+/// collector tick.  AMD / Apple Silicon / Intel Arc are TODO.
+fn read_gpu_usage() -> std::collections::HashMap<u32, (f64, u64)> {
+    use std::collections::HashMap;
+    use std::process::Command;
+    let mut out: HashMap<u32, (f64, u64)> = HashMap::new();
+    // Per-process: pid + used_memory (MiB).  --query-compute-apps
+    // doesn't include per-process utilisation; we attribute the
+    // host-wide gpu utilisation pct to every process on it weighted
+    // by VRAM share — close enough for "is this agent burning GPU".
+    let apps = Command::new("nvidia-smi")
+        .args(["--query-compute-apps=pid,used_gpu_memory",
+               "--format=csv,noheader,nounits"])
+        .output();
+    let apps = match apps { Ok(o) if o.status.success() => o.stdout, _ => return out };
+    let mut total_mem: u64 = 0;
+    let mut entries: Vec<(u32, u64)> = Vec::new();
+    for line in std::str::from_utf8(&apps).unwrap_or("").lines() {
+        let mut cols = line.split(',').map(str::trim);
+        let Some(pid_s) = cols.next() else { continue };
+        let Some(mem_s) = cols.next() else { continue };
+        let Ok(pid) = pid_s.parse::<u32>() else { continue };
+        let mem_mib = mem_s.parse::<u64>().unwrap_or(0);
+        let mem_bytes = mem_mib * 1024 * 1024;
+        total_mem = total_mem.saturating_add(mem_bytes);
+        entries.push((pid, mem_bytes));
+    }
+    if entries.is_empty() { return out; }
+
+    // Host-wide utilisation (sum across all GPUs).
+    let util = Command::new("nvidia-smi")
+        .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
+        .output();
+    let util_total = util.ok().and_then(|o| if o.status.success() { Some(o.stdout) } else { None })
+        .map(|b| {
+            std::str::from_utf8(&b).unwrap_or("").lines()
+                .filter_map(|l| l.trim().parse::<f64>().ok()).sum::<f64>()
+        }).unwrap_or(0.0);
+
+    for (pid, mem_bytes) in entries {
+        let share = if total_mem > 0 { mem_bytes as f64 / total_mem as f64 } else { 0.0 };
+        out.insert(pid, (util_total * share, mem_bytes));
+    }
+    out
+}
+
 /// Patterns in a process cmdline that indicate elevated / "god mode" agent
 /// permissions — `--dangerously-skip-permissions`, `--yolo`, `--no-permissions`,
 /// `--allow-dangerously-…`.  The collector flags these so the TUI can pulsate
@@ -89,6 +142,11 @@ pub struct Collector {
     /// time-to-compaction in the detail popup.  Same size cap as the
     /// CPU ring; entries are evicted when the pid exits.
     agent_ctx_hist: HashMap<u32, VecDeque<(u64, u64)>>,
+    /// Per-pid (timestamp_ms, read_bytes, write_bytes) snapshot of
+    /// the previous tick.  Drives the read_rate_bps / write_rate_bps
+    /// fields on Agent.  Evicted on pid exit alongside the other
+    /// per-pid maps.
+    agent_io_prev: HashMap<u32, (u64, u64, u64)>,
     boot_time: u64,
     num_cpus: usize,
     known_pids: HashMap<u32, String>,
@@ -129,6 +187,7 @@ impl Collector {
             cpu_smooth: HashMap::new(),
             agent_cpu_hist: HashMap::new(),
             agent_ctx_hist: HashMap::new(),
+            agent_io_prev:  HashMap::new(),
             boot_time: proc_::read_boot_time(),
             num_cpus,
             known_pids: HashMap::new(),
@@ -314,6 +373,10 @@ impl Collector {
                     .map(|p| p.to_string_lossy().into_owned()).collect(),
                 children: proc_::read_children(pid, 8),
                 net_established: proc_::count_net_established(pid),
+                read_rate_bps: 0,    // filled in below from the per-pid prev snapshot
+                write_rate_bps: 0,
+                gpu_pct: 0.0,
+                gpu_mem_bytes: 0,
             };
 
             agg_cpu += smoothed;
@@ -354,6 +417,7 @@ impl Collector {
             self.prev.remove(pid);
             self.cpu_smooth.remove(pid);
             self.agent_ctx_hist.remove(pid);
+            self.agent_io_prev.remove(pid);
         }
 
         self.prev_total = total_cpu;
@@ -464,6 +528,31 @@ impl Collector {
     /// universal CPU% override, fills in cost from the price table, and
     /// returns the merged sessions block ready to put on the snapshot.
     fn enrich_and_score(&mut self, agents: &mut [Agent], now: u64) -> crate::model::Sessions {
+        // GPU usage table built once per snapshot from nvidia-smi.
+        // Empty (no allocations beyond the empty HashMap) when the
+        // host has no NVIDIA GPU or nvidia-smi isn't on PATH.
+        let gpu_by_pid = read_gpu_usage();
+
+        // Compute per-pid IO rates against the previous tick's
+        // (read_bytes, write_bytes, ts).  First sample for any pid
+        // returns 0; subsequent samples produce bytes/sec.
+        for a in agents.iter_mut() {
+            if let Some(prev) = self.agent_io_prev.get(&a.pid) {
+                let dt_ms = now.saturating_sub(prev.0);
+                if dt_ms > 0 {
+                    let dr = a.read_bytes.saturating_sub(prev.1);
+                    let dw = a.write_bytes.saturating_sub(prev.2);
+                    a.read_rate_bps  = (dr as u128 * 1000 / dt_ms as u128) as u64;
+                    a.write_rate_bps = (dw as u128 * 1000 / dt_ms as u128) as u64;
+                }
+            }
+            self.agent_io_prev.insert(a.pid, (now, a.read_bytes, a.write_bytes));
+            if let Some((pct, mem)) = gpu_by_pid.get(&a.pid) {
+                a.gpu_pct = *pct;
+                a.gpu_mem_bytes = *mem;
+            }
+        }
+
         let live_refs: Vec<LiveAgentRef> = agents.iter()
             .map(|a| LiveAgentRef { pid: a.pid, cwd: a.cwd.as_str(), label: a.label.as_str() })
             .collect();
@@ -618,6 +707,7 @@ impl Collector {
             self.known_pids.remove(pid);
             self.cpu_smooth.remove(pid);
             self.agent_ctx_hist.remove(pid);
+            self.agent_io_prev.remove(pid);
         }
         if self.activity.len() > MAX_ACTIVITY {
             let drop = self.activity.len() - MAX_ACTIVITY;

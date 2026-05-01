@@ -78,6 +78,14 @@ struct App {
     typing_filter: bool,
     show_help: bool,
     show_detail: bool,
+    /// When `Some(pid)`, a SIGTERM-confirmation popup is open for
+    /// that pid; `y` confirms (sends SIGTERM via libc::kill), `n`
+    /// or `Esc` cancels.  `K` opens the popup for the selected row.
+    confirm_kill: Option<u32>,
+    /// Tree view: when on, each row in the agents panel is followed
+    /// by indented sub-rows for its immediate child processes
+    /// (hooks, MCP servers, shell commands).  Toggled with `t`.
+    tree_mode: bool,
     selected_pid: Option<u32>,
     visible_pid_order: Vec<u32>,
     /// `(row_y, pid)` of every clickable agent row in the agents panel,
@@ -126,6 +134,8 @@ pub fn run(collector: Collector, args: Args) -> Result<()> {
         typing_filter: false,
         show_help: false,
         show_detail: false,
+        confirm_kill: None,
+        tree_mode: false,
         selected_pid: None,
         visible_pid_order: Vec::new(),
         clickable_rows: Vec::new(),
@@ -196,6 +206,21 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 
     // Popup-aware gating: when a popup is open, only the dismiss / toggle
     // keys are honoured — j/k/s/g/f/r/p don't fall through.
+    if app.confirm_kill.is_some() {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(pid) = app.confirm_kill.take() {
+                    send_sigterm(pid);
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.confirm_kill = None;
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => app.quit = true,
+            _ => {}
+        }
+        return;
+    }
     if app.show_detail || app.show_help {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q')
@@ -225,6 +250,15 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('s') => app.sort = app.sort.cycle(),
         KeyCode::Char('g') => app.grouped = !app.grouped,
+        KeyCode::Char('t') => app.tree_mode = !app.tree_mode,
+        // Capital K opens the SIGTERM-confirmation dialog for the
+        // currently-selected agent.  Lowercase k stays bound to
+        // upward navigation (vim convention).
+        KeyCode::Char('K') => {
+            if let Some(pid) = app.selected_pid {
+                app.confirm_kill = Some(pid);
+            }
+        }
         KeyCode::Char('/') | KeyCode::Char('f') => {
             app.typing_filter = true;
             app.filter.clear();
@@ -239,6 +273,22 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::End => move_sel(app, i32::MAX / 2),
         _ => {}
     }
+}
+
+/// Send SIGTERM to a pid.  Best-effort: returns silently on EPERM
+/// (process not ours), ESRCH (process gone), and any other error
+/// — the user sees the row disappear (or not) on the next tick.
+#[cfg(unix)]
+fn send_sigterm(pid: u32) {
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+}
+#[cfg(not(unix))]
+fn send_sigterm(_pid: u32) {
+    // Windows: TerminateProcess via OpenProcess(PROCESS_TERMINATE).
+    // Out of scope for now — kill is rarely the right action for
+    // an agent on Windows anyway (Ctrl-C in the terminal is
+    // friendlier).  The K-key opens the confirm dialog regardless;
+    // pressing y here is just a no-op on non-Unix.
 }
 
 fn handle_mouse(app: &mut App, m: MouseEvent) {
@@ -282,7 +332,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         let p = Paragraph::new(format!(
             "  agtop needs at least 60×16 (have {}×{}).\n  Resize the terminal or use `agtop --once`.",
             area.width, area.height
-        )).style(Style::default().fg(theme::FG_DIM));
+        )).style(Style::default().fg(theme::fg_dim()));
         f.render_widget(p, area);
         return;
     }
@@ -329,13 +379,61 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     draw_footer(f, chunks[2], app);
 
-    if app.show_help {
+    if let Some(pid) = app.confirm_kill {
+        draw_confirm_kill(f, area, &app.snap, pid);
+    } else if app.show_help {
         draw_help(f, area);
     } else if app.show_detail {
         draw_detail(f, area, app);
     } else if app.typing_filter {
         draw_filter_input(f, area, &app.filter);
     }
+}
+
+/// SIGTERM-confirmation popup.  Shows the target row in full so the
+/// user double-checks before killing the wrong agent.  Centered,
+/// 60×8 fixed.
+fn draw_confirm_kill(f: &mut Frame, area: Rect, snap: &Snapshot, pid: u32) {
+    let agent = snap.agents.iter().find(|a| a.pid == pid);
+    let w = 64.min(area.width.saturating_sub(4));
+    let h = 8.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let r = Rect { x, y, width: w, height: h };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::c_busy()))
+        .title(Span::styled(" Stop agent? ",
+            Style::default().fg(theme::c_busy()).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(r);
+    f.render_widget(ratatui::widgets::Clear, r);
+    f.render_widget(block, r);
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(a) = agent {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", a.status.glyph()), theme::status_style(a.status)),
+            Span::styled(format!("{:<10} ", a.label),
+                Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("pid {} ", a.pid),
+                Style::default().fg(theme::fg_dim())),
+            Span::styled(format!("· {}", a.project),
+                Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "  Sending SIGTERM gives the agent a chance to clean up.",
+            Style::default().fg(theme::fg_dim()))));
+        lines.push(Line::from(Span::styled(
+            "  Hit `y` to confirm, `n` or `Esc` to cancel.",
+            Style::default().fg(theme::fg()))));
+    } else {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            format!("  pid {pid} is no longer in the agent list. `Esc` to dismiss."),
+            Style::default().fg(theme::fg_dim()))));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
@@ -351,36 +449,36 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
+        .border_style(Style::default().fg(theme::border()))
         .title(Line::from(vec![
             Span::styled(format!(" {} {} ", a.status.glyph(), a.status.label()),
                 theme::status_style(a.status)),
             Span::styled(format!("{} ", a.label),
                 Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("pid {} ", a.pid), Style::default().fg(theme::FG_DIM)),
+            Span::styled(format!("pid {} ", a.pid), Style::default().fg(theme::fg_dim())),
             Span::styled(format!("· {} ", a.project),
-                Style::default().fg(theme::BORDER).add_modifier(Modifier::BOLD)),
+                Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)),
         ]));
     let inner = block.inner(r);
     f.render_widget(ratatui::widgets::Clear, r);
     f.render_widget(block, r);
 
-    let dim   = |s: String| Span::styled(s, Style::default().fg(theme::FG_DIM));
-    let lab   = |s: &str| Span::styled(format!("{:<10}", s), Style::default().fg(theme::FG_DIM));
+    let dim   = |s: String| Span::styled(s, Style::default().fg(theme::fg_dim()));
+    let lab   = |s: &str| Span::styled(format!("{:<10}", s), Style::default().fg(theme::fg_dim()));
     let val   = |s: String, c: ratatui::style::Color| Span::styled(s, Style::default().fg(c).add_modifier(Modifier::BOLD));
 
     let cpu_spark = sparkline(&a.cpu_history, 100.0, 24);
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![lab("model"),
-        a.model.as_deref().map(|m| val(m.into(), theme::C_CHART_TOK)).unwrap_or_else(|| dim("(unknown)".into()))]));
+        a.model.as_deref().map(|m| val(m.into(), theme::c_chart_tok())).unwrap_or_else(|| dim("(unknown)".into()))]));
     lines.push(Line::from(vec![lab("cpu"),
         val(pct(a.cpu), theme::cpu_color(a.cpu)), Span::raw(" "),
         Span::styled(cpu_spark, Style::default().fg(theme::cpu_color(a.cpu)))]));
     lines.push(Line::from(vec![lab("memory"),
-        val(bytes(a.rss), theme::C_CHART_MEM), dim(format!(" rss · {} vsize", bytes(a.vsize)))]));
+        val(bytes(a.rss), theme::c_chart_mem()), dim(format!(" rss · {} vsize", bytes(a.vsize)))]));
     // Uptime + session-start divergence: when claude --resume is used,
     // the process is brand new but the session is days old.  Show both.
-    let mut uptime_spans = vec![lab("uptime"), val(dur(a.uptime_sec), theme::FG)];
+    let mut uptime_spans = vec![lab("uptime"), val(dur(a.uptime_sec), theme::fg())];
     if a.session_started_ms > 0 {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -391,7 +489,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         uptime_spans.push(dim(format!("  ·  session {}{}", dur(session_age_s), suffix)));
     }
     lines.push(Line::from(uptime_spans));
-    let mut thread_spans = vec![lab("threads"), val(a.threads.to_string(), theme::FG)];
+    let mut thread_spans = vec![lab("threads"), val(a.threads.to_string(), theme::fg())];
     let ppid_label = if a.ppid_name.is_empty() {
         format!("  state {}  ppid {}", a.state, a.ppid)
     } else {
@@ -405,31 +503,31 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     if a.dangerous && !a.dangerous_flag.is_empty() {
         lines.push(Line::from(vec![
             lab("dangerous"),
-            val(a.dangerous_flag.clone(), theme::C_WAIT),
+            val(a.dangerous_flag.clone(), theme::c_wait()),
         ]));
     }
     lines.push(Line::from(vec![lab("tokens"),
-        val(si(a.tokens_total), theme::C_CHART_TOK),
+        val(si(a.tokens_total), theme::c_chart_tok()),
         dim(format!(" ({} in / {} out)", si(a.tokens_input), si(a.tokens_output)))]));
     match a.cost_basis.as_str() {
         "api" if a.cost_usd > 0.0 => {
             lines.push(Line::from(vec![
                 lab("cost"),
-                val(format_cost(a.cost_usd), theme::C_WAIT),
+                val(format_cost(a.cost_usd), theme::c_wait()),
                 dim(format!("  api · prices as of {}", crate::pricing::prices_updated())),
             ]));
         }
         "local" => {
             lines.push(Line::from(vec![
                 lab("cost"),
-                val("local".to_string(), theme::C_IDLE),
+                val("local".to_string(), theme::c_idle()),
                 dim("  no API cost — model runs on this machine".to_string()),
             ]));
         }
         "unknown" if a.model.is_some() => {
             lines.push(Line::from(vec![
                 lab("cost"),
-                val("unknown".to_string(), theme::C_IDLE),
+                val("unknown".to_string(), theme::c_idle()),
                 dim(format!(
                     "  no price for `{}` — pass --prices to set one",
                     a.model.as_deref().unwrap_or(""),
@@ -445,7 +543,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     if a.tokens_cache_read > 0 && a.tokens_input > 0 {
         let hit_pct = (a.tokens_cache_read as f64 / a.tokens_input as f64) * 100.0;
         let mut spans = vec![lab("cache"),
-            val(format!("{:.0}% hit", hit_pct), theme::C_CHART_TOK),
+            val(format!("{:.0}% hit", hit_pct), theme::c_chart_tok()),
             dim(format!("  ({} of {} input tok cached)",
                 si(a.tokens_cache_read), si(a.tokens_input)))];
         // Anthropic prompt-cache reads are billed at 0.1× input rate;
@@ -473,12 +571,12 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         // Code triggers auto-compaction around 95% of the model's
         // context window; agtop nudges amber at 70% and red at 90%
         // so the user has time to act.
-        let bar_color = if pct_used >= 0.90 { theme::C_BUSY }
-                        else if pct_used >= 0.70 { theme::C_WAIT }
-                        else { theme::C_ACTIVE };
+        let bar_color = if pct_used >= 0.90 { theme::c_busy() }
+                        else if pct_used >= 0.70 { theme::c_wait() }
+                        else { theme::c_active() };
         let mut spans = vec![lab("context")];
         spans.push(Span::styled("█".repeat(filled), Style::default().fg(bar_color)));
-        spans.push(Span::styled("░".repeat(empty),  Style::default().fg(theme::FG_DIM)));
+        spans.push(Span::styled("░".repeat(empty),  Style::default().fg(theme::fg_dim())));
         spans.push(Span::styled(
             format!(" {}% ", pct_int),
             Style::default().fg(bar_color).add_modifier(Modifier::BOLD),
@@ -510,7 +608,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         } else {
             lines.push(Line::from(vec![
                 lab("skills"),
-                val(format!("{} loaded", a.loaded_skills.len()), theme::C_CHART_TOK),
+                val(format!("{} loaded", a.loaded_skills.len()), theme::c_chart_tok()),
                 dim(format!("  {}", shorten(&a.loaded_skills.join(", "),
                     (w as usize).saturating_sub(28)))),
             ]));
@@ -518,13 +616,13 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     }
     if a.subagents > 0 {
         lines.push(Line::from(vec![lab("subagents"),
-            val(format!("{} in flight", a.subagents), theme::C_SPAWN)]));
+            val(format!("{} in flight", a.subagents), theme::c_spawn())]));
         for s in a.in_flight_subagents.iter().take(8) {
             lines.push(Line::from(vec![
                 Span::raw("           "),
-                Span::styled("· ", Style::default().fg(theme::C_SPAWN)),
+                Span::styled("· ", Style::default().fg(theme::c_spawn())),
                 Span::styled(shorten(s, (w as usize).saturating_sub(14)),
-                    Style::default().fg(theme::FG)),
+                    Style::default().fg(theme::fg())),
             ]));
         }
     }
@@ -534,7 +632,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         && matches!(a.status, crate::model::Status::Busy);
     if tools_in_flight {
         lines.push(Line::from(vec![lab("tools"),
-            val("running".to_string(), theme::C_SPAWN)]));
+            val("running".to_string(), theme::c_spawn())]));
     }
     if let Some(sid) = &a.session_id {
         lines.push(Line::from(vec![lab("session"), dim(sid.clone())]));
@@ -549,24 +647,24 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             .collect();
         lines.push(Line::from(vec![
             lab("tools"),
-            Span::styled(parts.join(" · "), Style::default().fg(theme::C_CHART_TOK)),
+            Span::styled(parts.join(" · "), Style::default().fg(theme::c_chart_tok())),
         ]));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![lab("bin"),  Span::styled(shorten(&a.exe, (w as usize).saturating_sub(12)),
-        Style::default().fg(theme::FG))]));
+        Style::default().fg(theme::fg()))]));
     lines.push(Line::from(vec![lab("cwd"),  Span::styled(shorten(&a.cwd, (w as usize).saturating_sub(12)),
-        Style::default().fg(theme::FG))]));
+        Style::default().fg(theme::fg()))]));
     lines.push(Line::from(vec![lab("cmd"),  Span::styled(shorten(&a.cmdline, (w as usize).saturating_sub(12)),
-        Style::default().fg(theme::FG_DIM))]));
+        Style::default().fg(theme::fg_dim()))]));
     if let Some(tool) = &a.current_tool {
         lines.push(Line::from(vec![lab("tool"),
-            val(tool.clone(), theme::C_SPAWN)]));
+            val(tool.clone(), theme::c_spawn())]));
     }
     if let Some(task) = &a.current_task {
         lines.push(Line::from(vec![lab("task"),
             Span::styled(shorten(task, (w as usize).saturating_sub(12)),
-                Style::default().fg(theme::FG))]));
+                Style::default().fg(theme::fg()))]));
     }
     if !a.writing_files.is_empty() {
         lines.push(Line::raw(""));
@@ -574,7 +672,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         for f in a.writing_files.iter().take(4) {
             lines.push(Line::from(vec![Span::raw("    "),
                 Span::styled(shorten(f, (w as usize).saturating_sub(6)),
-                    Style::default().fg(theme::FG_DIM))]));
+                    Style::default().fg(theme::fg_dim()))]));
         }
     }
     // Background-activity surface — what's the agent actually doing
@@ -591,11 +689,11 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(Span::styled(
             "  ─ Background activity ".to_string()
                 + &"─".repeat((w as usize).saturating_sub(26)),
-            Style::default().fg(theme::BORDER_DIM))));
+            Style::default().fg(theme::border_dim()))));
         if a.net_established > 0 {
             lines.push(Line::from(vec![
                 lab("network"),
-                val(format!("{} established", a.net_established), theme::C_CHART_TOK),
+                val(format!("{} established", a.net_established), theme::c_chart_tok()),
                 dim("  (TCP — agent is talking to API / MCP / network)".to_string()),
             ]));
         }
@@ -604,7 +702,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
                 .map(|(p, c)| format!("{} ({})", c, p)).collect();
             lines.push(Line::from(vec![
                 lab("children"),
-                val(format!("{} spawned", a.children.len()), theme::C_SPAWN),
+                val(format!("{} spawned", a.children.len()), theme::c_spawn()),
                 dim(format!("  {}", shorten(&parts.join(" · "),
                     (w as usize).saturating_sub(28)))),
             ]));
@@ -614,7 +712,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             for f in a.reading_files.iter().take(4) {
                 lines.push(Line::from(vec![Span::raw("    "),
                     Span::styled(shorten(f, (w as usize).saturating_sub(6)),
-                        Style::default().fg(theme::FG_DIM))]));
+                        Style::default().fg(theme::fg_dim()))]));
             }
         }
     }
@@ -626,7 +724,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "  ─ Live preview ".to_string() + &"─".repeat((w as usize).saturating_sub(20)),
-        Style::default().fg(theme::BORDER_DIM))));
+        Style::default().fg(theme::border_dim()))));
     if a.recent_activity.is_empty() {
         // Empty preview can mean three different things; spell each
         // out explicitly so the user isn't staring at a mysteriously
@@ -653,14 +751,14 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
             "  (no transcript reader for this agent type — see /proc fields above)"
         };
         lines.push(Line::from(Span::styled(hint.to_string(),
-            Style::default().fg(theme::FG_DIM))));
+            Style::default().fg(theme::fg_dim()))));
     } else {
         let cap = ((h as usize).saturating_sub(lines.len() + 3)).min(8);
         for ev in a.recent_activity.iter().rev().take(cap).rev() {
-            let glyph_col = if ev.starts_with("› ")      { theme::FG }
-                            else if ev.starts_with("→ ") { theme::C_SPAWN }
-                            else if ev.starts_with("← ") { theme::C_ACTIVE }
-                            else                          { theme::FG_DIM };
+            let glyph_col = if ev.starts_with("› ")      { theme::fg() }
+                            else if ev.starts_with("→ ") { theme::c_spawn() }
+                            else if ev.starts_with("← ") { theme::c_active() }
+                            else                          { theme::fg_dim() };
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(shorten(ev, (w as usize).saturating_sub(4)),
@@ -669,7 +767,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("  Esc / Enter to close", Style::default().fg(theme::FG_DIM))));
+    lines.push(Line::from(Span::styled("  Esc / Enter to close", Style::default().fg(theme::fg_dim()))));
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -680,54 +778,54 @@ fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App) {
 
     let mut spans: Vec<Span> = vec![
         Span::styled(" agtop ",
-            Style::default().fg(theme::BORDER).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("v{}  ", env!("CARGO_PKG_VERSION")), Style::default().fg(theme::FG_DIM)),
+            Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("v{}  ", env!("CARGO_PKG_VERSION")), Style::default().fg(theme::fg_dim())),
     ];
     let mut chip = |label: &str, value: String, color: ratatui::style::Color| {
         spans.push(Span::styled(format!(" {} ", value),
                                 Style::default().fg(color).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(format!("{} ", label), Style::default().fg(theme::FG_DIM)));
+        spans.push(Span::styled(format!("{} ", label), Style::default().fg(theme::fg_dim())));
     };
     // Order calibrated by user-priority on first glance:
     // busy first (most actionable), then cost / tokens (financial
     // context), then load / capacity, then breakdown counts.
-    chip("busy",      a.busy.to_string(),      theme::C_BUSY);
+    chip("busy",      a.busy.to_string(),      theme::c_busy());
     if a.cost_usd > 0.0 {
-        chip("cost",   format_cost(a.cost_usd), theme::C_WAIT);
+        chip("cost",   format_cost(a.cost_usd), theme::c_wait());
     }
     if a.tokens_total > 0 {
-        chip("tokens", si(a.tokens_total),     theme::C_CHART_TOK);
+        chip("tokens", si(a.tokens_total),     theme::c_chart_tok());
     }
-    chip("cpu",       pct(a.cpu),              theme::C_CHART_CPU);
+    chip("cpu",       pct(a.cpu),              theme::c_chart_cpu());
     chip("mem",       format!("{}/{}", bytes(mem_used), bytes(snap.mem_total)),
-                                               theme::C_CHART_MEM);
-    chip("active",    a.active.to_string(),    theme::C_ACTIVE);
-    chip("waiting",   a.waiting.to_string(),   theme::C_WAIT);
-    chip("done",      a.completed.to_string(), theme::C_DONE);
-    chip("subagents", a.subagents.to_string(), theme::C_SPAWN);
-    chip("projects",  a.project_count.to_string(), theme::FG);
+                                               theme::c_chart_mem());
+    chip("active",    a.active.to_string(),    theme::c_active());
+    chip("waiting",   a.waiting.to_string(),   theme::c_wait());
+    chip("done",      a.completed.to_string(), theme::c_done());
+    chip("subagents", a.subagents.to_string(), theme::c_spawn());
+    chip("projects",  a.project_count.to_string(), theme::fg());
     spans.push(Span::styled(format!(" sort:{}  group:{}  ", app.sort.label(), if app.grouped {"on"} else {"off"}),
-                            Style::default().fg(theme::FG_DIM)));
+                            Style::default().fg(theme::fg_dim())));
     if !app.filter.is_empty() {
         spans.push(Span::styled(format!("filter:{}  ", app.filter),
-                                Style::default().fg(theme::C_WAIT)));
+                                Style::default().fg(theme::c_wait())));
     }
     if app.paused {
         spans.push(Span::styled(" PAUSED ",
-                                Style::default().bg(theme::C_WAIT).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)));
+                                Style::default().bg(theme::c_wait()).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)));
     }
     // Surface the platform note (e.g. "running via sysinfo backend — IO
     // bytes and writing-files unavailable") so non-Linux users know why
     // certain columns will read `—` instead of misleadingly showing 0.
     if let Some(note) = snap.note.as_deref() {
         spans.push(Span::styled(format!("  ⓘ {} ", note),
-                                Style::default().fg(theme::FG_DIM)));
+                                Style::default().fg(theme::fg_dim())));
     }
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER));
+        .border_style(Style::default().fg(theme::border()));
     let p = Paragraph::new(Line::from(spans)).block(block).wrap(Wrap { trim: true });
     f.render_widget(p, area);
 }
@@ -757,8 +855,8 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
-        .title(Span::styled(" Agents ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)))
+        .border_style(Style::default().fg(theme::border()))
+        .title(Span::styled(" Agents ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)))
         .title_alignment(Alignment::Left);
 
     let inner = block.inner(area);
@@ -792,25 +890,25 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             let total_sub: u32 = list.iter().map(|a| a.subagents).sum();
             let total_tok: u64 = list.iter().map(|a| a.tokens_total).sum();
             let mut header_spans: Vec<Span> = Vec::new();
-            header_spans.push(Span::styled("● ", Style::default().fg(theme::BORDER)));
+            header_spans.push(Span::styled("● ", Style::default().fg(theme::border())));
             header_spans.push(Span::styled(proj.clone(),
-                Style::default().fg(theme::BORDER).add_modifier(Modifier::BOLD)));
+                Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)));
             header_spans.push(Span::styled(
                 format!("  {} agent{} · {} cpu · {} mem",
                     list.len(),
                     if list.len() == 1 {""} else {"s"},
                     pct(total_cpu),
                     bytes(total_mem)),
-                Style::default().fg(theme::FG_DIM)));
+                Style::default().fg(theme::fg_dim())));
             if total_sub > 0 {
                 header_spans.push(Span::styled(format!("  +{}", total_sub),
-                    Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)));
-                header_spans.push(Span::styled(" sub", Style::default().fg(theme::FG_DIM)));
+                    Style::default().fg(theme::c_spawn()).add_modifier(Modifier::BOLD)));
+                header_spans.push(Span::styled(" sub", Style::default().fg(theme::fg_dim())));
             }
             if total_tok > 0 {
                 header_spans.push(Span::styled(format!("  {}", si(total_tok)),
-                    Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)));
-                header_spans.push(Span::styled(" tok", Style::default().fg(theme::FG_DIM)));
+                    Style::default().fg(theme::c_chart_tok()).add_modifier(Modifier::BOLD)));
+                header_spans.push(Span::styled(" tok", Style::default().fg(theme::fg_dim())));
             }
             let header_line = Line::from(header_spans);
             // Project header inherits the group's tint so the cluster
@@ -829,6 +927,9 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
                 pid_order.push(a.pid);
                 agent_row_indices.push(rows.len());
                 rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint));
+                if app.tree_mode {
+                    push_child_rows(&mut rows, a, tint);
+                }
             }
         }
     } else {
@@ -844,6 +945,9 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             pid_order.push(a.pid);
             agent_row_indices.push(rows.len());
             rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint));
+            if app.tree_mode {
+                push_child_rows(&mut rows, a, tint);
+            }
         }
     }
 
@@ -868,7 +972,7 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             "  (no rows)".into()
         };
         rows.push(Row::new(vec![Line::from(Span::styled(msg,
-            Style::default().fg(theme::FG_DIM)))]).height(1));
+            Style::default().fg(theme::fg_dim())))]).height(1));
     }
 
     // Capture screen-row → pid map for mouse hit-testing in the next event
@@ -887,6 +991,27 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
     let table = Table::new(rows, [Constraint::Percentage(100)])
         .column_spacing(0);
     f.render_widget(table, inner);
+}
+
+/// Tree-mode helper: append `└─ pid (comm)` indented sub-rows for
+/// every immediate child of `parent`.  Capped at 5 children per
+/// parent to keep the panel scannable; spans a single Cell so the
+/// row's column layout doesn't get desynced from agent_row's.
+fn push_child_rows<'a>(rows: &mut Vec<Row<'a>>, parent: &'a Agent,
+                       group_bg: Option<ratatui::style::Color>) {
+    let mut style = Style::default().fg(theme::fg_dim());
+    if let Some(bg) = group_bg { style = style.bg(bg); }
+    for (i, (cpid, comm)) in parent.children.iter().take(5).enumerate() {
+        let last = i + 1 == parent.children.len().min(5);
+        let glyph = if last { "└─" } else { "├─" };
+        let line = Line::from(Span::styled(
+            format!("    {} {} ({})", glyph, comm, cpid),
+            style,
+        ));
+        let mut r = Row::new(vec![line]);
+        if let Some(bg) = group_bg { r = r.style(Style::default().bg(bg)); }
+        rows.push(r);
+    }
 }
 
 fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratatui::style::Color>) -> Row<'a> {
@@ -938,7 +1063,7 @@ fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratatui::style::
 
     // PID
     spans.push(Span::styled(format!("{:>7}", a.pid),
-                            Style::default().fg(theme::FG_DIM)));
+                            Style::default().fg(theme::fg_dim())));
     spans.push(Span::raw(" "));
 
     // CPU% + 4-cell mini bar.
@@ -950,23 +1075,23 @@ fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratatui::style::
     spans.push(Span::styled("█".repeat(bar_cells),
                             Style::default().fg(cpu_col).add_modifier(Modifier::BOLD)));
     spans.push(Span::styled("·".repeat(4 - bar_cells),
-                            Style::default().fg(theme::BORDER_DIM)));
+                            Style::default().fg(theme::border_dim())));
     spans.push(Span::raw(" "));
 
     // MEM
     spans.push(Span::styled(format!("{:>5}", bytes(a.rss)),
-                            Style::default().fg(theme::C_CHART_MEM)));
+                            Style::default().fg(theme::c_chart_mem())));
     spans.push(Span::raw(" "));
 
     // Uptime
     spans.push(Span::styled(format!("{:>6}", dur(a.uptime_sec)),
-                            Style::default().fg(theme::FG_DIM)));
+                            Style::default().fg(theme::fg_dim())));
 
     // Subagent chip — fixed 4-char slot, capped at 99 so two-digit counts
     // (which would otherwise widen the column and shift DOING) fit.
     if a.subagents > 0 {
         spans.push(Span::styled(format!(" +{:<2}", a.subagents.min(99)),
-                                Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)));
+                                Style::default().fg(theme::c_spawn()).add_modifier(Modifier::BOLD)));
     } else {
         spans.push(Span::raw("    "));
     }
@@ -977,7 +1102,7 @@ fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratatui::style::
         let s = si(a.tokens_total);
         let clipped: String = s.chars().take(5).collect();
         spans.push(Span::styled(format!(" {:>5}", clipped),
-                                Style::default().fg(theme::C_CHART_TOK)));
+                                Style::default().fg(theme::c_chart_tok())));
     } else {
         spans.push(Span::raw("      "));
     }
@@ -989,7 +1114,7 @@ fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratatui::style::
     let line = Line::from(spans);
     let mut row = Row::new(vec![line]).height(1);
     if selected {
-        row = row.style(Style::default().bg(theme::HL_BG).add_modifier(Modifier::BOLD));
+        row = row.style(Style::default().bg(theme::hl_bg()).add_modifier(Modifier::BOLD));
     } else if let Some(bg) = group_bg {
         row = row.style(Style::default().bg(bg));
     }
@@ -1002,26 +1127,26 @@ fn describe_doing_span(a: &Agent) -> Span<'static> {
             format!(": {}", shorten(t, 60))
         ).unwrap_or_default();
         return Span::styled(format!("{}{}", tool, suffix),
-            Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD));
+            Style::default().fg(theme::c_spawn()).add_modifier(Modifier::BOLD));
     }
     if let Some(t) = &a.current_task {
         return Span::styled(shorten(t, 70).to_string(),
-            Style::default().fg(theme::FG));
+            Style::default().fg(theme::fg()));
     }
     if a.status == Status::Idle {
         if let Some(age) = a.session_age_ms {
             return Span::styled(format!("(idle {})", dur(age / 1000)),
-                Style::default().fg(theme::FG_DIM));
+                Style::default().fg(theme::fg_dim()));
         }
     }
     if a.status == Status::Waiting {
-        return Span::styled("(awaiting input)".to_string(), Style::default().fg(theme::C_WAIT));
+        return Span::styled("(awaiting input)".to_string(), Style::default().fg(theme::c_wait()));
     }
     if a.status == Status::Completed {
-        return Span::styled("(session ended)".to_string(), Style::default().fg(theme::C_DONE));
+        return Span::styled("(session ended)".to_string(), Style::default().fg(theme::c_done()));
     }
     Span::styled(shorten(&a.cmdline, 80).to_string(),
-                 Style::default().fg(theme::FG_DIM))
+                 Style::default().fg(theme::fg_dim()))
 }
 
 fn draw_left_bottom(f: &mut Frame, area: Rect, snap: &Snapshot) {
@@ -1037,8 +1162,8 @@ fn draw_projects(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
-        .title(Span::styled(" Projects ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
+        .border_style(Style::default().fg(theme::border()))
+        .title(Span::styled(" Projects ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1060,22 +1185,22 @@ fn draw_projects(f: &mut Frame, area: Rect, snap: &Snapshot) {
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(format!("{} ", dominant.glyph()), theme::status_style(dominant)));
         spans.push(Span::styled(format!("{:<14}", shorten(&p.project, 14)),
-                                Style::default().fg(theme::FG)));
-        spans.push(Span::styled(format!("{:>2}", p.agents), Style::default().fg(theme::FG_DIM)));
+                                Style::default().fg(theme::fg())));
+        spans.push(Span::styled(format!("{:>2}", p.agents), Style::default().fg(theme::fg_dim())));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(format!("{:>6}", pct(p.cpu)),
                                 Style::default().fg(theme::cpu_color(p.cpu))));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(bar, Style::default().fg(theme::cpu_color(p.cpu))));
-        spans.push(Span::styled(bar_pad, Style::default().fg(theme::BORDER_DIM)));
+        spans.push(Span::styled(bar_pad, Style::default().fg(theme::border_dim())));
         if p.subagents > 0 {
             spans.push(Span::styled(format!(" +{}", p.subagents),
-                                    Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)));
+                                    Style::default().fg(theme::c_spawn()).add_modifier(Modifier::BOLD)));
         }
         items.push(ListItem::new(Line::from(spans)).style(Style::default().bg(row_bg)));
     }
     if items.is_empty() {
-        items.push(ListItem::new(Line::from(Span::styled("  (no projects)", Style::default().fg(theme::FG_DIM)))));
+        items.push(ListItem::new(Line::from(Span::styled("  (no projects)", Style::default().fg(theme::fg_dim())))));
     }
     let list = List::new(items);
     f.render_widget(list, inner);
@@ -1085,8 +1210,8 @@ fn draw_activity(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
-        .title(Span::styled(" Activity ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
+        .border_style(Style::default().fg(theme::border()))
+        .title(Span::styled(" Activity ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1098,32 +1223,32 @@ fn draw_activity(f: &mut Frame, area: Rect, snap: &Snapshot) {
             std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
         let t = nd.format("%H:%M:%S").to_string();
         let (glyph, glyph_style) = match e.kind {
-            ActivityKind::Spawn => ("●", Style::default().fg(theme::C_BUSY).add_modifier(Modifier::BOLD)),
-            ActivityKind::Exit  => ("◌", Style::default().fg(theme::FG_DIM)),
+            ActivityKind::Spawn => ("●", Style::default().fg(theme::c_busy()).add_modifier(Modifier::BOLD)),
+            ActivityKind::Exit  => ("◌", Style::default().fg(theme::fg_dim())),
         };
         let kind = match e.kind { ActivityKind::Spawn => "spawn", ActivityKind::Exit => "exit " };
         let cwd = e.cwd.as_deref().map(project_basename).unwrap_or_default();
         let mut spans: Vec<Span> = vec![
-            Span::styled(t, Style::default().fg(theme::FG_DIM)),
+            Span::styled(t, Style::default().fg(theme::fg_dim())),
             Span::raw("  "),
             Span::styled(glyph.to_string(), glyph_style),
             Span::raw(" "),
-            Span::styled(kind.to_string(), Style::default().fg(theme::FG_DIM)),
+            Span::styled(kind.to_string(), Style::default().fg(theme::fg_dim())),
             Span::raw("  "),
             Span::styled(format!("{:<12}", shorten(&e.label, 12)),
                 Style::default().fg(theme::agent_color(&e.label))),
             Span::raw(" "),
             Span::styled(format!("pid {:<7}", e.pid),
-                Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::fg_dim())),
         ];
         if !cwd.is_empty() {
             spans.push(Span::styled(format!("  {}", cwd),
-                Style::default().fg(theme::FG)));
+                Style::default().fg(theme::fg())));
         }
         items.push(ListItem::new(Line::from(spans)).style(Style::default().bg(row_bg)));
     }
     if items.is_empty() {
-        items.push(ListItem::new(Line::from(Span::styled("  (no recent events)", Style::default().fg(theme::FG_DIM)))));
+        items.push(ListItem::new(Line::from(Span::styled("  (no recent events)", Style::default().fg(theme::fg_dim())))));
     }
     let list = List::new(items);
     f.render_widget(list, inner);
@@ -1141,21 +1266,21 @@ fn draw_cpu_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
+        .border_style(Style::default().fg(theme::border()))
         .title(Line::from(vec![
-            Span::styled(" CPU ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(" CPU ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{} cores · ", snap.sys_cpus),
-                Style::default().fg(theme::FG_DIM)),
-            Span::styled("now ", Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::fg_dim())),
+            Span::styled("now ", Style::default().fg(theme::fg_dim())),
             Span::styled(pct(snap.aggregates.cpu),
                 Style::default().fg(theme::cpu_color(snap.aggregates.cpu)).add_modifier(Modifier::BOLD)),
-            Span::styled(" · peak ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(" · peak ", Style::default().fg(theme::fg_dim())),
             Span::styled(pct(peak),
-                Style::default().fg(theme::C_CHART_CPU).add_modifier(Modifier::BOLD)),
-            Span::styled(" · avg ", Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::c_chart_cpu()).add_modifier(Modifier::BOLD)),
+            Span::styled(" · avg ", Style::default().fg(theme::fg_dim())),
             Span::styled(pct(avg),
-                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled(" ", Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)),
+            Span::styled(" ", Style::default().fg(theme::fg_dim())),
         ]));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1182,7 +1307,7 @@ fn draw_cpu_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let sparkline = Sparkline::default()
         .data(&spark_data)
         .max(spark_max)
-        .style(Style::default().fg(theme::C_CHART_CPU));
+        .style(Style::default().fg(theme::c_chart_cpu()));
     f.render_widget(sparkline, split[0]);
 
     // Per-agent CPU bars. Sort by CPU desc (raw collector order is by status,
@@ -1206,13 +1331,13 @@ fn draw_cpu_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(format!("{} ", a.status.glyph()), theme::status_style(a.status)));
         spans.push(Span::styled(format!("{:<10}", shorten(&a.project, 10)),
-            Style::default().fg(theme::FG)));
+            Style::default().fg(theme::fg())));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(format!("{:<8}", shorten(&a.label, 8)),
             Style::default().fg(theme::agent_color(&a.label))));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(bar_full, Style::default().fg(cpu_col).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(bar_empty, Style::default().fg(theme::BORDER_DIM)));
+        spans.push(Span::styled(bar_empty, Style::default().fg(theme::border_dim())));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(format!("{:>6}", pct(a.cpu)),
             Style::default().fg(cpu_col).add_modifier(Modifier::BOLD)));
@@ -1220,7 +1345,7 @@ fn draw_cpu_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
     }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
-            "  (no agents)", Style::default().fg(theme::FG_DIM)))));
+            "  (no agents)", Style::default().fg(theme::fg_dim())))));
     }
     f.render_widget(List::new(items), split[1]);
 }
@@ -1231,14 +1356,14 @@ fn draw_memory_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
+        .border_style(Style::default().fg(theme::border()))
         .title(Line::from(vec![
-            Span::styled(" Memory by agent ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(" Memory by agent ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{} across {} agent{}",
                 bytes(snap.aggregates.mem_bytes),
                 snap.aggregates.active,
                 if snap.aggregates.active == 1 {""} else {"s"}),
-                Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::fg_dim())),
         ]));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1267,21 +1392,21 @@ fn draw_memory_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(format!("{} ", a.status.glyph()), theme::status_style(a.status)));
         spans.push(Span::styled(format!("{:<10}", shorten(&a.project, 10)),
-            Style::default().fg(theme::FG)));
+            Style::default().fg(theme::fg())));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(format!("{:<8}", shorten(&a.label, 8)),
             Style::default().fg(theme::agent_color(&a.label))));
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(bar_full,  Style::default().fg(theme::C_CHART_MEM).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(bar_empty, Style::default().fg(theme::BORDER_DIM)));
+        spans.push(Span::styled(bar_full,  Style::default().fg(theme::c_chart_mem()).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(bar_empty, Style::default().fg(theme::border_dim())));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(format!("{:>7}", bytes(a.rss)),
-            Style::default().fg(theme::C_CHART_MEM)));
+            Style::default().fg(theme::c_chart_mem())));
         items.push(ListItem::new(Line::from(spans)));
     }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
-            "  (no agents)", Style::default().fg(theme::FG_DIM)))));
+            "  (no agents)", Style::default().fg(theme::fg_dim())))));
     }
     f.render_widget(List::new(items), split[0]);
 
@@ -1301,24 +1426,24 @@ fn draw_memory_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
         let line = Line::from(vec![
             Span::raw(" "),
             Span::styled("█".repeat(agent_cells.max(0) as usize),
-                Style::default().fg(theme::C_GAUGE_AGENT)),
+                Style::default().fg(theme::c_gauge_agent())),
             Span::styled("█".repeat(other_cells.max(0) as usize),
-                Style::default().fg(theme::C_GAUGE_USED)),
+                Style::default().fg(theme::c_gauge_used())),
             Span::styled("░".repeat(free_cells.max(0) as usize),
-                Style::default().fg(theme::C_GAUGE_FREE)),
+                Style::default().fg(theme::c_gauge_free())),
         ]);
         let label = Line::from(vec![
-            Span::styled(" agents ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(" agents ", Style::default().fg(theme::fg_dim())),
             Span::styled(bytes(agent_mem),
-                Style::default().fg(theme::C_GAUGE_AGENT).add_modifier(Modifier::BOLD)),
-            Span::styled("  other ", Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::c_gauge_agent()).add_modifier(Modifier::BOLD)),
+            Span::styled("  other ", Style::default().fg(theme::fg_dim())),
             Span::styled(bytes(other),
-                Style::default().fg(theme::C_GAUGE_USED).add_modifier(Modifier::BOLD)),
-            Span::styled("  free ", Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::c_gauge_used()).add_modifier(Modifier::BOLD)),
+            Span::styled("  free ", Style::default().fg(theme::fg_dim())),
             Span::styled(bytes(avail),
-                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+                Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)),
             Span::styled(format!(" / {}", bytes(total)),
-                Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::fg_dim())),
         ]);
         f.render_widget(Paragraph::new(vec![line, label]), split[1]);
     }
@@ -1338,16 +1463,16 @@ fn draw_tokens_panel(f: &mut Frame, area: Rect, snap: &Snapshot, interval: Durat
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
+        .border_style(Style::default().fg(theme::border()))
         .title(Line::from(vec![
-            Span::styled(" Tokens ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
-            Span::styled("total ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(" Tokens ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)),
+            Span::styled("total ", Style::default().fg(theme::fg_dim())),
             Span::styled(si(snap.aggregates.tokens_total),
-                Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)),
-            Span::styled("  rate ", Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::c_chart_tok()).add_modifier(Modifier::BOLD)),
+            Span::styled("  rate ", Style::default().fg(theme::fg_dim())),
             Span::styled(format!("{}/min", si(rate_per_min as u64)),
-                Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)),
-            Span::styled(" ", Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::c_chart_tok()).add_modifier(Modifier::BOLD)),
+            Span::styled(" ", Style::default().fg(theme::fg_dim())),
         ]));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1365,7 +1490,7 @@ fn draw_tokens_panel(f: &mut Frame, area: Rect, snap: &Snapshot, interval: Durat
         .map(|v| *v as u64).collect();
     let sparkline = Sparkline::default()
         .data(&spark_data)
-        .style(Style::default().fg(theme::C_CHART_TOK));
+        .style(Style::default().fg(theme::c_chart_tok()));
     f.render_widget(sparkline, split[0]);
 
     // Per-agent tokens bars (only agents with tokens > 0).
@@ -1383,22 +1508,22 @@ fn draw_tokens_panel(f: &mut Frame, area: Rect, snap: &Snapshot, interval: Durat
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(format!("{} ", a.status.glyph()), theme::status_style(a.status)));
         spans.push(Span::styled(format!("{:<10}", shorten(&a.project, 10)),
-            Style::default().fg(theme::FG)));
+            Style::default().fg(theme::fg())));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(format!("{:<8}", shorten(&a.label, 8)),
             Style::default().fg(theme::agent_color(&a.label))));
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(bar_full,  Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)));
-        spans.push(Span::styled(bar_empty, Style::default().fg(theme::BORDER_DIM)));
+        spans.push(Span::styled(bar_full,  Style::default().fg(theme::c_chart_tok()).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(bar_empty, Style::default().fg(theme::border_dim())));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(format!("{:>6}", si(a.tokens_total)),
-            Style::default().fg(theme::C_CHART_TOK).add_modifier(Modifier::BOLD)));
+            Style::default().fg(theme::c_chart_tok()).add_modifier(Modifier::BOLD)));
         items.push(ListItem::new(Line::from(spans)));
     }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
             "  (no token usage detected — open a Claude/Codex session)",
-            Style::default().fg(theme::FG_DIM)))));
+            Style::default().fg(theme::fg_dim())))));
     }
     f.render_widget(List::new(items), split[1]);
 }
@@ -1408,15 +1533,15 @@ fn draw_status_distribution(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
+        .border_style(Style::default().fg(theme::border()))
         .title(Line::from(vec![
-            Span::styled(" Status distribution ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+            Span::styled(" Status distribution ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)),
             Span::styled(format!("{} live agent{} · {} session{}",
                 snap.aggregates.active,
                 if snap.aggregates.active == 1 {""} else {"s"},
                 snap.sessions.waiting + snap.sessions.completed + snap.sessions.active,
                 ""),
-                Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::fg_dim())),
         ]));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1441,13 +1566,13 @@ fn draw_status_distribution(f: &mut Frame, area: Rect, snap: &Snapshot) {
         spans.push(Span::styled(format!("  {} {:<6} ", status.glyph(), name),
             theme::status_style(status)));
         spans.push(Span::styled(format!("{:>3} ", count),
-            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
+            Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled("█".repeat(filled),
             Style::default().fg(theme::status_color(status)).add_modifier(Modifier::BOLD)));
         spans.push(Span::styled("·".repeat(bar_w - filled),
-            Style::default().fg(theme::BORDER_DIM)));
+            Style::default().fg(theme::border_dim())));
         spans.push(Span::styled(format!(" {:>4.1}%", pct_v),
-            Style::default().fg(theme::FG_DIM)));
+            Style::default().fg(theme::fg_dim())));
         Line::from(spans)
     };
     let lines = vec![
@@ -1465,9 +1590,9 @@ fn draw_sessions(f: &mut Frame, area: Rect, snap: &Snapshot) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
+        .border_style(Style::default().fg(theme::border()))
         .title(Span::styled(" Claude sessions — recent tasks ",
-            Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
+            Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1477,15 +1602,15 @@ fn draw_sessions(f: &mut Frame, area: Rect, snap: &Snapshot) {
     if a.subagents > 0 {
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", a.subagents),
-                Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)),
+                Style::default().fg(theme::c_spawn()).add_modifier(Modifier::BOLD)),
             Span::styled(format!("Task subagent{} in flight ",
                 if a.subagents == 1 {""} else {"s"}),
-                Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::fg_dim())),
         ]));
     }
     if s.recent_tasks.is_empty() {
         lines.push(Line::from(Span::styled("  (no tasks in last 24h)",
-            Style::default().fg(theme::FG_DIM))));
+            Style::default().fg(theme::fg_dim()))));
     }
     let cap = (inner.height as usize).saturating_sub(if a.subagents > 0 { 1 } else { 0 });
     for t in s.recent_tasks.iter().take(cap) {
@@ -1494,10 +1619,10 @@ fn draw_sessions(f: &mut Frame, area: Rect, snap: &Snapshot) {
             Span::styled(t.status.glyph().to_string(), theme::status_style(t.status)),
             Span::raw(" "),
             Span::styled(format!("{:<14}", shorten(&t.project_short, 14)),
-                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)),
+                Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)),
             Span::raw("  "),
             Span::styled(shorten(&t.task, 80).to_string(),
-                Style::default().fg(theme::FG_DIM)),
+                Style::default().fg(theme::fg_dim())),
         ]));
     }
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -1523,7 +1648,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         if app.grouped {"on"} else {"off"},
         if app.paused {"resume"} else {"pause"},
     );
-    let p = Paragraph::new(Span::styled(s, Style::default().fg(theme::FG_DIM)));
+    let p = Paragraph::new(Span::styled(s, Style::default().fg(theme::fg_dim())));
     f.render_widget(p, area);
 }
 
@@ -1535,10 +1660,10 @@ fn draw_filter_input(f: &mut Frame, area: Rect, filter: &str) {
         height: 1,
     };
     let p = Paragraph::new(Line::from(vec![
-        Span::styled(" filter: ", Style::default().bg(theme::BORDER).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)),
+        Span::styled(" filter: ", Style::default().bg(theme::border()).fg(ratatui::style::Color::Black).add_modifier(Modifier::BOLD)),
         Span::raw(" "),
-        Span::styled(filter.to_string(), Style::default().fg(theme::FG)),
-        Span::styled("█", Style::default().fg(theme::C_BUSY)),
+        Span::styled(filter.to_string(), Style::default().fg(theme::fg())),
+        Span::styled("█", Style::default().fg(theme::c_busy())),
     ]));
     f.render_widget(p, r);
 }
@@ -1553,8 +1678,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER))
-        .title(Span::styled(" Help ", Style::default().fg(theme::FG).add_modifier(Modifier::BOLD)));
+        .border_style(Style::default().fg(theme::border()))
+        .title(Span::styled(" Help ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)));
     let inner = block.inner(r);
     f.render_widget(ratatui::widgets::Clear, r);
     f.render_widget(block.clone(), r);
@@ -1562,9 +1687,9 @@ fn draw_help(f: &mut Frame, area: Rect) {
     let _ = block;
 
     let line = |spans: Vec<Span<'static>>| Line::from(spans);
-    let dim = |s: &str| Span::styled(s.to_string(), Style::default().fg(theme::FG_DIM));
-    let hdr = |s: &str| Span::styled(s.to_string(), Style::default().fg(theme::FG).add_modifier(Modifier::BOLD));
-    let key = |s: &str| Span::styled(s.to_string(), Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD));
+    let dim = |s: &str| Span::styled(s.to_string(), Style::default().fg(theme::fg_dim()));
+    let hdr = |s: &str| Span::styled(s.to_string(), Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD));
+    let key = |s: &str| Span::styled(s.to_string(), Style::default().fg(theme::c_spawn()).add_modifier(Modifier::BOLD));
 
     let lines: Vec<Line> = vec![
         line(vec![hdr("agtop"), dim(&format!("  v{}  — agent monitor", env!("CARGO_PKG_VERSION")))]),
@@ -1587,17 +1712,17 @@ fn draw_help(f: &mut Frame, area: Rect) {
         line(vec![key("  Mouse       "), dim("click row → select; double-click → detail; wheel → scroll")]),
         Line::raw(""),
         line(vec![hdr("  Status legend:")]),
-        line(vec![Span::styled("    ● BUSY ", Style::default().fg(theme::C_BUSY).add_modifier(Modifier::BOLD)),
+        line(vec![Span::styled("    ● BUSY ", Style::default().fg(theme::c_busy()).add_modifier(Modifier::BOLD)),
                   dim("process active and writing in last 5s")]),
-        line(vec![Span::styled("    ● SPWN ", Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)),
+        line(vec![Span::styled("    ● SPWN ", Style::default().fg(theme::c_spawn()).add_modifier(Modifier::BOLD)),
                   dim("Task subagents currently in flight")]),
-        line(vec![Span::styled("    ● ACTV ", Style::default().fg(theme::C_ACTIVE)),
+        line(vec![Span::styled("    ● ACTV ", Style::default().fg(theme::c_active())),
                   dim("process running recently")]),
-        line(vec![Span::styled("    ○ idle ", Style::default().fg(theme::C_IDLE)),
+        line(vec![Span::styled("    ○ idle ", Style::default().fg(theme::c_idle())),
                   dim("process up but quiet for >60s")]),
-        line(vec![Span::styled("    ◌ WAIT ", Style::default().fg(theme::C_WAIT)),
+        line(vec![Span::styled("    ◌ WAIT ", Style::default().fg(theme::c_wait())),
                   dim("no live process, recent session activity")]),
-        line(vec![Span::styled("    ✓ DONE ", Style::default().fg(theme::C_DONE)),
+        line(vec![Span::styled("    ✓ DONE ", Style::default().fg(theme::c_done())),
                   dim("session ended (stop_reason)")]),
     ];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
