@@ -1,6 +1,6 @@
 [package]
 name = "agtop"
-version = "2.3.7"
+version = "2.3.8"
 edition = "2021"
 rust-version = "1.74"
 description = "Terminal UI for monitoring AI coding agents (Claude Code, Codex, Aider, Cursor, Gemini, Goose, ...) — like top, but for agents."

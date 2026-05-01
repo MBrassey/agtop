@@ -1704,6 +1704,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
         line(vec![key("  r           "), dim("refresh now")]),
         line(vec![key("  s           "), dim("cycle sort (smart / cpu / mem / tokens / uptime / agent)")]),
         line(vec![key("  g           "), dim("toggle project grouping")]),
+        line(vec![key("  t           "), dim("toggle tree mode (indented children under each agent)")]),
+        line(vec![key("  K (capital) "), dim("SIGTERM the selected agent (confirm y / n)")]),
         line(vec![key("  /, f        "), dim("filter (Ctrl-U clears, Ctrl-W deletes word)")]),
         line(vec![key("  Esc         "), dim("close popup, clear filter")]),
         line(vec![key("  j/k, ↓/↑    "), dim("move selection")]),
