@@ -219,6 +219,10 @@ events from the session transcript — assistant prose (`›`), tool calls
 
 ## Architecture
 
+<img src="docs/architecture.svg" alt="agtop architecture diagram" width="100%" />
+
+<details><summary>Mermaid source (for editing)</summary>
+
 ```mermaid
 flowchart LR
     subgraph Sources["Data sources"]
@@ -279,6 +283,16 @@ flowchart LR
     Snap --> Watch
 ```
 
+</details>
+
+The SVG above is regenerated whenever the mermaid source changes:
+
+```sh
+npx -p @mermaid-js/mermaid-cli mmdc \
+  -i <(awk '/^```mermaid$/,/^```$/' README.md | sed '1d;$d') \
+  -o docs/architecture.svg -b transparent
+```
+
 ---
 
 ## JSON output
@@ -286,6 +300,8 @@ flowchart LR
 `agtop --json` writes one snake_case JSON object to stdout. Schema is
 stable across releases; new fields are additive. Suitable for `jq`,
 dashboards, or alerting.
+
+<details><summary>Show full JSON sample (~50 lines)</summary>
 
 ```json
 {
@@ -350,6 +366,8 @@ dashboards, or alerting.
   "activity": [/* spawn / exit events */]
 }
 ```
+
+</details>
 
 Per-agent fields worth highlighting:
 
