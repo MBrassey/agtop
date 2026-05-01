@@ -19,6 +19,7 @@ mod proc_;
 mod sessions;
 mod skills;
 mod sysbackend;
+mod writing_files;
 mod theme;
 mod ui;
 

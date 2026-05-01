@@ -84,6 +84,22 @@ impl SysBackend {
                 .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
             let uptime_sec = now.saturating_sub(started_at);
 
+            // Native writable-FD enumeration (libproc on macOS,
+            // NtQuerySystemInformation on Windows, empty on *BSD).
+            // Computed once per agent, then split into files +
+            // unique-dirs to mirror the Linux /proc path.
+            let writing = crate::writing_files::read(pid.as_u32(), 4);
+            let writing_files: Vec<String> = writing.iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            let writing_dirs: Vec<String> = {
+                let mut seen = std::collections::HashSet::new();
+                writing.iter()
+                    .filter_map(|p| p.parent().map(|d| d.to_string_lossy().into_owned()))
+                    .filter(|d| seen.insert(d.clone()))
+                    .collect()
+            };
+
             out.push(Agent {
                 pid: pid.as_u32(),
                 label,
@@ -125,11 +141,8 @@ impl SysBackend {
                 // returns.
                 read_bytes:  proc.disk_usage().total_read_bytes,
                 write_bytes: proc.disk_usage().total_written_bytes,
-                // Writable-FD enumeration is /proc-only.  Empty on
-                // sysinfo backends; the TUI dashes the column out via
-                // the snap.note hint surfaced in the header.
-                writing_files: Vec::new(),
-                writing_dirs: Vec::new(),
+                writing_files,
+                writing_dirs,
             });
         }
         out
