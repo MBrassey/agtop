@@ -51,6 +51,7 @@ transcript preview.
 | Arch / CachyOS        | `yay -S agtop` |
 | Debian / Ubuntu       | `sudo apt install agtop` |
 | macOS                 | `brew install mbrassey/tap/agtop` |
+| Windows               | `winget install agtop` |
 | FreeBSD               | `sudo pkg install agtop` |
 | Cargo                 | `cargo install agtop` |
 | npm                   | `npm install -g @mbrassey/agtop` |
