@@ -305,16 +305,138 @@ mod impl_ {
     }
 }
 
-// ── Other Unix (FreeBSD / NetBSD / OpenBSD / DragonFly) ────────────────────
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+// ── FreeBSD / DragonFly: libprocstat ───────────────────────────────────────
+//
+// FreeBSD ships libprocstat (since 9.x) which gives us proper per-fd
+// path resolution — the same data `fstat -p <pid>` reports.  DragonFly
+// has a compatible procstat fork.
+//
+// OpenBSD / NetBSD don't track per-fd paths in the kernel (their
+// kvm_getfiles returns inode + dev only, no path), so FD enumeration
+// there can return numbers but not paths — almost useless for agtop's
+// "writing files" surface.  Falls through to the empty-Vec stub.
+#[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
 mod impl_ {
     use super::*;
-    pub fn read(_pid: u32, _limit: usize) -> Vec<PathBuf> {
-        // No portable cross-BSD API for foreign-process FD enumeration.
-        // FreeBSD has procstat_getfiles(); NetBSD/OpenBSD have similar.
-        // Out of scope until someone needs it.
-        Vec::new()
+    use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
+
+    // sys/user.h — type tags for libprocstat's filestat.fs_type.
+    const PS_FST_TYPE_VNODE:  c_int = 1;
+    // sys/user.h — bits in filestat.fs_flags.
+    const PS_FST_FFLAG_WRITE: c_int = 0x0002;
+    // sys/sysctl.h — what selector for procstat_getprocs.
+    const KERN_PROC_PID:      c_int = 1;
+
+    /// Mirror of `struct filestat` from <libprocstat.h>.  Layout has
+    /// been stable since FreeBSD 9.0 — fs_path's offset specifically
+    /// is part of the public ABI surface.  We only read scalar fields
+    /// and the path pointer; we never construct or modify one.
+    #[repr(C)]
+    struct FileStat {
+        fs_type:       c_int,
+        fs_flags:      c_int,
+        fs_fflags:     c_int,
+        fs_uflags:     c_int,
+        fs_fd:         c_int,
+        fs_ref_count:  c_int,
+        fs_offset:     i64,
+        fs_typedep:    *mut c_void,
+        fs_path:       *mut c_char,
+        // STAILQ_ENTRY(filestat) — next pointer at the tail.
+        next_stqe_next: *mut FileStat,
     }
+
+    /// Mirror of the STAILQ_HEAD that procstat_getfiles returns.
+    #[repr(C)]
+    struct FileStatList {
+        stqh_first: *mut FileStat,
+        stqh_last:  *mut *mut FileStat,
+    }
+
+    // libprocstat symbols.  kinfo_proc is opaque to us — we never
+    // dereference it, just thread the pointer through the API.
+    #[link(name = "procstat")]
+    extern "C" {
+        fn procstat_open_sysctl() -> *mut c_void;
+        fn procstat_close(ps: *mut c_void);
+        fn procstat_getprocs(
+            ps: *mut c_void, what: c_int, arg: c_int, count: *mut c_uint,
+        ) -> *mut c_void;       // returns kinfo_proc *
+        fn procstat_freeprocs(ps: *mut c_void, p: *mut c_void);
+        fn procstat_getfiles(
+            ps: *mut c_void, p: *mut c_void, mmapped: c_int,
+        ) -> *mut FileStatList;
+        fn procstat_freefiles(ps: *mut c_void, head: *mut FileStatList);
+    }
+
+    pub fn read(pid: u32, limit: usize) -> Vec<PathBuf> {
+        unsafe {
+            let ps = procstat_open_sysctl();
+            if ps.is_null() { return Vec::new(); }
+
+            let mut count: c_uint = 0;
+            let kproc = procstat_getprocs(ps, KERN_PROC_PID, pid as c_int, &mut count);
+            if kproc.is_null() || count == 0 {
+                procstat_close(ps);
+                return Vec::new();
+            }
+
+            let head = procstat_getfiles(ps, kproc, 0);
+            if head.is_null() {
+                procstat_freeprocs(ps, kproc);
+                procstat_close(ps);
+                return Vec::new();
+            }
+
+            let mut out: Vec<PathBuf> = Vec::with_capacity(limit);
+            let mut node = (*head).stqh_first;
+            while !node.is_null() {
+                if out.len() >= limit { break; }
+                let f = &*node;
+                // Vnode entries are the only ones that carry a real
+                // filesystem path; pipes / sockets / kqueues have null
+                // fs_path even when fs_flags includes WRITE.
+                let writable = (f.fs_flags & PS_FST_FFLAG_WRITE) != 0;
+                let is_vnode = f.fs_type == PS_FST_TYPE_VNODE;
+                if writable && is_vnode && !f.fs_path.is_null() {
+                    let cstr = CStr::from_ptr(f.fs_path);
+                    if let Ok(s) = cstr.to_str() {
+                        if !s.is_empty() && !s.starts_with("/dev/") {
+                            out.push(PathBuf::from(s));
+                        }
+                    }
+                }
+                node = f.next_stqe_next;
+            }
+
+            procstat_freefiles(ps, head);
+            procstat_freeprocs(ps, kproc);
+            procstat_close(ps);
+            out
+        }
+    }
+}
+
+// ── OpenBSD / NetBSD: stub ─────────────────────────────────────────────────
+//
+// kvm_getfiles returns inode + dev but no path; reconstructing paths
+// would require walking every mounted filesystem and reverse-mapping
+// inodes, which is both expensive and unreliable.  Out of scope.
+#[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
+mod impl_ {
+    use super::*;
+    pub fn read(_pid: u32, _limit: usize) -> Vec<PathBuf> { Vec::new() }
+}
+
+// ── Anything else (illumos, Solaris, Haiku, ...) ───────────────────────────
+#[cfg(not(any(
+    target_os = "linux", target_os = "macos", windows,
+    target_os = "freebsd", target_os = "dragonfly",
+    target_os = "openbsd", target_os = "netbsd",
+)))]
+mod impl_ {
+    use super::*;
+    pub fn read(_pid: u32, _limit: usize) -> Vec<PathBuf> { Vec::new() }
 }
 
 #[cfg(test)]

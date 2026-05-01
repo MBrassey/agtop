@@ -160,7 +160,7 @@ activity are blended so an agent mid-generation isn't reported as idle.
 | Badge      | Trigger |
 | ---------- | ------- |
 | ● **BUSY** | live process **and** transcript ≤ 30 s old, **or** any tool in flight, **or** CPU% ≥ 10 |
-| ◆ **SPWN** | live process with one or more `Task` / `Agent` *subagents* in flight |
+| ● **SPWN** | live process with one or more `Task` / `Agent` *subagents* in flight |
 | ● **ACTV** | live process with transcript activity in the last 5 min, **or** CPU% ≥ 3 |
 | ○ idle     | live process up but quiet for >5 min and CPU% below threshold |
 | ◌ **WAIT** | no live process, but session activity in the last 24 h |
@@ -511,7 +511,8 @@ export AGTOP_MATCH="internal-bot=python.*src/agent\.py"
 | Linux x86_64 / aarch64 | native `/proc` | ✓ | ✓ | ✓ | ✓ |
 | macOS x86_64 / aarch64 | `sysinfo`      | ✓ | ✓ | ✓ (`sysinfo`) | ✓ (FFI: `proc_pidinfo` / `proc_pidfdinfo`) |
 | Windows x86_64         | `sysinfo`      | ✓ | ✓ | ✓ (`sysinfo`) | ✓ (FFI: `NtQuerySystemInformation` + `DuplicateHandle`) |
-| FreeBSD x86_64         | `sysinfo`      | ✓ | ✓ | (sysinfo gap) | (no portable cross-BSD API) |
+| FreeBSD x86_64         | `sysinfo`      | ✓ | ✓ | (sysinfo gap) | ✓ (FFI: `libprocstat` — `procstat_getfiles`) |
+| OpenBSD / NetBSD       | `sysinfo`      | ✓ | ✓ | (sysinfo gap) | (kernel doesn't track per-fd paths) |
 
 CI runs `cargo build --release && cargo test --release` on
 ubuntu-latest, macos-latest, and windows-latest, plus
@@ -579,12 +580,34 @@ Same module, behind `cfg(windows)`:
    `\Device\…` paths.
 6. `CloseHandle(dup)` and `CloseHandle(proc_handle)`.
 
-### *BSD
+### FreeBSD: libprocstat
 
-No portable cross-BSD API for foreign-process FD enumeration.
-FreeBSD has `procstat_getfiles`; NetBSD / OpenBSD have
-`kvm_getfiles`. Both would need separate impls — the current code
-returns an empty `Vec` on those targets.
+`writing_files.rs` links against `libprocstat` (shipped in the FreeBSD
+base since 9.0) and walks the same data `fstat -p <pid>` exposes:
+
+1. `procstat_open_sysctl()` opens a procstat handle.
+2. `procstat_getprocs(ps, KERN_PROC_PID, target_pid, &count)` looks
+   up the `kinfo_proc` for the target PID.
+3. `procstat_getfiles(ps, kproc, 0)` returns a `STAILQ` of
+   `filestat` structs.
+4. Iterate via the embedded `next.stqe_next` pointer; keep entries
+   with `fs_type == PS_FST_TYPE_VNODE` (real files) and
+   `fs_flags & PS_FST_FFLAG_WRITE`. Copy `fs_path` (skipping
+   `/dev/`).
+5. Free the lists, close the handle.
+
+The FFI struct layout is bound to the public `<libprocstat.h>` ABI
+which has been stable since FreeBSD 9.0; `kinfo_proc` is treated
+opaquely so kernel-version drift can't corrupt our reads.
+
+### OpenBSD / NetBSD
+
+The kvm_getfiles APIs return inode + dev pairs but no paths — the
+kernel never stores them. Reconstructing paths would need a
+filesystem-wide reverse-walk per-tick which is both expensive and
+unreliable, so writable-FD enumeration is left empty on these
+targets. Process metrics, sessions, cost, context, and skills all
+work normally.
 
 ---
 

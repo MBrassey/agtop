@@ -41,7 +41,7 @@ impl Status {
     pub fn glyph(self) -> &'static str {
         match self {
             Status::Busy | Status::Active => "●",
-            Status::Spawning => "◆",
+            Status::Spawning => "●",
             Status::Idle => "○",
             Status::Waiting => "◌",
             Status::Completed => "✓",

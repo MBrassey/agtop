@@ -11,7 +11,7 @@ GRN   = "\x1b[32m"; YEL = "\x1b[33m"; CYN = "\x1b[36m"; MAG = "\x1b[35m"; DIM = 
 
 STATUS_DECOR = {
     "busy":      ("● BUSY ", BOLD + GRN),
-    "spawning":  ("◆ SPWN ", BOLD + CYN),
+    "spawning":  ("● SPWN ", BOLD + CYN),
     "active":    ("● ACTV ", GRN),
     "idle":      ("○ idle ", DIM),
     "waiting":   ("◌ WAIT ", YEL),

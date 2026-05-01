@@ -676,7 +676,7 @@ fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             let total_sub: u32 = list.iter().map(|a| a.subagents).sum();
             let total_tok: u64 = list.iter().map(|a| a.tokens_total).sum();
             let mut header_spans: Vec<Span> = Vec::new();
-            header_spans.push(Span::styled("◆ ", Style::default().fg(theme::BORDER)));
+            header_spans.push(Span::styled("● ", Style::default().fg(theme::BORDER)));
             header_spans.push(Span::styled(proj.clone(),
                 Style::default().fg(theme::BORDER).add_modifier(Modifier::BOLD)));
             header_spans.push(Span::styled(
@@ -1460,7 +1460,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         line(vec![hdr("  Status legend:")]),
         line(vec![Span::styled("    ● BUSY ", Style::default().fg(theme::C_BUSY).add_modifier(Modifier::BOLD)),
                   dim("process active and writing in last 5s")]),
-        line(vec![Span::styled("    ◆ SPWN ", Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)),
+        line(vec![Span::styled("    ● SPWN ", Style::default().fg(theme::C_SPAWN).add_modifier(Modifier::BOLD)),
                   dim("Task subagents currently in flight")]),
         line(vec![Span::styled("    ● ACTV ", Style::default().fg(theme::C_ACTIVE)),
                   dim("process running recently")]),
