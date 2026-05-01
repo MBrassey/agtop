@@ -37,7 +37,10 @@ fn read_gpu_usage() -> std::collections::HashMap<u32, (f64, u64)> {
         let Some(mem_s) = cols.next() else { continue };
         let Ok(pid) = pid_s.parse::<u32>() else { continue };
         let mem_mib = mem_s.parse::<u64>().unwrap_or(0);
-        let mem_bytes = mem_mib * 1024 * 1024;
+        // saturating_mul defends against an adversarial nvidia-smi
+        // shim (or future driver bug) that returns a >2^54 MiB
+        // value, which would otherwise overflow u64.
+        let mem_bytes = mem_mib.saturating_mul(1024 * 1024);
         total_mem = total_mem.saturating_add(mem_bytes);
         entries.push((pid, mem_bytes));
     }
@@ -309,14 +312,20 @@ impl Collector {
             // uptime computation rather than reporting a multi-decade value.
             let uptime_sec = if self.boot_time == 0 { 0 } else { now_sec.saturating_sub(started_at_sec) };
 
-            let cwd = cwd_path.to_string_lossy().into_owned();
-            let exe = exe_path.to_string_lossy().into_owned();
+            // Every /proc-derived string is attacker-controlled (any
+            // local user can `exec -a $'\x1b]0;...'`), so we strip
+            // ANSI / control bytes at the collector boundary before
+            // anything reaches stdout (--once / --json / TUI).
+            let cwd     = crate::format::sanitize_control(&cwd_path.to_string_lossy());
+            let exe     = crate::format::sanitize_control(&exe_path.to_string_lossy());
+            let cmdline = crate::format::sanitize_control(&cmdline);
             let project = derive_project(&cwd, &exe, &cmdline, &label);
-            let writing_files: Vec<String> = writing.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            let writing_files: Vec<String> = writing.iter()
+                .map(|p| crate::format::sanitize_control(&p.to_string_lossy())).collect();
             let writing_dirs: Vec<String> = dedupe(
                 writing.iter()
                     .filter_map(|p| p.parent())
-                    .map(|p| p.to_string_lossy().into_owned()),
+                    .map(|p| crate::format::sanitize_control(&p.to_string_lossy())),
             );
 
             let agent = Agent {
@@ -340,7 +349,9 @@ impl Collector {
                 context_limit: 0,
                 loaded_skills: Vec::new(),
                 tool_counts: Vec::new(),
-                ppid_name: proc_::read_comm(stat.ppid).unwrap_or_default(),
+                ppid_name: proc_::read_comm(stat.ppid)
+                    .map(|s| crate::format::sanitize_control(&s))
+                    .unwrap_or_default(),
                 session_started_ms: 0,
                 dangerous_flag: dangerous_flag_for_cmdline(&cmdline),
                 model: None,
@@ -370,8 +381,10 @@ impl Collector {
                 // thousands of open files / children / sockets
                 // doesn't dominate one snapshot tick.
                 reading_files: proc_::read_reading_files(pid, 6).iter()
-                    .map(|p| p.to_string_lossy().into_owned()).collect(),
-                children: proc_::read_children(pid, 8),
+                    .map(|p| crate::format::sanitize_control(&p.to_string_lossy())).collect(),
+                children: proc_::read_children(pid, 8).into_iter()
+                    .map(|(p, c)| (p, crate::format::sanitize_control(&c)))
+                    .collect(),
                 net_established: proc_::count_net_established(pid),
                 read_rate_bps: 0,    // filled in below from the per-pid prev snapshot
                 write_rate_bps: 0,

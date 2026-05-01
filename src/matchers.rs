@@ -78,13 +78,28 @@ pub fn classify<'a>(
     if cmdline.is_empty() {
         return None;
     }
+    // ReDoS defense: cap the regex match input at 16 KiB.  Real
+    // agent cmdlines are well under 1 KiB; a hostile co-tenant
+    // process with megabyte-scale argv combined with a pathological
+    // user-supplied `-m` regex could otherwise spike CPU per tick.
+    // 16 KiB is comfortably above any realistic agent invocation.
+    const MAX_MATCH_BYTES: usize = 16 * 1024;
+    let trimmed = if cmdline.len() > MAX_MATCH_BYTES {
+        // Slice to the closest valid utf-8 boundary at or below
+        // the cap so regex doesn't see a half-byte sequence.
+        let mut end = MAX_MATCH_BYTES;
+        while end > 0 && !cmdline.is_char_boundary(end) { end -= 1; }
+        &cmdline[..end]
+    } else {
+        cmdline
+    };
     for m in builtins {
-        if m.re.is_match(cmdline) {
+        if m.re.is_match(trimmed) {
             return Some(m.label);
         }
     }
     for m in user {
-        if m.re.is_match(cmdline) {
+        if m.re.is_match(trimmed) {
             return Some(m.label.as_str());
         }
     }

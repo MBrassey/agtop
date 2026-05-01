@@ -29,7 +29,9 @@ PKG_PATH="manifests/m/${PUBLISHER}/${PACKAGE}/${VER}"
 
 echo "== Step 1: fetch SHA256SUMS for v${VER} =="
 SUMS=$(curl -sfL "https://github.com/MBrassey/agtop/releases/download/v${VER}/SHA256SUMS")
-SHA=$(echo "$SUMS" | awk '/agtop-windows-x86_64\.zip/{print toupper($1)}')
+# Strict end-anchored match so a sibling line for e.g.
+# `agtop-windows-x86_64.zip.sig` couldn't be picked up by accident.
+SHA=$(echo "$SUMS" | awk '$2 ~ /^\*?agtop-windows-x86_64\.zip$/ {print toupper($1); exit}')
 [ -n "$SHA" ] || { echo "no windows zip in SHA256SUMS"; exit 2; }
 echo "  windows zip sha256: $SHA"
 

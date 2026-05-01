@@ -177,7 +177,24 @@ function verifyAndExtract(buf, expectedSha) {
     const inner = path.join(vendorDir, target);
     if (fs.existsSync(inner)) {
       for (const f of fs.readdirSync(inner)) {
-        fs.renameSync(path.join(inner, f), path.join(vendorDir, f));
+        // Defense-in-depth: reject any entry name that contains
+        // path separators or `..` segments before the rename, so
+        // a malicious zip-with-traversal can't escape vendorDir
+        // even if the upstream SHA256 verification is somehow
+        // bypassed.  Names from a release zip are flat agtop
+        // binaries; anything fancy is wrong.
+        if (f === "" || f === "." || f === ".." ||
+            f.includes("/") || f.includes("\\") ||
+            f.includes("..")) {
+          console.warn("agtop: rejecting suspicious archive entry " + JSON.stringify(f));
+          return cargoFallback();
+        }
+        const dest = path.resolve(vendorDir, f);
+        if (!dest.startsWith(path.resolve(vendorDir) + path.sep)) {
+          console.warn("agtop: archive entry " + JSON.stringify(f) + " escapes vendorDir");
+          return cargoFallback();
+        }
+        fs.renameSync(path.join(inner, f), dest);
       }
       try { fs.rmdirSync(inner); } catch {}
     }

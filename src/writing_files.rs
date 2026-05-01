@@ -144,9 +144,11 @@ mod impl_ {
                 )
             };
             if n <= 0 { continue; }
-            // O_WRONLY = 1, O_RDWR = 2 (POSIX).
-            let flags = info.pfi.fi_openflags as i32;
-            if flags & (libc::O_WRONLY | libc::O_RDWR) == 0 { continue; }
+            // O_WRONLY = 1, O_RDWR = 2 (POSIX).  Treat fi_openflags
+            // as u32 (its declared type) — casting to i32 first
+            // would flip sign on the high bit.
+            let flags: u32 = info.pfi.fi_openflags;
+            if flags & (libc::O_WRONLY as u32 | libc::O_RDWR as u32) == 0 { continue; }
 
             // vip_path is NUL-terminated c_char (i8 on Apple).
             let path = &info.pvip.vip_path;
@@ -216,7 +218,15 @@ mod impl_ {
         // Step 1: query the global handle table.  Windows refuses if
         // we don't pre-size the buffer, so loop until the call fits.
         let mut buf: Vec<u8> = vec![0u8; 256 * 1024];
+        // Bounded MISMATCH-retry loop: at most 8 grow iterations
+        // before we bail.  Defensive against a kernel that keeps
+        // reporting MISMATCH with `needed == 0` (would otherwise
+        // doubling-spin until the 64 MiB cap, wasting allocator
+        // time on each tick).
+        let mut retries = 0u32;
         let table: *const SystemHandleInformationEx = loop {
+            retries += 1;
+            if retries > 8 { return Vec::new(); }
             let mut needed: u32 = 0;
             let status: NTSTATUS = unsafe {
                 NtQuerySystemInformation(
@@ -228,9 +238,6 @@ mod impl_ {
             };
             if status == 0 { break buf.as_ptr() as *const _; }
             if status == STATUS_INFO_LENGTH_MISMATCH {
-                // Grow generously — the handle table on a busy box can
-                // be many MiB.  Cap at 64 MiB so a runaway query can't
-                // OOM agtop.
                 let grow = ((needed as usize).max(buf.len() * 2)).min(64 * 1024 * 1024);
                 if grow == buf.len() { return Vec::new(); }
                 buf.resize(grow, 0);
@@ -250,10 +257,19 @@ mod impl_ {
         }
 
         let header = unsafe { &*table };
-        let count = header.number_of_handles;
+        // Validate the kernel-supplied handle count actually fits in
+        // the buffer we allocated.  A racing handle-table mutation
+        // between the MISMATCH probe and the populated call could
+        // otherwise let us read past `buf.len()` (out-of-bounds in
+        // unsafe code).  Clamp `count` to whatever the buffer can
+        // hold; better to under-report than to read garbage.
+        let header_size = std::mem::size_of::<usize>() * 2;
+        let entry_size  = std::mem::size_of::<SystemHandleTableEntryInfoEx>();
+        let max_entries = buf.len().saturating_sub(header_size) / entry_size;
+        let count = header.number_of_handles.min(max_entries);
         let entries: *const SystemHandleTableEntryInfoEx = unsafe {
             (table as *const u8)
-                .add(std::mem::size_of::<usize>() * 2) // skip number_of_handles + reserved
+                .add(header_size)
                 as *const SystemHandleTableEntryInfoEx
         };
 
@@ -390,7 +406,15 @@ mod impl_ {
 
             let mut out: Vec<PathBuf> = Vec::with_capacity(limit);
             let mut node = (*head).stqh_first;
-            while !node.is_null() {
+            // Hard iteration cap.  Defends against a kernel /
+            // libprocstat ABI drift that places `next.stqe_next`
+            // at a different offset than this binding assumes —
+            // without this, a bad layout could walk arbitrary
+            // memory until segfault.  4096 entries is far more
+            // than any realistic process opens.
+            let mut walked = 0u32;
+            while !node.is_null() && walked < 4096 {
+                walked += 1;
                 if out.len() >= limit { break; }
                 let f = &*node;
                 // Vnode entries are the only ones that carry a real
