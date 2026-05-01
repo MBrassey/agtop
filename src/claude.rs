@@ -289,6 +289,31 @@ fn analyse(records: &[Value]) -> AnalysisOut {
     out
 }
 
+/// Forward-encode a live-process cwd into the dir-name shape Claude
+/// Code uses under `~/.claude/projects/`.  POSIX rule: every `/`
+/// (including the leading one) becomes `-`; hyphens in path segments
+/// stay as hyphens.  Windows: drive-letter prefix `C:\` becomes
+/// `C--` and backslashes become `-`.  Used for matching live PIDs to
+/// session JSONLs (decoding the other direction is ambiguous because
+/// the encoding is lossy).
+fn encode_cwd(cwd: &str) -> String {
+    if cwd.is_empty() { return String::new(); }
+    let mut chars = cwd.chars();
+    let first = chars.next().unwrap();
+    // Windows drive letter — `C:\Users\u\proj` → `C--Users-u-proj`
+    if first.is_ascii_alphabetic() {
+        if let Some(':') = chars.clone().next() {
+            let _ = chars.next();   // the ':'
+            let rest = chars.collect::<String>();
+            let body = rest.replace(['/', '\\'], "-");
+            let body = body.strip_prefix('-').unwrap_or(&body);
+            return format!("{}--{}", first, body);
+        }
+    }
+    // POSIX
+    cwd.replace('/', "-")
+}
+
 /// Decode a Claude Code session-path-encoded project name back into the
 /// original cwd.  Encoding rules differ by host OS:
 ///
@@ -365,10 +390,18 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
         return SessionsResult::empty();
     }
 
-    let mut cwd_to_pid: HashMap<String, u32> = HashMap::new();
+    // Build the live-cwd → pid map keyed on the *forward-encoded*
+    // cwd (slashes → hyphens).  Claude Code's project-dir encoding
+    // is lossy — `/home/u/foo-bar` and `/home/u/foo/bar` both
+    // produce `-home-u-foo-bar`, so reverse-decoding is ambiguous.
+    // Encoding-forward is the only correct match.
+    let mut encoded_cwd_to_pid: HashMap<String, u32> = HashMap::new();
     for a in live_agents {
         if a.label == "claude" || a.label == "claude-code" {
-            cwd_to_pid.insert(a.cwd.to_string(), a.pid);
+            let enc = encode_cwd(a.cwd);
+            if !enc.is_empty() {
+                encoded_cwd_to_pid.insert(enc, a.pid);
+            }
         }
     }
 
@@ -412,7 +445,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             let age_ms = now_ms.saturating_sub(*mtime);
             let is_most_recent = most_recent_path.as_deref() == Some(path);
-            let live_pid = if is_most_recent { cwd_to_pid.get(&decoded_path).copied() } else { None };
+            let live_pid = if is_most_recent { encoded_cwd_to_pid.get(&raw_name).copied() } else { None };
 
             // Only do the expensive tail+parse for live or recently-touched sessions.
             let info = if live_pid.is_some() || age_ms < RECENT_WINDOW_MS {

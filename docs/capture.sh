@@ -35,7 +35,10 @@ bash "$here/capture_tui_synthetic.sh" >/dev/null
 cat > /tmp/agtop-dialog-capture.py <<'PY'
 import os, pty, select, struct, fcntl, termios, time, sys
 import pyte
-COLS, ROWS = 240, 52
+# Smaller grid for the dialog screenshot so the centered detail
+# popup (capped at 100×32 internally) dominates the rendered image
+# instead of being a small inset in a wide TUI.
+COLS, ROWS = 130, 40
 screen = pyte.Screen(COLS, ROWS); stream = pyte.ByteStream(screen)
 pid, fd = pty.fork()
 if pid == 0:
@@ -44,9 +47,13 @@ if pid == 0:
     os.execv(sys.argv[1], ["agtop", "--interval", "0.4"])
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
-# Phase 1: let the TUI populate for the full 60-tick history window
-# so the popup's mini-charts and live preview have real material.
-end_warmup = time.time() + 26
+# Phase 1: let the TUI populate for long enough that the per-pid
+# context-history ring (driven by the background JSONL appender)
+# has enough samples for the popup's time-to-compaction
+# extrapolation to fire.  At 0.4s tick × 100 ticks ≈ 40s, with
+# the appender adding a record every 4s, that's ~10 growth
+# samples — well past the 3-sample minimum.
+end_warmup = time.time() + 40
 while time.time() < end_warmup:
     r,_,_ = select.select([fd],[],[],0.1)
     if r:
@@ -55,7 +62,21 @@ while time.time() < end_warmup:
         if not data: break
         stream.feed(data)
 
-# Phase 2: open the detail popup on the currently-selected (top) row.
+# Phase 2: drive selection to the highest-CPU agent (zk-rollup-
+# prover at 82%):
+#   1. `g` toggles project grouping OFF (default-on grouping puts
+#      the alphabetical first project at top regardless of sort).
+#   2. `s` cycles smart→cpu so CPU-desc is the active order.
+#   3. `Home` jumps the selection to the new top row (selection
+#      otherwise sticks to the same PID across re-sorts).
+#   4. Enter opens the detail popup on that row.
+for k in [b"g", b"s"]:
+    try: os.write(fd, k)
+    except OSError: pass
+    time.sleep(0.6)
+try: os.write(fd, b"\x1b[H")   # ESC[H == Home
+except OSError: pass
+time.sleep(0.6)
 try: os.write(fd, b"\r")
 except OSError: pass
 end_capture = time.time() + 4
@@ -121,8 +142,22 @@ done
 spin () {
   local cwd="$1" pct="$2" mb="$3"; shift 3
   local label="$*"
-  ( cd "$cwd" && AGTOP_PCT="$pct" AGTOP_MB="$mb" exec -a "$label" /tmp/agtop-spin ) &
+  # Redirect stdin/out/err to /dev/null so the spinner's inherited
+  # FDs don't end up as `writing_files` noise (the parent driver
+  # script's stdout is /tmp/fake-dialog.ansi, which would otherwise
+  # show up in the popup).
+  ( cd "$cwd" && \
+      AGTOP_PCT="$pct" AGTOP_MB="$mb" \
+      AGTOP_WRITE_FILE="${cwd}/circuits/main.rs" \
+      exec -a "$label" /tmp/agtop-spin >/dev/null 2>&1 </dev/null ) &
 }
+for d in /tmp/zk-rollup-prover /tmp/mev-searcher /tmp/eigen-restake \
+         /tmp/amm-v4-hooks /tmp/kzg-blob-pipe /tmp/erc4337-bundler \
+         /tmp/huff-fuzzer /tmp/uniswap-v4-core /tmp/lido-csm \
+         /tmp/optimism-bedrock /tmp/arbitrum-stylus /tmp/celestia-da \
+         /tmp/scroll-zkevm /tmp/risc0-prover /tmp/sp1-zkvm /tmp/foundry-suite; do
+  mkdir -p "$d/circuits"
+done
 spin /tmp/zk-rollup-prover  82 780 "claude --dangerously-skip-permissions"
 spin /tmp/mev-searcher      67 512 "codex --resume"
 spin /tmp/eigen-restake     74 640 "claude --dangerously-skip-permissions"
@@ -146,6 +181,24 @@ spawn /tmp/polygon-cdk        claude
 spawn /tmp/halo2-circuits     claude
 spawn /tmp/ollama-svc         ollama serve
 spawn /tmp/ollama-svc         ollama serve
+
+# Background context-growth appender for the hero session — see the
+# matching block in capture_tui_synthetic.sh for rationale.  Drives
+# the popup's "≈ Xm to compaction (+N/min)" line.
+HERO_JSONL=/tmp/agtop-demo-home/.claude/projects/-tmp-zk-rollup-prover/sess.jsonl
+(
+  ctx=510000
+  i=20
+  while sleep 4; do
+    ts=$(date -u +"2026-02-14T09:14:%S.000Z" 2>/dev/null || echo "2026-02-14T09:14:30.000Z")
+    ctx=$((ctx + 14000))
+    cat >> "$HERO_JSONL" <<APPEND
+{"type":"assistant","timestamp":"${ts}","message":{"id":"msg_${i}","model":"claude-opus-4-7","content":[{"type":"text","text":"Continuing the proof — building the next aggregation layer"}],"usage":{"input_tokens":4,"output_tokens":420,"cache_read_input_tokens":${ctx},"cache_creation_input_tokens":2400}}}
+APPEND
+    i=$((i + 1))
+  done
+) &
+
 sleep 2.5
 HOME=/tmp/agtop-demo-home /tmp/agtop-venv/bin/python /tmp/agtop-dialog-capture.py "$AGTOP_BIN"
 SH

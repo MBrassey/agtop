@@ -27,9 +27,28 @@ command -v chromium  >/dev/null || { echo "chromium not on PATH"; exit 1; }
 # tool calls and prose entries so the live-preview popup has real material.
 fake_home="/tmp/agtop-demo-home"
 rm -rf "$fake_home"
-mkdir -p "$fake_home/.claude/projects"
+mkdir -p "$fake_home/.claude/projects" "$fake_home/.claude/skills"
 
-# write a JSONL transcript with N events.
+# Seed user-global Claude Code skills so the popup's "skills" line
+# resolves to a real list rather than "0 loaded".  Project-local
+# skills are also seeded for the hero session further down.
+for skill in frontend-design slack-tooler sql-explorer; do
+  mkdir -p "$fake_home/.claude/skills/$skill"
+  cat > "$fake_home/.claude/skills/$skill/SKILL.md" <<MD
+# ${skill}
+
+Synthetic skill manifest used only for the agtop demo screenshots.
+MD
+done
+
+# Each record's `timestamp` is months-old on purpose: agtop reads the
+# first record as session_started_ms, and the popup tags `(resumed)`
+# whenever the session age exceeds process uptime by >60s.  The
+# spinners are 30s old in the namespace; the JSONL is ≈11 weeks old.
+SESS_T0="2026-02-14T09:14:00.000Z"
+
+# write a JSONL transcript with diverse tool_use records so tool_counts
+# populates the "tools: Bash N · Edit M · …" line in the popup.
 # usage: rich_session <encoded-cwd> <model> <user> <prose1> <tool> <tool_arg> <prose2> <tool2> <tool2_arg> [in_flight_task_subj]
 rich_session () {
   local enc="$1" model="$2"
@@ -38,24 +57,40 @@ rich_session () {
   shift 2
   local user="$1" p1="$2" t1="$3" ta1="$4" p2="$5" t2="$6" ta2="$7" subagent="${8:-}"
   cat > "$dir/sess.jsonl" <<JSONL
-{"type":"user","timestamp":"2026-04-29T00:00:00.000Z","message":{"role":"user","content":"${user}"}}
-{"type":"assistant","timestamp":"2026-04-29T00:00:01.000Z","message":{"id":"msg_1","model":"${model}","content":[{"type":"text","text":"${p1}"}],"usage":{"input_tokens":18000,"output_tokens":1100,"cache_read_input_tokens":120000}}}
-{"type":"assistant","timestamp":"2026-04-29T00:00:02.000Z","message":{"id":"msg_2","model":"${model}","content":[{"type":"tool_use","id":"toolu_a","name":"${t1}","input":{"command":"${ta1}","description":"${p1}"}}],"usage":{"input_tokens":21000,"output_tokens":80}}}
-{"type":"user","timestamp":"2026-04-29T00:00:03.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"completed in 12.4s — 0 errors"}]}}
-{"type":"assistant","timestamp":"2026-04-29T00:00:04.000Z","message":{"id":"msg_3","model":"${model}","content":[{"type":"text","text":"${p2}"}],"usage":{"input_tokens":24000,"output_tokens":900,"cache_read_input_tokens":180000}}}
-{"type":"assistant","timestamp":"2026-04-29T00:00:05.000Z","message":{"id":"msg_4","model":"${model}","content":[{"type":"tool_use","id":"toolu_b","name":"${t2}","input":{"command":"${ta2}","description":"${p2}"}}],"usage":{"input_tokens":27000,"output_tokens":50}}}
+{"type":"user","timestamp":"${SESS_T0}","message":{"role":"user","content":"${user}"}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:01.000Z","message":{"id":"msg_1","model":"${model}","content":[{"type":"text","text":"${p1}"}],"usage":{"input_tokens":4,"output_tokens":1100,"cache_read_input_tokens":182000,"cache_creation_input_tokens":1200}}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:02.000Z","message":{"id":"msg_2","model":"${model}","content":[{"type":"tool_use","id":"toolu_a","name":"${t1}","input":{"command":"${ta1}","description":"${p1}"}}],"usage":{"input_tokens":6,"output_tokens":80,"cache_read_input_tokens":183204,"cache_creation_input_tokens":160}}}
+{"type":"user","timestamp":"2026-02-14T09:14:03.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"completed in 12.4s — 0 errors"}]}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:04.000Z","message":{"id":"msg_3","model":"${model}","content":[{"type":"text","text":"${p2}"}],"usage":{"input_tokens":4,"output_tokens":900,"cache_read_input_tokens":183364,"cache_creation_input_tokens":820}}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:05.000Z","message":{"id":"msg_4","model":"${model}","content":[{"type":"tool_use","id":"toolu_b","name":"${t2}","input":{"command":"${ta2}","description":"${p2}"}}],"usage":{"input_tokens":2,"output_tokens":50,"cache_read_input_tokens":184184,"cache_creation_input_tokens":210}}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:06.000Z","message":{"id":"msg_5","model":"${model}","content":[{"type":"tool_use","id":"toolu_c","name":"Read","input":{"file_path":"src/lib.rs","description":"reading the public api"}}],"usage":{"input_tokens":1,"output_tokens":40,"cache_read_input_tokens":184394,"cache_creation_input_tokens":120}}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:07.000Z","message":{"id":"msg_6","model":"${model}","content":[{"type":"tool_use","id":"toolu_d","name":"Bash","input":{"command":"cargo check --release","description":"verify compile"}}],"usage":{"input_tokens":1,"output_tokens":35,"cache_read_input_tokens":184514,"cache_creation_input_tokens":80}}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:08.000Z","message":{"id":"msg_7","model":"${model}","content":[{"type":"tool_use","id":"toolu_e","name":"Grep","input":{"pattern":"unsafe","description":"audit unsafe blocks"}}],"usage":{"input_tokens":1,"output_tokens":30,"cache_read_input_tokens":184594,"cache_creation_input_tokens":40}}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:09.000Z","message":{"id":"msg_8","model":"${model}","content":[{"type":"tool_use","id":"toolu_f","name":"Edit","input":{"file_path":"src/lib.rs","description":"swap unwrap for ?"}}],"usage":{"input_tokens":1,"output_tokens":50,"cache_read_input_tokens":184634,"cache_creation_input_tokens":150}}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:10.000Z","message":{"id":"msg_9","model":"${model}","content":[{"type":"tool_use","id":"toolu_g","name":"Bash","input":{"command":"cargo test --release --workspace","description":"full test run"}}],"usage":{"input_tokens":1,"output_tokens":48,"cache_read_input_tokens":184784,"cache_creation_input_tokens":60}}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:11.000Z","message":{"id":"msg_10","model":"${model}","content":[{"type":"tool_use","id":"toolu_h","name":"Write","input":{"file_path":"docs/decision-log.md","description":"record refactor rationale"}}],"usage":{"input_tokens":1,"output_tokens":42,"cache_read_input_tokens":184844,"cache_creation_input_tokens":110}}}
 JSONL
   if [ -n "$subagent" ]; then
     cat >> "$dir/sess.jsonl" <<JSONL
-{"type":"assistant","timestamp":"2026-04-29T00:00:06.000Z","message":{"id":"msg_5","model":"${model}","content":[{"type":"tool_use","id":"toolu_task1","name":"Task","input":{"subject":"${subagent}","subagent_type":"code-reviewer","prompt":"Review the diff and report any concerns"}}],"usage":{"input_tokens":30000,"output_tokens":40}}}
+{"type":"assistant","timestamp":"2026-02-14T09:14:12.000Z","message":{"id":"msg_t1","model":"${model}","content":[{"type":"tool_use","id":"toolu_task1","name":"Task","input":{"subject":"${subagent}","subagent_type":"code-reviewer","prompt":"Review the diff and report any concerns"}}],"usage":{"input_tokens":1,"output_tokens":40,"cache_read_input_tokens":184954,"cache_creation_input_tokens":90}}}
 JSONL
   fi
 }
 
+# Project-local skills for the HERO session (zk-rollup-prover) — drop
+# them before any rich_session call so the cwd-scan in agtop's
+# skills::skills_for_cwd finds them when the namespace's per-pid cwd
+# matches /tmp/zk-rollup-prover.
+mkdir -p /tmp/zk-rollup-prover/.claude/skills
+for skill in plonk-prover noir-tooling fiat-shamir-soundness; do
+  mkdir -p "/tmp/zk-rollup-prover/.claude/skills/$skill"
+  echo "# ${skill}" > "/tmp/zk-rollup-prover/.claude/skills/$skill/SKILL.md"
+done
+
 # Sophisticated blockchain workloads.  Each row: cwd-encoded · model ·
 # user prompt · prose1 · tool1 · tool1_arg · prose2 · tool2 · tool2_arg ·
 # (optional) in-flight subagent subject.
-rich_session "-tmp-zk-rollup-prover"  "claude-sonnet-4-7" \
+rich_session "-tmp-zk-rollup-prover"  "claude-opus-4-7" \
   "Generate the witness and prove the new circuits"  \
   "Building witness against srs_2_22 — Plonk proving system, ~140k constraints, MSM precomputation cached" \
   "Bash" "nargo prove --witness witness.tr --srs srs_2_22.bin"  \
@@ -206,6 +241,7 @@ PY
 # stable across the whole capture window.  Output: per-agent CPU% in
 # 3..85 range and RSS in 80..820 MiB range, varying per spawn.
 cat > /tmp/agtop-spin.c <<'C'
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -214,8 +250,17 @@ cat > /tmp/agtop-spin.c <<'C'
 int main(int argc, char **argv) {
     const char *p = getenv("AGTOP_PCT");  int pct = p ? atoi(p) : 50;
     const char *m = getenv("AGTOP_MB");   int mb  = m ? atoi(m)  : 128;
+    const char *w = getenv("AGTOP_WRITE_FILE");   /* optional */
     if (pct < 1) pct = 1; if (pct > 99) pct = 99;
     if (mb  < 8) mb  = 8;
+    /* Open a writable file in the cwd if requested, so the agtop
+     * `writing_files` enumerator finds an entry in /proc/<pid>/fd.
+     * We open with O_WRONLY|O_CREAT, write a byte, then leave the FD
+     * open for the lifetime of the process. */
+    if (w && *w) {
+        int fd = open(w, O_WRONLY | O_CREAT, 0644);
+        if (fd >= 0) { (void)write(fd, "agtop demo open-fd marker\n", 26); }
+    }
     /* Allocate + touch RAM so RSS reflects the target. */
     size_t bytes = (size_t)mb * 1024 * 1024;
     char *buf = (char *)malloc(bytes);
@@ -257,11 +302,27 @@ done
 
 # Spawn a CPU spinner with a target percent + RAM size, spoofed cmdline.
 # usage: spin <cwd> <pct> <ram_mb> <argv0...>
+# Optional env AGTOP_WRITE_FILE=<path> makes the spinner open a file
+# in write mode before its loop, so /proc/<pid>/fd lets agtop's
+# writable-FD enumerator find an entry → the popup's `writing` line
+# populates with a real path.
 spin () {
   local cwd="$1" pct="$2" mb="$3"; shift 3
   local label="$*"
-  ( cd "$cwd" && AGTOP_PCT="$pct" AGTOP_MB="$mb" exec -a "$label" /tmp/agtop-spin ) &
+  ( cd "$cwd" && \
+      AGTOP_PCT="$pct" AGTOP_MB="$mb" \
+      AGTOP_WRITE_FILE="${cwd}/circuits/main.rs" \
+      exec -a "$label" /tmp/agtop-spin ) &
 }
+
+# Pre-create the writable target dirs so the spinner's open() succeeds.
+for d in /tmp/zk-rollup-prover /tmp/mev-searcher /tmp/eigen-restake \
+         /tmp/amm-v4-hooks /tmp/kzg-blob-pipe /tmp/erc4337-bundler \
+         /tmp/huff-fuzzer /tmp/uniswap-v4-core /tmp/lido-csm \
+         /tmp/optimism-bedrock /tmp/arbitrum-stylus /tmp/celestia-da \
+         /tmp/scroll-zkevm /tmp/risc0-prover /tmp/sp1-zkvm /tmp/foundry-suite; do
+  mkdir -p "$d/circuits"
+done
 
 # 16 CPU-active agents with varied CPU% (3–82) and RAM (90–780 MiB).
 # Different vendors, different argv0 styles, mixed across project dirs.
@@ -290,6 +351,28 @@ spawn /tmp/polygon-cdk        claude
 spawn /tmp/halo2-circuits     claude
 spawn /tmp/ollama-svc         ollama serve
 spawn /tmp/ollama-svc         ollama serve
+
+# Background context-growth appender: every 4s during the capture
+# window, append a new assistant record to the hero session's JSONL
+# with a larger cache_read_input_tokens.  agtop samples the latest
+# turn's prompt size each tick; with 6+ growing samples the
+# collector's per-pid context-history ring extrapolates a positive
+# slope, and the popup's "≈ Xm to compaction (+N/min)" line lights
+# up.  Killed via the parent shell's exit (set -e + namespace teardown).
+HERO_JSONL=/tmp/agtop-demo-home/.claude/projects/-tmp-zk-rollup-prover/sess.jsonl
+(
+  ctx=510000
+  i=20
+  while sleep 4; do
+    ts=$(date -u +"2026-02-14T09:14:%S.000Z" 2>/dev/null || echo "2026-02-14T09:14:30.000Z")
+    ctx=$((ctx + 14000))
+    cat >> "$HERO_JSONL" <<APPEND
+{"type":"assistant","timestamp":"${ts}","message":{"id":"msg_${i}","model":"claude-opus-4-7","content":[{"type":"text","text":"Continuing the proof — building the next aggregation layer"}],"usage":{"input_tokens":4,"output_tokens":420,"cache_read_input_tokens":${ctx},"cache_creation_input_tokens":2400}}}
+APPEND
+    i=$((i + 1))
+  done
+) &
+
 sleep 2.5
 HOME=/tmp/agtop-demo-home /tmp/agtop-venv/bin/python /tmp/agtop-tui-capture.py "$AGTOP_BIN"
 SH
