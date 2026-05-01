@@ -49,7 +49,7 @@ transcript preview.
 | Platform              | Command |
 | --------------------- | ------- |
 | Arch / CachyOS        | `yay -S agtop` |
-| Debian / Ubuntu       | `sudo apt install agtop` |
+| Debian / Ubuntu       | `curl -1sLf 'https://dl.cloudsmith.io/public/mbrassey/agtop/setup.deb.sh' \| sudo -E bash && sudo apt install agtop` |
 | macOS                 | `brew install mbrassey/tap/agtop` |
 | Windows               | `winget install agtop` |
 | FreeBSD               | `sudo pkg install agtop` |
@@ -730,14 +730,29 @@ release workflow fans out to all three primary registries in parallel.
 | npm            | `packages/npm/build.sh` (prebuilt shim)  | ✓                     |
 | AUR            | `packages/pacman/PKGBUILD`               | ✓                     |
 | Homebrew tap   | `homebrew/agtop.rb` → `MBrassey/homebrew-tap` | ✓                |
-| Debian PPA     | `packages/deb/build.sh`                  |                       |
+| Cloudsmith deb | `packages/deb/build.sh` → `cloudsmith.io/mbrassey/agtop` | ✓     |
+| winget         | `~/code/agtop-winget-port/` → `microsoft/winget-pkgs`    | manual PR per release |
+| FreeBSD ports  | `~/code/agtop-freebsd-port/` → `freebsd/freebsd-ports`   | manual PR per release |
 
 CI publishes use repo secrets `CRATES_IO_TOKEN`, `NPM_TOKEN`,
-`AUR_SSH_PRIVATE_KEY`, and `HOMEBREW_TAP_TOKEN`; the publish jobs
-idempotently skip when the version is already on the destination
-registry, so re-pushing or re-tagging is safe.  The npm postinstall
-verifies the downloaded prebuilt against the `SHA256SUMS` file
-attached to each GitHub Release before extracting.
+`AUR_SSH_PRIVATE_KEY`, `HOMEBREW_TAP_TOKEN`, and
+`CLOUDSMITH_API_KEY`; the publish jobs idempotently skip when the
+version is already on the destination registry, so re-pushing or
+re-tagging is safe.  The npm postinstall verifies the downloaded
+prebuilt against the `SHA256SUMS` file attached to each GitHub
+Release before extracting.
+
+For first-time install, Debian / Ubuntu users run the Cloudsmith
+setup script once to add the apt source:
+
+```sh
+curl -1sLf 'https://dl.cloudsmith.io/public/mbrassey/agtop/setup.deb.sh' \
+  | sudo -E bash
+sudo apt install agtop
+```
+
+Subsequent updates flow through `sudo apt update && sudo apt upgrade`
+like any other apt package.
 
 ---
 

@@ -261,6 +261,62 @@ jobs:
           git push
           INNER
 
+  publish-debian:
+    name: Publish .deb to Cloudsmith
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: ver
+        run: |
+          v=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      # Pull the prebuilt linux-x86_64 binary that this run's matrix
+      # already produced, instead of recompiling — saves ~2 min.
+      - name: Download linux-x86_64 prebuilt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p deb-bin
+          gh release download "v${{ steps.ver.outputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'agtop-linux-x86_64.tar.gz' --dir deb-bin
+          tar -xzf deb-bin/agtop-linux-x86_64.tar.gz -C deb-bin
+          install -m 0755 deb-bin/agtop-linux-x86_64/agtop target/release/agtop
+          mkdir -p target/release && touch target/release/.placeholder
+
+      - name: Build .deb
+        run: |
+          # build.sh would normally `cargo build --release`; we already
+          # have the prebuilt installed at target/release/agtop above,
+          # so this just stages it into the .deb layout.
+          bash packages/deb/build.sh
+
+      - name: Push to Cloudsmith
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if [ -z "$CLOUDSMITH_API_KEY" ]; then
+            echo "::warning::CLOUDSMITH_API_KEY secret not set — skipping (build artifact still attached to GitHub Release)"
+            exit 0
+          fi
+          pip install --quiet cloudsmith-cli
+          DEB="packages/deb/agtop_${VERSION}_amd64.deb"
+          [ -f "$DEB" ] || { echo "::error::missing $DEB"; ls packages/deb/; exit 1; }
+          # `any-distro/any-version` is Cloudsmith's universal slot;
+          # the .deb is statically linked so it installs identically
+          # on every Debian + Ubuntu LTS we care about.  Idempotent:
+          # `--no-republish` would skip-on-duplicate; we don't pass
+          # it because re-pushing the same version should fail loud
+          # (unlike the npm / crates jobs which dedupe silently).
+          cloudsmith push deb \
+            mbrassey/agtop/any-distro/any-version "$DEB" \
+            --api-key "$CLOUDSMITH_API_KEY"
+
   publish-homebrew:
     name: Publish to Homebrew tap
     needs: build
