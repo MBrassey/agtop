@@ -4,7 +4,7 @@
 
 use crate::pricing::ModelPrice;
 
-pub const PRICES_UPDATED: &str = "2026-04-30";
+pub const PRICES_UPDATED: &str = "2026-05-01";
 pub const PRICES_SOURCE:  &str = "litellm community registry";
 
 pub const GENERATED: &[(&str, ModelPrice)] = &[
