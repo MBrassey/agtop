@@ -120,6 +120,7 @@ Run `agtop --help` for the full flag list.
 | `-s`, `--sort <KEY>`            | `smart` | One of `smart` / `cpu` / `mem` / `tokens` / `uptime` / `agent` |
 | `-m`, `--match <LABEL=REGEX>`   |         | Add a custom agent matcher (repeatable) |
 | `--no-color`                    |         | Disable ANSI colors in `--once` / `--json` |
+| `--theme <NAME>`                | `default` | TUI palette: `default` / `dracula` / `nord` / `gruvbox` / `monochrome` |
 | `--top <N>`                     | `0`     | With `--once`, only show top N agents (0 = all) |
 | `--list-builtins`               |         | Print built-in matcher list and exit |
 | `--prices <PATH>`               |         | TOML file overriding / extending the bundled price table |
@@ -215,11 +216,13 @@ exposed in `--json` as `agents[].dangerous: bool`.
 | `r`                | Refresh now |
 | `s`                | Cycle sort: smart → cpu → mem → tokens → uptime → agent |
 | `g`                | Toggle project grouping |
+| `t`                | Toggle tree mode (indented child processes under each agent) |
 | `/`, `f`           | Filter (`Ctrl-U` clears, `Ctrl-W` deletes word) |
 | `j` / `k`, ↓ / ↑   | Move selection |
 | `PgUp` / `PgDn`    | Move by 10 |
 | `Home` / `End`     | First / last agent |
 | `Enter`, `Space`   | Open / close detail popup |
+| `K` (capital)      | SIGTERM the selected agent (confirm `y` / `n`) |
 | `Esc`              | Close popup, clear filter |
 | Mouse              | Click row to select; double-click opens detail; wheel scrolls |
 
@@ -367,6 +370,10 @@ dashboards, or alerting.
                         "/home/matt/.claude/skills/plonk-prover/SKILL.md"],
       "children":      [[404873, "bash"], [404874, "node"]],
       "net_established": 3,
+      "read_rate_bps":  3145728,
+      "write_rate_bps":  524288,
+      "gpu_pct":           42.0,
+      "gpu_mem_bytes": 4294967296,
       "uptime_sec": 345600,
       "session_started_ms": 1777094281861,
       "recent_activity": [
@@ -401,6 +408,8 @@ Per-agent fields worth highlighting:
 | `reading_files`  | Files the process has open in read-only mode. Linux only. Surfaces what the agent is reading right now (project files during context indexing, MCP server configs, hook scripts) — useful when CPU is up but no tokens are flowing. |
 | `children`       | Immediate child processes (`(pid, comm)` pairs) the agent has spawned. Captures hook invocations, MCP server processes, shell commands. Linux only. |
 | `net_established`| Count of established TCP connections (v4 + v6) the process owns. Non-zero indicates the agent is talking to an API / MCP server / network resource even when no tokens are visibly flowing. Linux only. |
+| `read_rate_bps` / `write_rate_bps` | Per-tick disk-IO rate in bytes per second, computed as Δ(`read_bytes`/`write_bytes`) ÷ Δt against the previous snapshot. 0 on the first sample for any pid. Available wherever `read_bytes`/`write_bytes` is. |
+| `gpu_pct` / `gpu_mem_bytes` | NVIDIA GPU utilisation (0-100%) and VRAM usage attributed to this PID. Populated by parsing `nvidia-smi --query-compute-apps` once per snapshot; 0 on hosts without an NVIDIA GPU or when this PID isn't using it. AMD / Apple Silicon support is on the roadmap. |
 | `dangerous` | True when the cmdline includes `--dangerously-skip-permissions`, `--no-permissions`, `--allow-dangerous`, `--yolo`, or starts with `sudo claude` / `sudo codex`. |
 | `dangerous_flag` | When `dangerous` is true, the specific substring that triggered the classifier (e.g. `--dangerously-skip-permissions`). Empty otherwise. |
 | `tool_counts` | Top tools used in this session, sorted desc by call count: `[[name, count], ...]`. Capped at 8 entries. Vendor enrichers count `tool_use` records. |
