@@ -1123,7 +1123,16 @@ fn draw_cpu_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
 
     // Sparkline: convert f64 % values to u64 (×10 to keep one decimal of
     // resolution) so the smooth ▁▂▃▄▅▆▇█ blocks track the real shape.
-    let spark_data: Vec<u64> = snap.history.cpu.iter().map(|v| (v * 10.0) as u64).collect();
+    // Slice to the *current* chart width so a live terminal resize
+    // expands/contracts the chart immediately rather than freezing at
+    // whatever width was active when the app started.  The collector
+    // keeps a generous 240-sample ring (HISTORY) so a wide terminal
+    // has enough data to fill its area; we always show the most recent
+    // `width` samples (oldest fall off the left).
+    let want = split[0].width as usize;
+    let spark_data: Vec<u64> = snap.history.cpu.iter()
+        .rev().take(want).rev()
+        .map(|v| (v * 10.0) as u64).collect();
     let spark_max = ((peak.max(snap.aggregates.cpu).max(10.0) / 10.0).ceil() * 10.0 * 10.0) as u64;
     let sparkline = Sparkline::default()
         .data(&spark_data)
@@ -1303,8 +1312,12 @@ fn draw_tokens_panel(f: &mut Frame, area: Rect, snap: &Snapshot, interval: Durat
         .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(inner);
 
-    // Sparkline of tokens-per-tick. Auto-scaled — bursts read as spikes.
-    let spark_data: Vec<u64> = snap.history.tokens_rate.iter().map(|v| *v as u64).collect();
+    // Sparkline of tokens-per-tick.  Slice to the live chart width so
+    // a terminal resize re-fills/contracts the chart on the next tick.
+    let want = split[0].width as usize;
+    let spark_data: Vec<u64> = snap.history.tokens_rate.iter()
+        .rev().take(want).rev()
+        .map(|v| *v as u64).collect();
     let sparkline = Sparkline::default()
         .data(&spark_data)
         .style(Style::default().fg(theme::C_CHART_TOK));

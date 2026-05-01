@@ -53,7 +53,15 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const HISTORY: usize = 60;
+/// System-wide history depth.  Sized to fill the CPU chart in any
+/// realistic terminal width (incl. ultrawides / fullscreen
+/// 240-col terminals × ratatui's 1-bar-per-sample rendering) so a
+/// live resize doesn't expose a hard right-edge where the data
+/// stops.  At 8 bytes per f64 × 6 history series, the in-memory
+/// cost is ~12 KiB — trivial.  Renderers slice the most recent
+/// `area_width` samples from this so older data falls off the
+/// left as new ticks arrive.
+const HISTORY: usize = 240;
 const MAX_ACTIVITY: usize = 300;
 
 /// Anthropic / OpenAI / Google publish their context windows at
