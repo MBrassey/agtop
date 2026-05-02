@@ -127,6 +127,7 @@ Run `agtop --help` for the full flag list.
 | `--watch`                       |         | One summary line per tick to stdout (no TUI, pipes cleanly) |
 | `--threshold-cpu <PERCENT>`     |         | In `--watch`, exit 3 if aggregate CPU% exceeds N |
 | `--threshold-tokens-rate <T>`   |         | In `--watch`, exit 4 if average tokens/min exceeds N |
+| `--pid <PID>`                   |         | Open the TUI focused on a specific PID with the detail popup already showing — useful as a wrapper from other tooling: `agtop --pid $(pgrep claude)`. Falls back to the regular list view if the PID isn't a known agent. |
 | `-V`, `--version`               |         | Print version and exit |
 | `-h`, `--help`                  |         | Print help and exit |
 
@@ -208,26 +209,54 @@ exposed in `--json` as `agents[].dangerous: bool`.
 
 ## TUI controls
 
+### Agents panel
+
 | Key                | Action |
 | ------------------ | ------ |
 | `q`, `Ctrl-C`      | Quit (closes popup first if open) |
 | `?`, `h`           | Toggle help overlay |
 | `p`                | Pause / resume refresh |
 | `r`                | Refresh now |
-| `s`                | Cycle sort: smart → cpu → mem → tokens → uptime → agent |
-| `g`                | Toggle project grouping |
+| `s`                | Cycle sort: smart → cpu → mem → tokens → uptime → agent (▼ / ▲ indicator) |
+| `g`                | Toggle project grouping (sticky group header pins to row 0 when scrolled past) |
 | `t`                | Toggle tree mode (indented child processes under each agent) |
+| `C` (capital)      | Toggle compact rows (hides PID / uptime / chips, gives `DOING` the rest of the row) |
+| `1` – `7`          | Toggle individual columns: PID / CPU / MEM / UP / SUB / TOK / `▍` (dangerous marker) |
 | `/`, `f`           | Filter (`Ctrl-U` clears, `Ctrl-W` deletes word) |
-| `j` / `k`, ↓ / ↑   | Move selection |
+| `j` / `k`, ↓ / ↑   | Move selection (auto-scrolls the panel) |
 | `PgUp` / `PgDn`    | Move by 10 |
 | `Home` / `End`     | First / last agent |
 | `Enter`, `Space`   | Open / close detail popup |
 | `K` (capital)      | SIGTERM the selected agent (confirm `y` / `n`) |
 | `Esc`              | Close popup, clear filter |
-| Mouse              | Click row to select; double-click opens detail; wheel scrolls |
+| Mouse              | Click row to select; double-click opens detail; wheel scrolls (over the sessions panel the wheel scrolls that panel instead) |
 
-The detail popup ends with a *Live preview* box showing the last 6–8
-events from the session transcript — assistant prose (`›`), tool calls
+The agents table auto-scrolls to keep the selected row visible and
+renders a themed scrollbar on the right edge whenever the row count
+exceeds the viewport.
+
+### Detail popup (`Enter` / `Space`)
+
+| Key                | Action |
+| ------------------ | ------ |
+| `j` / `k`, ↓ / ↑   | Scroll body line by line |
+| `PgUp` / `PgDn`    | Page through long content |
+| `g` / `G`          | Jump to top / bottom (`G` also re-engages live-tail) |
+| `Home` / `End`     | Jump to top / bottom |
+| `n` / `N`          | Next / previous section divider |
+| `/`                | Filter popup contents (Esc clears, Enter accepts) |
+| `y`                | Copy `agent / pid / cwd / cmd / session` to clipboard via OSC 52 |
+| Wheel              | Scroll while popup is open |
+| `Esc`, `Enter`     | Close (scroll position is remembered per-pid) |
+
+The popup grows to ~80% × 90% of the viewport, scrolls when content
+overflows, and pins a `TAIL` pill in the top-right while live-tail
+is active. New events from the session transcript auto-stick to the
+bottom of the *Live preview* until the user scrolls up; pressing `G`
+or wheeling to the bottom re-engages live-tail.
+
+The popup ends with a *Live preview* box showing the last entries
+from the session transcript — assistant prose (`›`), tool calls
 (`→`), and tool results (`←`).
 
 ---
@@ -539,6 +568,20 @@ calibrated against Claude Code's auto-compaction trigger:
 The UI also clamps the displayed percentage at 100% as a final
 defense; you should never see "401%" or similar.
 
+### Claude Code plugins
+
+agtop also surfaces the set of Claude Code **plugins** enabled for
+the user (e.g. `caveman`, `frontend-design`, `wakatime`). These are
+resolved by parsing two host-level files and intersecting them:
+
+- `~/.claude/settings.json` — `enabledPlugins` map (`name@market: true`)
+- `~/.claude/plugins/installed_plugins.json` — installed list
+
+Only plugins that are both **installed and enabled** show up. The
+display name strips the `@<marketplace>` suffix. Plugins are
+user-global (not project-scoped), so the list is identical for every
+Claude session on the host. Implementation: `src/plugins.rs`.
+
 ### Claude Code skills
 
 Loaded skills are detected by `src/skills.rs` scanning two roots in
@@ -576,10 +619,12 @@ uptime      4m17s  ·  session 3d 7h (resumed)
 threads     14    state R  ppid 12345 (zsh)
 dangerous   --dangerously-skip-permissions
 tokens      9.5M (5.8M in / 46k out)
+rate        ▁▂▁▄▇█▆▃▁▁▂▅▇█▇▅▃▂▁▁▁▂▃▅  84k/min avg · peak 312k
 cost        $4.21    api · prices as of 2026-04-30
 cache       97% hit  (5.7M of 5.8M input tok cached)  · saved $15.42 vs uncached
 context     ███████████████░░░░░░░░░  52%  (515k / 1M tok)  · ≈14m to compaction (+38k/min)
 skills      3 loaded   frontend-design, slack-tooler, sql-explorer
+plugins     3 enabled  caveman, frontend-design, wakatime
 subagents   1 in flight
               · code-reviewer: review the auth refactor
 session     6163a95c-e18a-4a4c-a793
@@ -621,6 +666,17 @@ Notable computed values:
   `tool_use` record; sorted desc, capped at 8, top 5 displayed.
   Surfaces actual effort allocation (Bash-heavy session vs
   Edit-heavy session vs Read-heavy session).
+- **`rate` sparkline** — per-tick token deltas for *this* PID,
+  rolling window of 24 samples. The collector keeps a per-pid
+  `prev_tokens_total` and pushes `(current - prev)` each tick;
+  pids that disappear are pruned. The right-side text reads
+  `<avg>/min · peak <peak>` so a quiet baseline with bursts (typical
+  Claude session: idle while user types, spike per turn) reads
+  correctly. Hidden when no tokens have moved during the window.
+- **`plugins` line** — host-global plugin set (Claude Code only).
+  Resolved from `~/.claude/settings.json` (`enabledPlugins`)
+  intersected with `~/.claude/plugins/installed_plugins.json`. Same
+  list for every Claude row in the snapshot.
 - **`ppid_name`** — resolved from `/proc/<ppid>/comm` (Linux) or
   `sysinfo::Process::name()` (others). Reads the kernel's recorded
   command name regardless of shell or launcher; works for `zsh`,
@@ -719,10 +775,25 @@ Same module, behind `cfg(windows)`:
    process so we can resolve the path. (This works without admin
    for handles owned by processes the same user is running, which
    is the agent-monitoring case.)
-5. `GetFinalPathNameByHandleW(dup, FILE_NAME_NORMALIZED)` →
+5. `GetFileType(dup)` — non-blocking — must return `FILE_TYPE_DISK`
+   before we proceed.  Pipes (`FILE_TYPE_PIPE`), char devices and
+   network endpoints have `FILE_GENERIC_WRITE` in their granted
+   mask too, but `GetFinalPathNameByHandleW` will block
+   indefinitely on them (the kernel waits for the named-pipe server
+   to respond, which sometimes never happens — pre-2.4 this was
+   the root cause of the 6h CI timeout on `windows-latest`).
+6. `GetFinalPathNameByHandleW(dup, FILE_NAME_NORMALIZED)` →
    wide-char path. Strip the `\\?\` long-path prefix, drop
    `\Device\…` paths.
-6. `CloseHandle(dup)` and `CloseHandle(proc_handle)`.
+7. `CloseHandle(dup)` and `CloseHandle(proc_handle)`.
+
+The whole call additionally runs inside a 2-second watchdog
+thread (`writing_files::read` on Windows spawns a worker via
+`std::thread::spawn` and uses `mpsc::recv_timeout`).  Even after
+the `FILE_TYPE_DISK` filter, `GetFinalPathNameByHandleW` can still
+stall on remote / SMB mounts whose server is slow or down — the
+watchdog returns an empty `Vec` rather than freezing the collector
+tick.
 
 ### FreeBSD: libprocstat
 
@@ -760,13 +831,19 @@ work normally.
 ```
 agtop/
 ├── Cargo.toml · Cargo.lock
-├── src/                              21 source files · ~8.4 k lines · 19 tests
-│   ├── main.rs · cli.rs · ui.rs · theme.rs · collector.rs
+├── src/                              ~8.7 k lines · 22 tests
+│   ├── main.rs · cli.rs · theme.rs · collector.rs
+│   ├── ui/                          (multi-file module, since 2.4.0)
+│   │   ├── mod.rs                   App state, run(), key + mouse handlers, draw dispatcher
+│   │   ├── popup.rs                 detail / help / kill-confirm / filter-input draws
+│   │   ├── panels.rs                header / footer / cpu / mem / tokens / status / sessions
+│   │   └── agents.rs                agents table, sticky group header, column toggles, tree mode
 │   ├── pricing.rs · pricing_data.rs (auto-generated, ~1800 entries)
 │   ├── proc_.rs                     Linux /proc backend
 │   ├── sysbackend.rs                sysinfo backend (macOS / Windows / *BSD)
 │   ├── writing_files.rs             native FD enum (Linux + macOS FFI + Windows FFI + FreeBSD libprocstat)
 │   ├── skills.rs                    Claude Code skill discovery
+│   ├── plugins.rs                   Claude Code plugin discovery (since 2.4.0)
 │   ├── claude.rs · codex.rs · goose.rs · aider.rs · gemini.rs · generic.rs
 │   └── sessions.rs · matchers.rs · model.rs · format.rs
 ├── scripts/

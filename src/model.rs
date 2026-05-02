@@ -110,6 +110,14 @@ pub struct Agent {
     /// `<cwd>/.claude/skills/<name>/SKILL.md`.  Empty for non-Claude
     /// vendors.
     pub loaded_skills: Vec<String>,
+    /// Names of Claude Code plugins enabled for this session.
+    /// Resolved from `~/.claude/settings.json`'s `enabledPlugins` map
+    /// cross-referenced against `~/.claude/plugins/installed_plugins.json`.
+    /// Plugins are user-global (vs skills, which can be project-local
+    /// too), so this is the same set for every Claude session on a
+    /// given host.  Empty for non-Claude vendors.
+    #[serde(default)]
+    pub loaded_plugins: Vec<String>,
     /// Tool-use frequency over the lifetime of this session — top
     /// tools by call count.  Populated by the vendor enricher;
     /// surfaced in the detail popup as `tools: Bash 47 · Edit 23 · …`.

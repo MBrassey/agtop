@@ -260,6 +260,23 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
                     (w as usize).saturating_sub(28)))),
             ]));
         }
+        // Plugins are user-global, resolved from
+        // ~/.claude/settings.json (enabledPlugins map) intersected
+        // with ~/.claude/plugins/installed_plugins.json.  Same set
+        // for every Claude row in the snapshot.
+        if a.loaded_plugins.is_empty() {
+            lines.push(Line::from(vec![
+                lab("plugins"),
+                dim("0 enabled — `/plugin marketplace add` to install".to_string()),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                lab("plugins"),
+                val(format!("{} enabled", a.loaded_plugins.len()), theme::c_spawn()),
+                dim(format!("  {}", shorten(&a.loaded_plugins.join(", "),
+                    (w as usize).saturating_sub(28)))),
+            ]));
+        }
     }
     if a.subagents > 0 {
         lines.push(Line::from(vec![lab("subagents"),

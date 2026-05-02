@@ -357,6 +357,7 @@ impl Collector {
                 context_used: 0,
                 context_limit: 0,
                 loaded_skills: Vec::new(),
+                loaded_plugins: Vec::new(),
                 tool_counts: Vec::new(),
                 ppid_name: proc_::read_comm(stat.ppid)
                     .map(|s| crate::format::sanitize_control(&s))
@@ -667,6 +668,13 @@ impl Collector {
             // tick; also gracefully empty for non-Claude vendors.
             if a.label == "claude" {
                 a.loaded_skills = crate::skills::skills_for_cwd(&a.cwd);
+                // Plugin enumeration is host-global (not cwd-scoped),
+                // so the result is identical for every Claude row in
+                // a snapshot.  Caching it would save a tiny amount of
+                // JSON parsing per tick — not worth the invalidation
+                // complexity (settings.json can change while agtop
+                // runs).
+                a.loaded_plugins = crate::plugins::enabled_plugins();
             }
         }
 
