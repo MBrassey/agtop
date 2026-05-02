@@ -106,15 +106,41 @@ EOF
     exit 1
   fi
 
+  # Resolve the Launchpad username from PPA_TARGET so the SFTP
+  # login below matches your account.  Format: ppa:<user>/<archive>.
+  ppa_target_default="${PPA_TARGET:-ppa:mbrassey/agtop}"
+  lp_user="$(echo "$ppa_target_default" | sed 's/^ppa://;s|/.*||')"
+  ssh_key_default="$HOME/.ssh/id_ed25519"
+  [ -f "$ssh_key_default" ] || ssh_key_default="$HOME/.ssh/id_rsa"
+  ssh_key="${PPA_SSH_KEY:-$ssh_key_default}"
+  if [ ! -f "$ssh_key" ]; then
+    cat >&2 <<EOF
+==> No SSH private key found at $ssh_key.
+
+Launchpad's PPA upload endpoint requires SFTP (anonymous FTP is
+unreliable / blocked on many networks).  Generate a key:
+
+  ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519
+
+then upload the public half at
+  https://launchpad.net/people/+me/+editsshkeys
+
+and re-run.  Or override the path with PPA_SSH_KEY=/path/to/key.
+EOF
+    exit 1
+  fi
+
   uid=$(id -u); gid=$(id -g)
   exec "$engine" run --rm -it \
     -v "$root":/work \
     -v "$secret_export":/secret-key.gpg:ro \
     -v "$pubkey_export":/public-key.gpg:ro \
+    -v "$ssh_key":/lp-ssh-key:ro \
     -e DEBEMAIL="$email" \
     -e DEBFULLNAME="${DEBFULLNAME:-Matt Brassey}" \
-    -e PPA_TARGET="${PPA_TARGET:-ppa:mbrassey/agtop}" \
+    -e PPA_TARGET="$ppa_target_default" \
     -e PPA_REVISION="${PPA_REVISION:-1}" \
+    -e LP_USER="$lp_user" \
     -e IN_PPA_CONTAINER=1 \
     -w /work \
     "ubuntu:${series}" \
@@ -143,6 +169,27 @@ allow-loopback-pinentry
 AGENT
       gpg --batch --import /public-key.gpg >/dev/null 2>&1
       gpg --batch --pinentry-mode loopback --import /secret-key.gpg >/dev/null 2>&1
+      # SSH key for SFTP upload to Launchpad.  Copy the read-only
+      # mounted private key into a writable, root-owned location
+      # because ssh refuses keys with permissive permissions or
+      # foreign uids.
+      mkdir -p /root/.ssh
+      cp /lp-ssh-key /root/.ssh/id_ed25519
+      chown -R root:root /root/.ssh
+      chmod 700 /root/.ssh
+      chmod 600 /root/.ssh/id_ed25519
+      ssh-keyscan -t rsa,ecdsa,ed25519 ppa.launchpad.net 2>/dev/null > /root/.ssh/known_hosts
+      # Override the default ppa: target to use SFTP — anonymous
+      # FTP to ppa.launchpad.net is firewalled on many networks
+      # and Launchpad has been pushing users to SFTP for years.
+      cat > /root/.dput.cf <<DPUT
+[ppa]
+fqdn = ppa.launchpad.net
+method = sftp
+incoming = ~%(ppa)s/ubuntu/
+login = ${LP_USER}
+allow_unsigned_uploads = 0
+DPUT
       # Mark the imported key ultimately trusted so debsign doesn't
       # bail on trust depth.
       keyfp=\$(gpg --list-secret-keys --with-colons '${email_lit:-${DEBEMAIL:-matt@brassey.io}}' | awk -F: '/^fpr:/{print \$10; exit}')
