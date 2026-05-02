@@ -131,13 +131,15 @@ EOF
   fi
 
   uid=$(id -u); gid=$(id -g)
-  # PPA_NETWORK=host forces the container onto the host's network
-  # namespace.  Use this when a VPN on the host doesn't capture
-  # docker bridge traffic — symptom: ssh-keyscan / scp time out
-  # from the container even though they work from the host.
-  net_flag=()
-  if [ "${PPA_NETWORK:-bridge}" = "host" ]; then
-    net_flag=(--net=host)
+  # Default to --net=host so the container shares the host's
+  # network namespace — including IPv6 routing.  Docker's default
+  # bridge has no IPv6, but Launchpad's PPA SSH endpoint is
+  # responsive on IPv6 even when the IPv4 endpoint is shadowbanned
+  # (different anti-abuse rate-limit per family).  PPA_NETWORK=bridge
+  # to opt out (rare; only useful when host network has issues).
+  net_flag=(--net=host)
+  if [ "${PPA_NETWORK:-host}" = "bridge" ]; then
+    net_flag=()
   fi
   exec "$engine" run --rm -it \
     "${net_flag[@]}" \
@@ -262,6 +264,16 @@ AGENT
       # paramiko handles the upload reliably once Launchpad's
       # SSH banner is responding.
       apt-get install -y -qq openssh-client python3-paramiko >/dev/null 2>&1 || true
+      # Critical: pin to ppa.launchpad.net's IPv6 endpoint.
+      # Launchpad's IPv4 (185.125.190.80) currently silently drops
+      # connections from this network's IP range (some kind of
+      # rate-limit / shadowban that only applies to v4), but the
+      # IPv6 endpoint (2620:2d:4000:1::81) accepts and serves the
+      # SSH banner instantly.  paramiko prefers v4 by default;
+      # putting only the v6 IP in /etc/hosts overrides DNS and
+      # forces sftp through v6.
+      sed -i '/ppa\\.launchpad\\.net/d' /etc/hosts
+      echo '2620:2d:4000:1::81 ppa.launchpad.net' >> /etc/hosts
       cat > /root/.dput.cf <<DPUT
 [ppa]
 fqdn = ppa.launchpad.net
