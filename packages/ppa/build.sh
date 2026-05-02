@@ -215,14 +215,34 @@ AGENT
       # Override the default ppa: target to use SFTP — anonymous
       # FTP to ppa.launchpad.net is firewalled on many networks
       # and Launchpad has been pushing users to SFTP for years.
+      # dput method = scp uses OpenSSH's /usr/bin/scp, which has
+      # gentler banner / connection timeouts than paramiko's sftp
+      # implementation.  Pre-2.4.x we used sftp and hit
+      # 'Error reading SSH protocol banner' on networks that pass
+      # TCP but slow-walk the actual SSH negotiation (corporate
+      # DPI / consumer-grade NAT).  scp also respects
+      # ServerAliveInterval from ~/.ssh/config so long uploads
+      # don't get reaped.
+      apt-get install -y -qq openssh-client >/dev/null 2>&1 || true
       cat > /root/.dput.cf <<DPUT
 [ppa]
 fqdn = ppa.launchpad.net
-method = sftp
+method = scp
 incoming = ~%(ppa)s/ubuntu/
 login = \${LP_USER}
 allow_unsigned_uploads = 0
 DPUT
+      cat > /root/.ssh/config <<'SSHCFG'
+Host ppa.launchpad.net
+    User \${LP_USER}
+    IdentityFile /root/.ssh/id_ed25519
+    StrictHostKeyChecking no
+    UserKnownHostsFile /root/.ssh/known_hosts
+    ServerAliveInterval 30
+    ServerAliveCountMax 60
+    ConnectTimeout 30
+SSHCFG
+      chmod 600 /root/.ssh/config
       echo \"==> Re-entering build.sh inside container\"
       ./packages/ppa/build.sh '${series}'
     "
