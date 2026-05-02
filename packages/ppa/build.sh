@@ -131,7 +131,16 @@ EOF
   fi
 
   uid=$(id -u); gid=$(id -g)
+  # PPA_NETWORK=host forces the container onto the host's network
+  # namespace.  Use this when a VPN on the host doesn't capture
+  # docker bridge traffic — symptom: ssh-keyscan / scp time out
+  # from the container even though they work from the host.
+  net_flag=()
+  if [ "${PPA_NETWORK:-bridge}" = "host" ]; then
+    net_flag=(--net=host)
+  fi
   exec "$engine" run --rm -it \
+    "${net_flag[@]}" \
     -v "$root":/work \
     -v "$secret_export":/secret-key.gpg:ro \
     -v "$pubkey_export":/public-key.gpg:ro \
