@@ -39,20 +39,29 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            devscripts debhelper dh-cargo lintian \
+            devscripts debhelper lintian \
             cargo rustc build-essential
 
-      - name: Stage upstream + debian/
+      - name: Stage upstream + vendor crates + debian/
         run: |
           version="$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)"
           echo "VERSION=$version" >> "$GITHUB_ENV"
           mkdir -p /tmp/build
           git archive --format=tar HEAD | tar -C /tmp/build -xf -
           mv /tmp/build "/tmp/agtop-$version"
+          # Mirror packages/ppa/build.sh: vendor every crate into
+          # the upstream tree so the source is self-contained for
+          # network-isolated PPA builders.
+          ( cd "/tmp/agtop-$version" && \
+              rm -rf debian && \
+              mkdir -p .cargo && \
+              cargo vendor --locked vendor/ > .cargo/config.toml 2>/dev/null )
           tar --owner=0 --group=0 --numeric-owner \
-              --exclude='agtop-'"$version"'/debian' \
               -czf "/tmp/agtop_${version}.orig.tar.gz" \
               -C /tmp "agtop-$version"
+          # Re-overlay debian/ for the package build itself.
+          git archive --format=tar HEAD debian | \
+              tar -C "/tmp/agtop-$version" -xf -
 
       - name: Build source package
         run: |
