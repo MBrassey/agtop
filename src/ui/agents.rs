@@ -243,9 +243,14 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(table, body_area, &mut app.agents_state);
 
     if total_rows > inner.height as usize {
+        // content_length = (max_scroll + 1) so thumb reaches the
+        // very bottom of the track when the last row is at the
+        // bottom of the viewport.  See popup.rs for the math.
+        let viewport_h = inner.height as usize;
+        let max_scroll = total_rows.saturating_sub(viewport_h);
         let mut sbs = ScrollbarState::default()
-            .content_length(total_rows)
-            .viewport_content_length(inner.height as usize)
+            .content_length(max_scroll.saturating_add(1))
+            .viewport_content_length(viewport_h)
             .position(app.agents_state.offset());
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)

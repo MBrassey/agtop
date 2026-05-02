@@ -533,8 +533,18 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
     // current top-row as position; the math then matches the actual
     // viewport-over-content fraction the user perceives.
     if max_scroll > 0 {
+        // ratatui-widgets 0.3.0 Scrollbar render math:
+        //   max_position = content_length - 1
+        //   max_viewport_position = max_position + viewport_length
+        //   thumb_end = (position + viewport) * track / max_viewport_position
+        // For the thumb to land at the *very bottom* when scroll is
+        // at end, max_position must equal max_scroll (i.e. content_length
+        // = max_scroll + 1, NOT total_rows).  Pre-2.4.6 we passed
+        // total_rows here so position=max_scroll only got us
+        // ~total/(total+viewport) of the way down — visible "thumb
+        // never reaches bottom" effect.
         let mut sbs = ScrollbarState::default()
-            .content_length(total_rows as usize)
+            .content_length((max_scroll as usize).saturating_add(1))
             .viewport_content_length(viewport as usize)
             .position(scroll as usize);
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -728,7 +738,7 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &mut App) {
     );
     if max_scroll > 0 {
         let mut sbs = ScrollbarState::default()
-            .content_length(total_rows as usize)
+            .content_length((max_scroll as usize).saturating_add(1))
             .viewport_content_length(viewport as usize)
             .position(scroll as usize);
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)

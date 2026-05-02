@@ -614,8 +614,11 @@ pub(super) fn draw_sessions(f: &mut Frame, area: Rect, snap: &Snapshot, scroll: 
     f.render_widget(p, body);
 
     if max_scroll > 0 {
+        // content_length = max_scroll + 1 so the thumb actually
+        // reaches the bottom when scroll is at end (see popup.rs
+        // for the full ratatui-widgets math derivation).
         let mut sbs = ScrollbarState::default()
-            .content_length(total_rows as usize)
+            .content_length((max_scroll as usize).saturating_add(1))
             .viewport_content_length(inner.height as usize)
             .position(*scroll as usize);
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
