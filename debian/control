@@ -4,8 +4,8 @@ Priority: optional
 Maintainer: Matt Brassey <matt@brassey.io>
 Build-Depends:
  debhelper-compat (= 13),
- cargo (>= 1.80),
- rustc (>= 1.80),
+ cargo,
+ rustc,
 Standards-Version: 4.7.0
 Homepage: https://github.com/MBrassey/agtop
 Vcs-Git: https://github.com/MBrassey/agtop.git

@@ -96,7 +96,7 @@ git archive --format=tar HEAD debian | (cd "$src_dir" && tar -xf -)
 # Source-only build, sign with GPG.  -sa forces inclusion of the
 # .orig.tar.gz on every upload (Launchpad rejects subsequent
 # uploads that omit it for a brand-new ${ppa_version}).
-( cd "$src_dir" && debuild -S -sa )
+( cd "$src_dir" && debuild -S -sa -d )
 
 changes="${build_dir}/agtop_${ppa_version}_source.changes"
 [ -f "$changes" ] || { echo "expected $changes — debuild output mismatch"; ls "$build_dir"; exit 1; }
