@@ -244,11 +244,23 @@ jobs:
           git clone ssh://aur@aur.archlinux.org/agtop.git aur-repo
           cd aur-repo
           cp ../PKGBUILD.in PKGBUILD
-          # Rewrite source line to fetch from GH archive, stamp real sha256.
-          # \\\${pkgver} stays literal (PKGBUILD-side variable); \${SHA256}
-          # and \${VERSION} substitute here from the outer GH Actions step.
+          # Rewrite pkgver, pkgrel, source, and sha256sums.  Pre-2.4.3
+          # this step skipped pkgver entirely, which left the AUR repo
+          # forever pinned to whatever literal pkgver= was committed
+          # in packages/pacman/PKGBUILD on disk (2.3.9), while the
+          # sha256 was bumped to match the new tarball — every release
+          # shipped a broken AUR PKGBUILD that failed integrity check.
+          # \\\${pkgver} stays literal in the source URL so PKGBUILD's
+          # own variable substitution drives the URL; \${VERSION} and
+          # \${SHA256} substitute here from the outer GH Actions step.
+          sed -i "s|^pkgver=.*|pkgver=${VERSION}|" PKGBUILD
+          sed -i "s|^pkgrel=.*|pkgrel=1|" PKGBUILD
           sed -i 's|^source=.*|source=("agtop-\${pkgver}.tar.gz::https://github.com/mbrassey/agtop/archive/v\${pkgver}.tar.gz")|' PKGBUILD
           sed -i "s|^sha256sums=.*|sha256sums=('${SHA256}')|" PKGBUILD
+          # Sanity check: fail loud if any of the three rewrites
+          # didn't take.  Defends against future PKGBUILD reformat.
+          grep -q "^pkgver=${VERSION}\$"          PKGBUILD || { echo "pkgver rewrite failed"; exit 1; }
+          grep -q "^sha256sums=('${SHA256}')\$"   PKGBUILD || { echo "sha256 rewrite failed"; exit 1; }
           makepkg --printsrcinfo > .SRCINFO
           git config user.name  'mbrassey'
           git config user.email 'matt@brassey.io'
