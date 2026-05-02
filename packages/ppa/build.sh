@@ -405,13 +405,90 @@ changes="${build_dir}/agtop_${ppa_version}_source.changes"
 
 echo "==> Uploading to ${ppa}"
 if [ "${PPA_NO_UPLOAD:-0}" = "1" ]; then
-  echo "==> PPA_NO_UPLOAD=1 — skipping dput.  Signed source pkg artefacts:"
+  echo "==> PPA_NO_UPLOAD=1 — skipping upload.  Signed source pkg artefacts:"
   ls "$build_dir" | sed 's/^/      /'
-  echo "    Copy them off the host and run:"
-  echo "      dput ${ppa} agtop_*_source.changes"
-  echo "    from a host that can reach Launchpad over SFTP."
+  # Persist artefacts to the host-visible /work mount so they
+  # survive the container's --rm cleanup.
+  mkdir -p /work/dist-ppa
+  cp -av "$build_dir"/* /work/dist-ppa/ | sed 's/^/      /'
+  echo "    Saved to /work/dist-ppa (host: \$ROOT/dist-ppa)."
+  echo "    Upload from any host with v6 connectivity:"
+  echo "      dput ${ppa} dist-ppa/agtop_*_source.changes"
 else
-  dput "${ppa}" "${changes}"
+  echo "==> Uploading via direct paramiko sftp (forces IPv6 socket)"
+  # dput-ng's 'sftp' method calls paramiko via paramiko.Transport()
+  # with the *hostname* string; paramiko then runs getaddrinfo which
+  # picks v4 first by default, hitting Launchpad's banned v4
+  # endpoint.  Override by giving paramiko a pre-connected v6
+  # socket so it skips name resolution entirely.
+  python3 - "${changes}" "${ppa}" <<'PY'
+import os, sys, socket, paramiko, re, hashlib, time
+
+changes_path, ppa_target = sys.argv[1], sys.argv[2]
+# ppa_target = ppa:user/archive
+m = re.match(r'^ppa:([^/]+)/([^/]+)$', ppa_target)
+if not m:
+    print(f"bad PPA target: {ppa_target}"); sys.exit(2)
+user, archive = m.group(1), m.group(2)
+
+# Parse the .changes file for the list of files to upload.
+base_dir = os.path.dirname(os.path.abspath(changes_path))
+with open(changes_path) as f:
+    body = f.read()
+files = []
+in_files = False
+for line in body.splitlines():
+    if line.startswith("Files:"):
+        in_files = True; continue
+    if in_files:
+        if line and not line.startswith(" "):
+            in_files = False; continue
+        toks = line.split()
+        if len(toks) >= 5: files.append(toks[-1])
+files.append(os.path.basename(changes_path))
+files = sorted(set(files))
+print("files:", files)
+
+# Pre-resolve to IPv6 address ourselves; pass a socket to Transport.
+host = "ppa.launchpad.net"
+print(f"resolving {host} (IPv6 only)…")
+ai = socket.getaddrinfo(host, 22, socket.AF_INET6, socket.SOCK_STREAM)
+addr = ai[0][4]
+print(f"  → {addr}")
+sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+sock.settimeout(60)
+sock.connect(addr)
+print("  TCP connected, starting SSH transport")
+
+t = paramiko.Transport(sock)
+t.banner_timeout = 60
+t.start_client(timeout=60)
+print(f"  remote SSH version: {t.remote_version}")
+
+# Auth via the user's private key (id_ed25519 was copied to /root/.ssh).
+key_path = os.path.expanduser("~/.ssh/id_ed25519")
+key = paramiko.Ed25519Key.from_private_key_file(key_path)
+t.auth_publickey(user, key)
+print("  authenticated")
+
+sftp = paramiko.SFTPClient.from_transport(t)
+remote_dir = f"~{user}/{archive}/ubuntu"
+# SFTP doesn't expand ~, but Launchpad's home is the chroot root.
+# Use the absolute incoming path we know: /<user>/<archive>/ubuntu/
+# Actually Launchpad's sftpd lands you in the right pwd already.
+print("  remote pwd:", sftp.normalize("."))
+
+uploaded = 0
+for f in files:
+    local = os.path.join(base_dir, f)
+    if not os.path.exists(local):
+        print(f"  ! missing {local}"); continue
+    print(f"  → {f} ({os.path.getsize(local)} bytes)")
+    sftp.put(local, f)
+    uploaded += 1
+print(f"==> Uploaded {uploaded} file(s) to {ppa_target}")
+sftp.close(); t.close(); sock.close()
+PY
 fi
 
 echo "==> Done.  Watch the build at:"
