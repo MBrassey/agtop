@@ -167,8 +167,17 @@ GPG
       cat > /root/.gnupg/gpg-agent.conf <<'AGENT'
 allow-loopback-pinentry
 AGENT
+      # Public-key import is unconditionally batch-clean.
       gpg --batch --import /public-key.gpg >/dev/null 2>&1
-      gpg --batch --pinentry-mode loopback --import /secret-key.gpg >/dev/null 2>&1
+      # Secret-key import:
+      #   - encrypted exports need the passphrase to decrypt during
+      #     import.  --batch + loopback without --passphrase-fd dies
+      #     silently.
+      #   - drop --batch so pinentry-loopback prompts on the
+      #     container's tty.  User types passphrase once.
+      #   - keep stderr visible so a failure isn't swallowed.
+      echo \"==> Importing signing key into container gpg (passphrase prompt incoming)\"
+      gpg --pinentry-mode loopback --import /secret-key.gpg
       # SSH key for SFTP upload to Launchpad.  Copy the read-only
       # mounted private key into a writable, root-owned location
       # because ssh refuses keys with permissive permissions or
