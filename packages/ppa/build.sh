@@ -92,9 +92,13 @@ EOF
   secret_export="$(mktemp -t agtop-ppa-key.XXXXXX.gpg)"
   pubkey_export="$(mktemp -t agtop-ppa-pub.XXXXXX.gpg)"
   trap 'rm -f "$secret_export" "$pubkey_export"' EXIT
-  gpg --batch --yes --pinentry-mode loopback \
-      --export-secret-keys "$email" > "$secret_export"
-  gpg --batch --yes --export "$email" > "$pubkey_export"
+  # Drop --batch so gpg-agent can prompt the user for the key
+  # passphrase via the host's pinentry (graphical or curses).  Once
+  # entered, the agent caches the passphrase for subsequent uses
+  # in this run + the configured cache-ttl window.
+  echo "==> Exporting signing key for '$email' from host gpg"
+  gpg --yes --export-secret-keys "$email" > "$secret_export"
+  gpg --yes --export "$email" > "$pubkey_export"
   if ! [ -s "$secret_export" ]; then
     echo "==> gpg --export-secret-keys produced an empty file for '$email'."
     echo "    Likely: the key has no passphrase set OR a smartcard /"
