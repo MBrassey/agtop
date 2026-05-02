@@ -272,8 +272,11 @@ AGENT
       # SSH banner instantly.  paramiko prefers v4 by default;
       # putting only the v6 IP in /etc/hosts overrides DNS and
       # forces sftp through v6.
-      sed -i '/ppa\\.launchpad\\.net/d' /etc/hosts
-      echo '2620:2d:4000:1::81 ppa.launchpad.net' >> /etc/hosts
+      # /etc/hosts is a bind-mount in docker; sed -i can't rename
+      # the file (EBUSY).  Read → filter → write in place via cat.
+      grep -v 'ppa\\.launchpad\\.net' /etc/hosts > /tmp/hosts.new || true
+      echo '2620:2d:4000:1::81 ppa.launchpad.net' >> /tmp/hosts.new
+      cat /tmp/hosts.new > /etc/hosts
       cat > /root/.dput.cf <<DPUT
 [ppa]
 fqdn = ppa.launchpad.net
