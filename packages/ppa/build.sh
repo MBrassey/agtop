@@ -256,19 +256,16 @@ AGENT
       # Override the default ppa: target to use SFTP — anonymous
       # FTP to ppa.launchpad.net is firewalled on many networks
       # and Launchpad has been pushing users to SFTP for years.
-      # dput method = scp uses OpenSSH's /usr/bin/scp, which has
-      # gentler banner / connection timeouts than paramiko's sftp
-      # implementation.  Pre-2.4.x we used sftp and hit
-      # 'Error reading SSH protocol banner' on networks that pass
-      # TCP but slow-walk the actual SSH negotiation (corporate
-      # DPI / consumer-grade NAT).  scp also respects
-      # ServerAliveInterval from ~/.ssh/config so long uploads
-      # don't get reaped.
-      apt-get install -y -qq openssh-client >/dev/null 2>&1 || true
+      # dput-ng's scp uploader on noble is broken
+      # (find_username() signature mismatch — TypeError raised
+      # before any network call).  Use sftp method instead;
+      # paramiko handles the upload reliably once Launchpad's
+      # SSH banner is responding.
+      apt-get install -y -qq openssh-client python3-paramiko >/dev/null 2>&1 || true
       cat > /root/.dput.cf <<DPUT
 [ppa]
 fqdn = ppa.launchpad.net
-method = scp
+method = sftp
 incoming = ~%(ppa)s/ubuntu/
 login = \${LP_USER}
 allow_unsigned_uploads = 0
