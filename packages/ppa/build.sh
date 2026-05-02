@@ -151,6 +151,7 @@ EOF
     -e PPA_REVISION="${PPA_REVISION:-1}" \
     -e LP_USER="$lp_user" \
     -e PPA_NO_UPLOAD="${PPA_NO_UPLOAD:-0}" \
+    -e GPG_PASSPHRASE="${GPG_PASSPHRASE:-}" \
     -e IN_PPA_CONTAINER=1 \
     -w /work \
     "ubuntu:${series}" \
@@ -176,21 +177,33 @@ pinentry-mode loopback
 GPG
       cat > /root/.gnupg/gpg-agent.conf <<'AGENT'
 allow-loopback-pinentry
+allow-preset-passphrase
+default-cache-ttl 7200
+max-cache-ttl 7200
 AGENT
       # Public-key import is unconditionally batch-clean.
       echo \"==> Importing public key\"
       gpg --batch --import /public-key.gpg
-      echo \"==> Importing signing key into container gpg (passphrase prompt incoming)\"
-      # gpg --import returns non-zero if any sub-step fails (e.g.
-      # 'error sending to agent: Bad passphrase' during the agent
-      # cache step) even when the key blob successfully landed on
-      # disk.  We don't care here — the key IS imported; debsign
-      # later will prompt for the passphrase again.  Continue past
-      # any non-zero exit.
-      gpg --pinentry-mode loopback --import /secret-key.gpg || true
-      # Restart gpg-agent to clear any stale 'Bad passphrase' cache
-      # so the next prompt at debsign time gets a clean slate.
-      gpgconf --kill gpg-agent 2>/dev/null || true
+      # If GPG_PASSPHRASE was forwarded from the host, use it for
+      # both import + every later signing op.  Otherwise fall back
+      # to interactive loopback prompts.
+      if [ -n \"\${GPG_PASSPHRASE:-}\" ]; then
+        echo \"==> Importing signing key (passphrase from \$GPG_PASSPHRASE env)\"
+        echo \"\$GPG_PASSPHRASE\" | gpg --batch --pinentry-mode loopback \
+          --passphrase-fd 0 --import /secret-key.gpg || true
+        # Cache the passphrase in gpg-agent for the rest of the
+        # container lifetime so debsign never prompts.
+        keygrip=\$(gpg --batch --with-colons --with-keygrip --list-secret-keys \
+                       \"\$DEBEMAIL\" | awk -F: '/^grp:/{print \$10; exit}')
+        if [ -n \"\$keygrip\" ]; then
+          /usr/lib/gnupg/gpg-preset-passphrase --preset --passphrase \
+            \"\$GPG_PASSPHRASE\" \"\$keygrip\" 2>/dev/null || true
+        fi
+      else
+        echo \"==> Importing signing key into container gpg (passphrase prompt incoming)\"
+        gpg --pinentry-mode loopback --import /secret-key.gpg || true
+        gpgconf --kill gpg-agent 2>/dev/null || true
+      fi
       echo \"==> Trust-marking imported key\"
       keyfp=\$(gpg --list-secret-keys --with-colons \"\$DEBEMAIL\" | awk -F: '/^fpr:/{print \$10; exit}')
       echo \"    fingerprint: \$keyfp\"
