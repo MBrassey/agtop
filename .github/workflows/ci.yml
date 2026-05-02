@@ -9,6 +9,11 @@ jobs:
   test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Hard cap.  Build + test on the slowest runner (Windows MSVC, cold
+    # cache) finishes in ~6m; 20m gives 3× slack.  The default 6h
+    # ceiling previously masked a real hang in writing_files Windows
+    # path-resolution for an entire afternoon — fail loud, fail fast.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -21,24 +26,33 @@ jobs:
         run: cargo build --release --locked
       - name: cargo test
         run: cargo test --release --locked
+        timeout-minutes: 5
       - name: cargo clippy
         run: cargo clippy --release --all-targets -- -D warnings
-        continue-on-error: true
       - name: --version smoke
         run: ./target/release/agtop${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
         shell: bash
       - name: --list-builtins smoke
         run: ./target/release/agtop${{ matrix.os == 'windows-latest' && '.exe' || '' }} --list-builtins
         shell: bash
+      - name: --json smoke
+        run: ./target/release/agtop${{ matrix.os == 'windows-latest' && '.exe' || '' }} --json --once | head -1
+        shell: bash
 
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      # rustfmt is informational — the codebase uses hand-aligned const
+      # tables and inline match-result patterns that rustfmt's default
+      # style flattens.  Continue-on-error keeps it as an annotation
+      # signal without blocking PRs on cosmetic churn.  Use a custom
+      # rustfmt.toml if/when the team agrees on a single style.
       - run: cargo fmt --all -- --check
         continue-on-error: true
 

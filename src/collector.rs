@@ -141,6 +141,13 @@ pub struct Collector {
     cpu_smooth: HashMap<u32, f64>,
     /// Per-pid CPU% history for the inline sparkline column.
     agent_cpu_hist: HashMap<u32, VecDeque<f64>>,
+    /// Per-agent rolling history of token deltas (tokens consumed
+    /// since the previous snapshot).  Powers the per-agent token-rate
+    /// sparkline in the detail popup.  `prev_tokens_per_pid` holds
+    /// the previous total so we can compute deltas without storing
+    /// every sample on the agent itself.
+    agent_tokens_hist: HashMap<u32, VecDeque<f64>>,
+    prev_tokens_per_pid: HashMap<u32, u64>,
     /// Per-pid (timestamp_ms, context_used) ring used to extrapolate
     /// time-to-compaction in the detail popup.  Same size cap as the
     /// CPU ring; entries are evicted when the pid exits.
@@ -189,6 +196,8 @@ impl Collector {
             prev_total: 0,
             cpu_smooth: HashMap::new(),
             agent_cpu_hist: HashMap::new(),
+            agent_tokens_hist: HashMap::new(),
+            prev_tokens_per_pid: HashMap::new(),
             agent_ctx_hist: HashMap::new(),
             agent_io_prev:  HashMap::new(),
             boot_time: proc_::read_boot_time(),
@@ -359,6 +368,7 @@ impl Collector {
                 in_flight_subagents: Vec::new(),
                 recent_activity: Vec::new(),
                 cpu_history: Vec::new(),
+                tokens_history: Vec::new(),
                 cpu: smoothed,
                 cpu_raw,
                 rss: rss_bytes,
@@ -678,9 +688,29 @@ impl Collector {
             if entry.len() >= PER_AGENT_HISTORY { entry.pop_front(); }
             entry.push_back(a.cpu);
             a.cpu_history = entry.iter().copied().collect();
+
+            // Token-rate history: delta vs previous total for this
+            // pid.  First observation seeds with 0 so the sparkline
+            // doesn't spike on initial sample.  Saturating_sub
+            // defends against vendor enrichers that occasionally
+            // re-emit a smaller running total (Codex resumes a
+            // session, header total is the new session only).
+            let prev = self.prev_tokens_per_pid.get(&a.pid).copied();
+            let delta = match prev {
+                Some(p) => a.tokens_total.saturating_sub(p) as f64,
+                None    => 0.0,
+            };
+            self.prev_tokens_per_pid.insert(a.pid, a.tokens_total);
+            let tok_entry = self.agent_tokens_hist.entry(a.pid)
+                .or_insert_with(|| VecDeque::with_capacity(PER_AGENT_HISTORY));
+            if tok_entry.len() >= PER_AGENT_HISTORY { tok_entry.pop_front(); }
+            tok_entry.push_back(delta);
+            a.tokens_history = tok_entry.iter().copied().collect();
         }
         // Drop entries for processes that disappeared.
         self.agent_cpu_hist.retain(|pid, _| live.contains(pid));
+        self.agent_tokens_hist.retain(|pid, _| live.contains(pid));
+        self.prev_tokens_per_pid.retain(|pid, _| live.contains(pid));
     }
 
     /// macOS / *BSD / Windows path: lean on sysinfo for process metadata.

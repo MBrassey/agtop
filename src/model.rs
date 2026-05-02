@@ -138,6 +138,14 @@ pub struct Agent {
     pub dangerous: bool,
     /// Recent CPU% samples for the inline sparkline (oldest → newest).
     pub cpu_history: Vec<f64>,
+    /// Recent per-tick token deltas (tokens consumed since previous
+    /// snapshot, oldest → newest).  Drives a per-agent token-rate
+    /// sparkline in the detail popup so users can see a session's
+    /// burn pattern over time without leaving the TUI.  Always
+    /// length `HISTORY` once the agent has been observed for that
+    /// many ticks; padded with leading zeros otherwise.
+    #[serde(default)]
+    pub tokens_history: Vec<f64>,
     pub cpu: f64,
     pub cpu_raw: f64,
     pub rss: u64,

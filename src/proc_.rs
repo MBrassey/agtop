@@ -132,7 +132,13 @@ pub fn read_reading_files(pid: u32, limit: usize) -> Vec<PathBuf> {
             || s.starts_with("anon_inode:") || s.starts_with("memfd:")
             || s.starts_with("dmabuf:")
             || s.ends_with(" (deleted)")
-            || s == "/dev/null" {
+            || s == "/dev/null"
+            // Skip /proc/* and /sys/* — agents poll /proc/<pid>/{stat,
+            // statm,status,...} every tick to monitor children, which
+            // floods the popup and buries the actually-interesting
+            // reads (project files, configs, transcripts).
+            || s.starts_with("/proc/")
+            || s.starts_with("/sys/") {
             continue;
         }
         out.push(target);
@@ -248,7 +254,13 @@ pub fn read_writing_files(pid: u32, limit: usize) -> Vec<PathBuf> {
             || s.starts_with("anon_inode:") || s.starts_with("memfd:")
             || s.starts_with("dmabuf:")
             || s.ends_with(" (deleted)")
-            || s == "/dev/null" {
+            || s == "/dev/null"
+            // Skip /proc/* and /sys/* — agents poll /proc/<pid>/{stat,
+            // statm,status,...} every tick to monitor children, which
+            // floods the popup and buries the actually-interesting
+            // reads (project files, configs, transcripts).
+            || s.starts_with("/proc/")
+            || s.starts_with("/sys/") {
             continue;
         }
         out.push(target);
