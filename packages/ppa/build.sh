@@ -212,6 +212,9 @@ AGENT
       fi
       gpg --list-secret-keys
 
+      if [ \"\${PPA_NO_UPLOAD:-0}\" = \"1\" ]; then
+        echo \"==> PPA_NO_UPLOAD=1 — skipping SSH / SFTP setup entirely\"
+      else
       echo \"==> Setting up SSH for SFTP upload\"
       # SSH key for SFTP upload to Launchpad.  Copy the read-only
       # mounted private key into a writable, root-owned location
@@ -280,6 +283,7 @@ Host ppa.launchpad.net
     AddressFamily inet
 SSHCFG
       chmod 600 /root/.ssh/config
+      fi
       echo \"==> Re-entering build.sh inside container\"
       ./packages/ppa/build.sh '${series}'
     "
