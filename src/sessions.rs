@@ -10,6 +10,14 @@ pub struct LiveAgentRef<'a> {
     pub pid: u32,
     pub cwd: &'a str,
     pub label: &'a str,
+    /// Process uptime in seconds.  Used by per-vendor enrichers to
+    /// pair multiple live PIDs in the same cwd against multiple
+    /// session-transcript files (newest pid → newest transcript).
+    /// Fixes a long-standing bug where parallel `claude` sessions
+    /// in the same cwd would non-deterministically lose their
+    /// session link to the agtop popup, depending on which pid
+    /// happened to win a HashMap slot first.
+    pub uptime_sec: u64,
 }
 
 pub struct SessionsResult {
