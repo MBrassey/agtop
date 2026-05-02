@@ -236,21 +236,23 @@ AGENT
       # OpenSSH then tries the IPv6 address, hits no-route, and either
       # times out or silently drops to nothing (depending on glibc /
       # gai.conf order).  Pin to A records.
+      # ssh-keyscan against ppa.launchpad.net is best-effort.
+      # Launchpad's Twisted SSH frontend often closes during
+      # version exchange (it's anti-abuse-aware), and our ssh
+      # config below uses StrictHostKeyChecking=no anyway, so an
+      # empty known_hosts is fine.  We still TRY because a
+      # populated known_hosts is better than relying on TOFU,
+      # but we don't make it fatal.
       timeout 10 ssh-keyscan -4 -t rsa,ecdsa,ed25519 ppa.launchpad.net \
-          > /root/.ssh/known_hosts 2>/tmp/keyscan-err || {
-        echo
-        echo \"==> ssh-keyscan failed.  Likely cause: outbound :22 blocked on this network.\"
-        echo \"    last stderr:\"
-        cat /tmp/keyscan-err | sed 's/^/      /'
-        echo \"    Workarounds:\"
-        echo \"      - try a different network (mobile hotspot often works)\"
-        echo \"      - use a VPN that allows :22 outbound\"
-        echo \"      - skip Launchpad upload entirely, build only:\"
-        echo \"          PPA_NO_UPLOAD=1 ./packages/ppa/build.sh ${series}\"
-        echo \"        (produces signed .changes you can dput from another host)\"
-        exit 1
-      }
-      echo \"    known_hosts populated (\$(wc -l < /root/.ssh/known_hosts) lines)\"
+          > /root/.ssh/known_hosts 2>/tmp/keyscan-err || true
+      if [ -s /root/.ssh/known_hosts ]; then
+        echo \"    known_hosts populated (\$(wc -l < /root/.ssh/known_hosts) lines)\"
+      else
+        echo \"    ssh-keyscan empty / failed — falling back to StrictHostKeyChecking=no for the upload\"
+        if [ -s /tmp/keyscan-err ]; then
+          sed 's/^/      /' /tmp/keyscan-err
+        fi
+      fi
       # Override the default ppa: target to use SFTP — anonymous
       # FTP to ppa.launchpad.net is firewalled on many networks
       # and Launchpad has been pushing users to SFTP for years.
