@@ -205,8 +205,13 @@ AGENT
       # ssh-keyscan needs to reach :22 on ppa.launchpad.net.
       # Bound to 10s so a firewalled network surfaces immediately
       # instead of hanging the whole script.
-      echo \"    ssh-keyscan ppa.launchpad.net (10s timeout)\"
-      timeout 10 ssh-keyscan -t rsa,ecdsa,ed25519 ppa.launchpad.net \
+      echo \"    ssh-keyscan ppa.launchpad.net (10s timeout, IPv4-only)\"
+      # -4 forces IPv4: docker's default bridge network has no IPv6
+      # routing, but DNS still returns AAAA records for ppa.launchpad.net.
+      # OpenSSH then tries the IPv6 address, hits no-route, and either
+      # times out or silently drops to nothing (depending on glibc /
+      # gai.conf order).  Pin to A records.
+      timeout 10 ssh-keyscan -4 -t rsa,ecdsa,ed25519 ppa.launchpad.net \
           > /root/.ssh/known_hosts 2>/tmp/keyscan-err || {
         echo
         echo \"==> ssh-keyscan failed.  Likely cause: outbound :22 blocked on this network.\"
@@ -241,7 +246,7 @@ incoming = ~%(ppa)s/ubuntu/
 login = \${LP_USER}
 allow_unsigned_uploads = 0
 DPUT
-      cat > /root/.ssh/config <<'SSHCFG'
+      cat > /root/.ssh/config <<SSHCFG
 Host ppa.launchpad.net
     User \${LP_USER}
     IdentityFile /root/.ssh/id_ed25519
@@ -250,6 +255,7 @@ Host ppa.launchpad.net
     ServerAliveInterval 30
     ServerAliveCountMax 60
     ConnectTimeout 30
+    AddressFamily inet
 SSHCFG
       chmod 600 /root/.ssh/config
       echo \"==> Re-entering build.sh inside container\"
