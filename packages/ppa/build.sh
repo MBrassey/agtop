@@ -108,6 +108,28 @@ EOF
         cp -a /host-gnupg /root/.gnupg
         chmod 700 /root/.gnupg
         find /root/.gnupg -type f -exec chmod 600 {} \\;
+        # Wipe stale lock files / agent sockets / scdaemon sockets
+        # / dirmngr sockets that cp -a inherited from the host's
+        # live gnupg dir.  Without this, keyboxd inside the
+        # container deadlocks waiting on a lock the host's
+        # gpg-agent (different process namespace, different pid)
+        # claims to hold.
+        find /root/.gnupg -name '*.lock'             -delete 2>/dev/null || true
+        find /root/.gnupg -name 'S.gpg-agent*'       -delete 2>/dev/null || true
+        find /root/.gnupg -name 'S.scdaemon'         -delete 2>/dev/null || true
+        find /root/.gnupg -name 'S.dirmngr'          -delete 2>/dev/null || true
+        find /root/.gnupg -name 'S.keyboxd'          -delete 2>/dev/null || true
+        # Force loopback pinentry so debsign can drive gpg without
+        # a tty-attached pinentry program.  passphrase still gets
+        # prompted on stdin via debsign's normal path.
+        cat > /root/.gnupg/gpg.conf <<'GPG'
+pinentry-mode loopback
+GPG
+        cat > /root/.gnupg/gpg-agent.conf <<'AGENT'
+allow-loopback-pinentry
+AGENT
+        # Kill any agent that may have spawned during the cp.
+        gpgconf --kill all 2>/dev/null || true
       fi
       ./packages/ppa/build.sh '${series}'
     "
