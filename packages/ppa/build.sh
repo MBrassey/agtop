@@ -141,6 +141,7 @@ EOF
     -e PPA_TARGET="$ppa_target_default" \
     -e PPA_REVISION="${PPA_REVISION:-1}" \
     -e LP_USER="$lp_user" \
+    -e PPA_NO_UPLOAD="${PPA_NO_UPLOAD:-0}" \
     -e IN_PPA_CONTAINER=1 \
     -w /work \
     "ubuntu:${series}" \
@@ -186,11 +187,31 @@ AGENT
       # because ssh refuses keys with permissive permissions or
       # foreign uids.
       mkdir -p /root/.ssh
+      echo \"    copying ssh key\"
       cp /lp-ssh-key /root/.ssh/id_ed25519
       chown -R root:root /root/.ssh
       chmod 700 /root/.ssh
       chmod 600 /root/.ssh/id_ed25519
-      ssh-keyscan -t rsa,ecdsa,ed25519 ppa.launchpad.net 2>/dev/null > /root/.ssh/known_hosts
+      # apt installs openssh-client implicitly via dput-ng, but
+      # ssh-keyscan needs to reach :22 on ppa.launchpad.net.
+      # Bound to 10s so a firewalled network surfaces immediately
+      # instead of hanging the whole script.
+      echo \"    ssh-keyscan ppa.launchpad.net (10s timeout)\"
+      timeout 10 ssh-keyscan -t rsa,ecdsa,ed25519 ppa.launchpad.net \
+          > /root/.ssh/known_hosts 2>/tmp/keyscan-err || {
+        echo
+        echo \"==> ssh-keyscan failed.  Likely cause: outbound :22 blocked on this network.\"
+        echo \"    last stderr:\"
+        cat /tmp/keyscan-err | sed 's/^/      /'
+        echo \"    Workarounds:\"
+        echo \"      - try a different network (mobile hotspot often works)\"
+        echo \"      - use a VPN that allows :22 outbound\"
+        echo \"      - skip Launchpad upload entirely, build only:\"
+        echo \"          PPA_NO_UPLOAD=1 ./packages/ppa/build.sh ${series}\"
+        echo \"        (produces signed .changes you can dput from another host)\"
+        exit 1
+      }
+      echo \"    known_hosts populated (\$(wc -l < /root/.ssh/known_hosts) lines)\"
       # Override the default ppa: target to use SFTP — anonymous
       # FTP to ppa.launchpad.net is firewalled on many networks
       # and Launchpad has been pushing users to SFTP for years.
@@ -308,7 +329,15 @@ changes="${build_dir}/agtop_${ppa_version}_source.changes"
 [ -f "$changes" ] || { echo "expected $changes — debuild output mismatch"; ls "$build_dir"; exit 1; }
 
 echo "==> Uploading to ${ppa}"
-dput "${ppa}" "${changes}"
+if [ "${PPA_NO_UPLOAD:-0}" = "1" ]; then
+  echo "==> PPA_NO_UPLOAD=1 — skipping dput.  Signed source pkg artefacts:"
+  ls "$build_dir" | sed 's/^/      /'
+  echo "    Copy them off the host and run:"
+  echo "      dput ${ppa} agtop_*_source.changes"
+  echo "    from a host that can reach Launchpad over SFTP."
+else
+  dput "${ppa}" "${changes}"
+fi
 
 echo "==> Done.  Watch the build at:"
 echo "    https://launchpad.net/~mbrassey/+archive/ubuntu/agtop/+packages"
