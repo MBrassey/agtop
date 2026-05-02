@@ -589,8 +589,19 @@ pub(super) fn draw_sessions(f: &mut Frame, area: Rect, snap: &Snapshot, scroll: 
         ]));
     }
 
-    let total = lines.len() as u16;
-    let max_scroll = total.saturating_sub(inner.height.saturating_sub(1));
+    // Wrap-aware row count: long task strings can wrap to two
+    // rendered rows on narrow panels.  Pre-2.4.5 we passed
+    // lines.len() to the scrollbar which gave the thumb the wrong
+    // size + position when wrapping kicked in.
+    let body_width = inner.width.saturating_sub(1).max(1) as usize;
+    let total_rows: u16 = lines.iter()
+        .map(|l| {
+            let len: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            if len == 0 { 1u16 }
+            else { (len.div_ceil(body_width)).min(u16::MAX as usize) as u16 }
+        })
+        .sum();
+    let max_scroll = total_rows.saturating_sub(inner.height);
     if *scroll > max_scroll { *scroll = max_scroll; }
 
     let body = Rect {
@@ -604,7 +615,7 @@ pub(super) fn draw_sessions(f: &mut Frame, area: Rect, snap: &Snapshot, scroll: 
 
     if max_scroll > 0 {
         let mut sbs = ScrollbarState::default()
-            .content_length(total as usize)
+            .content_length(total_rows as usize)
             .viewport_content_length(inner.height as usize)
             .position(*scroll as usize);
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)

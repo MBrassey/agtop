@@ -49,7 +49,7 @@ transcript preview.
 | Platform                       | Command                                |
 | ------------------------------ | -------------------------------------- |
 | Arch / CachyOS                 | `yay -S agtop`                         |
-| Debian / Ubuntu / Mint / Pop!_OS | apt source — see [below](#debian-ubuntu-apt-source) |
+| Debian / Ubuntu / Mint / Pop!_OS | apt source — see [below](#debian-and-ubuntu-apt-source) |
 | macOS                          | `brew install mbrassey/tap/agtop`      |
 | Windows                        | `winget install agtop`                 |
 | FreeBSD                        | `sudo pkg install agtop`               |
@@ -59,7 +59,7 @@ transcript preview.
 
 [rel]: https://github.com/MBrassey/agtop/releases/latest
 
-#### Debian / Ubuntu apt source
+#### Debian and Ubuntu apt source
 
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
@@ -321,14 +321,6 @@ flowchart LR
 ```
 
 </details>
-
-The SVG above is regenerated whenever the mermaid source changes:
-
-```sh
-npx -p @mermaid-js/mermaid-cli mmdc \
-  -i <(awk '/^```mermaid$/,/^```$/' README.md | sed '1d;$d') \
-  -o docs/architecture.svg -b transparent
-```
 
 ---
 

@@ -464,16 +464,35 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
         .map(|(i, _)| i as u16)
         .collect();
     app.popup_sections = sections;
-    app.popup_total_lines = lines.len() as u16;
+    // popup_total_lines should match the rendered-row extent the
+    // scroll keys act on — pre-2.4.5 this stored lines.len() (logical
+    // line count) which made the wheel-to-bottom-re-engages-tail
+    // detection in handle_mouse() trigger early on long popups.
+    // We compute it again post-render below in `total_rows`; this
+    // is set then, not here.
 
     // Clamp scroll so the user can't keep pressing j past the end
     // (would otherwise leave the popup blank — `End` on the keyboard
     // intentionally jumps to u16::MAX, we resolve it to the last
     // page-fitting offset here so it lands on the last line of
     // content rather than a blank window).
-    let total_lines = lines.len() as u16;
+    // Compute the rendered-row count post-wrap, NOT the logical line
+    // count.  Paragraph::scroll operates on rendered rows, so the
+    // scrollbar must measure the same surface or the thumb position
+    // drifts (long cwd / cmd / writing-files paths wrap to 2-3
+    // rendered rows; using lines.len() under-reported scroll extent
+    // and the thumb appeared stuck near the top).
+    let body_width = inner.width.saturating_sub(1).max(1) as usize;
+    let total_rows: u16 = lines.iter()
+        .map(|l| {
+            let len: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            if len == 0 { 1u16 }
+            else { (len.div_ceil(body_width)).min(u16::MAX as usize) as u16 }
+        })
+        .sum();
+    app.popup_total_lines = total_rows;
     let viewport = inner.height;
-    let max_scroll = total_lines.saturating_sub(viewport.saturating_sub(1));
+    let max_scroll = total_rows.saturating_sub(viewport);
     // Live-tail: when enabled and content overflows, snap to bottom
     // so newly-arrived recent_activity / writing_files entries stay
     // visible.  Disabled the moment the user scrolls up; re-enabled
@@ -507,13 +526,15 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
     );
 
     // Themed scrollbar — only render when content actually overflows.
-    // Track uses the dim border colour so it disappears into the
-    // popup edge; thumb uses the active border colour for contrast.
-    // Vertical bars from the box-drawing block range so it lines up
-    // with the rounded border style elsewhere.
+    // ScrollbarState semantics in ratatui-widgets 0.3.x: the thumb
+    // ratio is `position / max(content_length - viewport_content_length, 1)`
+    // and thumb size is `viewport / content_length` of the track.  So
+    // we pass the *full rendered-row count* as content_length and the
+    // current top-row as position; the math then matches the actual
+    // viewport-over-content fraction the user perceives.
     if max_scroll > 0 {
         let mut sbs = ScrollbarState::default()
-            .content_length(total_lines as usize)
+            .content_length(total_rows as usize)
             .viewport_content_length(viewport as usize)
             .position(scroll as usize);
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -679,9 +700,17 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &mut App) {
     // Help reuses the same scroll surface as the detail popup so the
     // scrollback covers both — `app.detail_scroll` is reset to 0 each
     // time either popup opens, which keeps the two from cross-talking.
-    let total_lines = lines.len() as u16;
+    // Wrap-aware row count, same approach as draw_detail.
+    let body_width = inner.width.saturating_sub(1).max(1) as usize;
+    let total_rows: u16 = lines.iter()
+        .map(|l| {
+            let len: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+            if len == 0 { 1u16 }
+            else { (len.div_ceil(body_width)).min(u16::MAX as usize) as u16 }
+        })
+        .sum();
     let viewport = inner.height;
-    let max_scroll = total_lines.saturating_sub(viewport.saturating_sub(1));
+    let max_scroll = total_rows.saturating_sub(viewport);
     if app.detail_scroll > max_scroll {
         app.detail_scroll = max_scroll;
     }
@@ -699,7 +728,7 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &mut App) {
     );
     if max_scroll > 0 {
         let mut sbs = ScrollbarState::default()
-            .content_length(total_lines as usize)
+            .content_length(total_rows as usize)
             .viewport_content_length(viewport as usize)
             .position(scroll as usize);
         let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)

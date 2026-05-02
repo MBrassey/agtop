@@ -70,11 +70,42 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
                 by_proj.push((a.project.clone(), vec![*a]));
             }
         }
-        // Order projects by best status -> name.
+        // Order projects according to the active sort key — the
+        // per-agent sort above already shaped each project's row
+        // order, but without this projects themselves stayed
+        // anchored in status-rank order and the user-visible effect
+        // of pressing `s` was hidden inside each group.  Smart mode
+        // keeps the original status-rank-then-name behaviour.
         by_proj.sort_by(|(p1, l1), (p2, l2)| {
-            let r1 = l1.first().map(|a| a.status.rank()).unwrap_or(99);
-            let r2 = l2.first().map(|a| a.status.rank()).unwrap_or(99);
-            r1.cmp(&r2).then(p1.cmp(p2))
+            use std::cmp::Ordering;
+            match app.sort {
+                Sort::Smart => {
+                    let r1 = l1.first().map(|a| a.status.rank()).unwrap_or(99);
+                    let r2 = l2.first().map(|a| a.status.rank()).unwrap_or(99);
+                    r1.cmp(&r2).then(p1.cmp(p2))
+                }
+                Sort::Cpu => {
+                    let c1: f64 = l1.iter().map(|a| a.cpu).sum();
+                    let c2: f64 = l2.iter().map(|a| a.cpu).sum();
+                    c2.partial_cmp(&c1).unwrap_or(Ordering::Equal).then(p1.cmp(p2))
+                }
+                Sort::Mem => {
+                    let m1: u64 = l1.iter().map(|a| a.rss).sum();
+                    let m2: u64 = l2.iter().map(|a| a.rss).sum();
+                    m2.cmp(&m1).then(p1.cmp(p2))
+                }
+                Sort::Tokens => {
+                    let t1: u64 = l1.iter().map(|a| a.tokens_total).sum();
+                    let t2: u64 = l2.iter().map(|a| a.tokens_total).sum();
+                    t2.cmp(&t1).then(p1.cmp(p2))
+                }
+                Sort::Uptime => {
+                    let u1: u64 = l1.iter().map(|a| a.uptime_sec).max().unwrap_or(0);
+                    let u2: u64 = l2.iter().map(|a| a.uptime_sec).max().unwrap_or(0);
+                    u2.cmp(&u1).then(p1.cmp(p2))
+                }
+                Sort::Agent => p1.cmp(p2),
+            }
         });
 
         for (proj, list) in by_proj {

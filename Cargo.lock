@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "agtop"
-version = "2.4.4"
+version = "2.4.5"
 dependencies = [
  "anyhow",
  "chrono",
