@@ -365,28 +365,14 @@ jobs:
             rm -rf "$HOME/.gnupg"
           fi
 
-  publish-snap:
-    name: Publish to Snap Store
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: snapcore/action-build@v1
-        id: snapcraft
-      - name: Push to Snap Store
-        env:
-          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
-        run: |
-          if [ -z "$SNAPCRAFT_STORE_CREDENTIALS" ]; then
-            echo "::warning::SNAPCRAFT_STORE_CREDENTIALS not set — skipping publish (snap built and attached as artifact above)"
-            exit 0
-          fi
-          sudo snap install snapcraft --classic
-          snapcraft upload --release=stable "${{ steps.snapcraft.outputs.snap }}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: agtop-snap
-          path: ${{ steps.snapcraft.outputs.snap }}
+  # Snap Store publish was retired in 2.4.2: GitHub Actions runners
+  # repeatedly hit `error: unable to contact snap store` during the
+  # `snap install lxd` bootstrap step inside snapcore/action-build,
+  # which was outside our control and burned ~4m per release.  apt
+  # repo at mbrassey.github.io/apt covers Debian / Ubuntu / Mint /
+  # Pop!_OS users with a signed .deb on every tag, so the channel
+  # we lost was redundant.  snap/snapcraft.yaml is kept around for
+  # users who still want to build locally with `snapcraft pack`.
 
   publish-homebrew:
     name: Publish to Homebrew tap
