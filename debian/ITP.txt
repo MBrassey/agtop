@@ -1,0 +1,53 @@
+From: Matt Brassey <matt@brassey.io>
+To: submit@bugs.debian.org
+Subject: ITP: agtop -- terminal UI for monitoring AI coding agents
+
+Package: wnpp
+Severity: wishlist
+Owner: Matt Brassey <matt@brassey.io>
+X-Debbugs-CC: debian-devel@lists.debian.org
+
+* Package name    : agtop
+  Version         : 2.4.2
+  Upstream Author : Matt Brassey <matt@brassey.io>
+* URL             : https://github.com/MBrassey/agtop
+* License         : MIT
+  Programming Lang: Rust
+  Description     : terminal UI for monitoring AI coding agents
+
+agtop is a top-like process monitor specialised for AI coding
+agents.  It detects Claude Code, OpenAI Codex, Block Goose, Aider,
+Google Gemini, Cursor, Continue, Opencode, Copilot CLI, and other
+agent CLIs out of the box, and reads each one's session transcript
+on disk to enrich its row with the current tool, model, in-flight
+subagents, cumulative token usage, estimated dollar cost,
+context-window fill, and loaded skills / plugins.
+
+The interactive TUI groups agents by project, supports filter and
+sort, opens a detail popup with a live transcript preview, and
+exposes machine-readable JSON output for piping into dashboards.
+A `--watch` mode emits one summary line per tick with optional
+CPU% / tokens-per-minute thresholds for unattended monitoring.
+
+No network access is performed at runtime — the cost estimator
+ships a snapshot of LiteLLM's community model price registry and
+can be overridden with --prices PATH.
+
+I plan to maintain this package in Debian.  Upstream is the same
+maintainer.  The package builds with dh-cargo against Debian's
+existing librust-*-dev archive crates; no new dependencies need
+introducing for it to land.  Packaging lives at
+https://github.com/MBrassey/agtop/tree/main/debian.
+
+Initial sponsor request will go through mentors.debian.net under
+the rust-team umbrella.
+
+Rationale for inclusion: AI coding agents (Claude Code, Codex,
+Aider, etc.) are increasingly common on developer workstations,
+yet `top`, `htop`, `btop` show only opaque `node` / `python` /
+`claude` rows with no insight into what those agents are actually
+doing.  agtop fills the gap with a small, fast Rust binary that
+reads the on-disk transcripts each agent already keeps and
+correlates them with /proc data — useful for the increasing
+number of Debian users who run several of these agents in parallel
+and need to monitor cost, context-fill, and runaway behaviour.

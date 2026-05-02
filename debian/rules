@@ -1,0 +1,21 @@
+#!/usr/bin/make -f
+# debian/rules for agtop — builds the Rust binary via dh-cargo.
+#
+# dh-cargo wires `cargo build --release` into the dh sequence and
+# resolves dependency crates against Debian's `librust-*-dev`
+# packages where available, vendored sources where not.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export RUSTFLAGS = -C link-arg=-Wl,-z,relro,-z,now
+
+%:
+	dh $@ --buildsystem=cargo
+
+# dh-cargo runs `cargo test` automatically during the build phase.
+# Suppress test execution if you ever need to land a packaging fix
+# without re-running the suite (lib + 22 unit tests today):
+#
+#   override_dh_auto_test:
+#       :
+#
+# Left commented because we want tests to run on the Debian builders.

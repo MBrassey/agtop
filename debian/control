@@ -1,0 +1,37 @@
+Source: agtop
+Section: utils
+Priority: optional
+Maintainer: Matt Brassey <matt@brassey.io>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-cargo (>= 25),
+ cargo:native (>= 0.66) | cargo (>= 0.66),
+ rustc:native (>= 1.74) | rustc (>= 1.74),
+Standards-Version: 4.7.0
+Homepage: https://github.com/MBrassey/agtop
+Vcs-Git: https://github.com/MBrassey/agtop.git
+Vcs-Browser: https://github.com/MBrassey/agtop
+Rules-Requires-Root: no
+
+Package: agtop
+Architecture: any
+Multi-Arch: foreign
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: terminal UI for monitoring AI coding agents
+ agtop is a top-like process monitor specialised for AI coding
+ agents.  It detects Claude Code, OpenAI Codex, Block Goose, Aider,
+ Google Gemini, Cursor, Continue, Opencode, Copilot CLI, and other
+ well-known agent CLIs out of the box, and reads each one's session
+ transcript on disk to enrich its row with the current tool, model,
+ in-flight subagents, cumulative token usage, estimated dollar
+ cost, context-window fill, and loaded skills / plugins.
+ .
+ The interactive TUI groups agents by project, supports filter and
+ sort, opens a detail popup with a live transcript preview, and
+ exposes machine-readable JSON output for piping into dashboards.
+ .
+ No network access is performed at runtime — the cost estimator
+ ships a snapshot of LiteLLM's community model price registry and
+ can be overridden with --prices PATH.

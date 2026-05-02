@@ -1,0 +1,88 @@
+name: Build PPA source package
+
+# Sanity-check that debian/ is correct on every push that touches
+# packaging or upstream code.  We build a source-only Debian
+# package (no binary build, no upload — Launchpad does that side)
+# and run `lintian` over the result.
+#
+# Actual PPA upload requires a private GPG key + Launchpad SSO
+# and is performed manually with `./packages/ppa/build.sh` from
+# the maintainer's host.  Automating the upload from CI would
+# need a long-lived signing key in repo secrets; rejected on
+# security grounds.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'debian/**'
+      - 'packages/ppa/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'debian/**'
+      - 'packages/ppa/**'
+
+permissions:
+  contents: read
+
+jobs:
+  source-package:
+    name: Source package + lintian
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Debian build tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            devscripts debhelper dh-cargo lintian \
+            cargo rustc build-essential
+
+      - name: Stage upstream + debian/
+        run: |
+          version="$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          mkdir -p /tmp/build
+          git archive --format=tar HEAD | tar -C /tmp/build -xf -
+          mv /tmp/build "/tmp/agtop-$version"
+          tar --owner=0 --group=0 --numeric-owner \
+              --exclude='agtop-'"$version"'/debian' \
+              -czf "/tmp/agtop_${version}.orig.tar.gz" \
+              -C /tmp "agtop-$version"
+
+      - name: Build source package
+        run: |
+          cd "/tmp/agtop-$VERSION"
+          # No GPG signing in CI — `-us -uc` builds an unsigned
+          # source package suitable for lintian + format checks.
+          # The maintainer's host signs for real uploads.
+          debuild -S -sa -us -uc
+
+      - name: Run lintian
+        run: |
+          cd /tmp
+          # Lintian fails on E: (errors) but allows W: (warnings)
+          # and I: (informational) for now — pedantic mode is
+          # documented in packages/ppa/README.md as the long-term
+          # bar for an official Debian upload.
+          lintian --info --display-info \
+                  --suppress-tags bad-distribution-in-changes-file \
+                  "agtop_${VERSION}-1_source.changes" || \
+            lintian --info --display-info \
+                    --suppress-tags bad-distribution-in-changes-file \
+                    /tmp/*.dsc
+
+      - name: Upload source package as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agtop-source-package
+          path: |
+            /tmp/agtop_*.dsc
+            /tmp/agtop_*.tar.*
+            /tmp/agtop_*_source.changes
+            /tmp/agtop_*_source.buildinfo
+          retention-days: 14
