@@ -1,21 +1,37 @@
 #!/usr/bin/make -f
-# debian/rules for agtop — builds the Rust binary via dh-cargo.
+# debian/rules for agtop — builds the Rust binary, offline, against
+# the vendored crates that packages/ppa/build.sh stages into the
+# orig.tar.gz before debuild runs.
 #
-# dh-cargo wires `cargo build --release` into the dh sequence and
-# resolves dependency crates against Debian's `librust-*-dev`
-# packages where available, vendored sources where not.
+# Launchpad PPA builders have NO network during the build phase, so
+# we cannot rely on dh-cargo's default behaviour of resolving deps
+# against crates.io or against Debian's `librust-*-dev` archive.
+# Instead the upstream tarball ships:
+#
+#   vendor/                 cargo-vendor output, full dep tree
+#   .cargo/config.toml      redirects crate fetches to vendor/
+#
+# `--frozen --offline` then make cargo refuse to touch the network.
 
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export RUSTFLAGS = -C link-arg=-Wl,-z,relro,-z,now
+export CARGO_NET_OFFLINE = true
 
 %:
-	dh $@ --buildsystem=cargo
+	dh $@
 
-# dh-cargo runs `cargo test` automatically during the build phase.
-# Suppress test execution if you ever need to land a packaging fix
-# without re-running the suite (lib + 22 unit tests today):
-#
-#   override_dh_auto_test:
-#       :
-#
-# Left commented because we want tests to run on the Debian builders.
+override_dh_auto_build:
+	cargo build --release --frozen --offline --locked
+
+override_dh_auto_test:
+	cargo test --release --frozen --offline --locked
+
+override_dh_auto_install:
+	install -Dm755 target/release/agtop \
+		debian/agtop/usr/bin/agtop
+	install -Dm644 README.md \
+		debian/agtop/usr/share/doc/agtop/README.md
+
+override_dh_auto_clean:
+	rm -rf target Cargo.lock.bak
+	dh_auto_clean

@@ -30,9 +30,17 @@ target.
 3. **Install host build tools** (Debian / Ubuntu / Mint / Pop!_OS)
 
    ```sh
-   sudo apt install devscripts dput-ng debhelper dh-cargo \
+   sudo apt install devscripts dput-ng debhelper \
         cargo rustc lintian build-essential
    ```
+
+   `dh-cargo` is intentionally NOT installed.  Launchpad PPA builders
+   have no network access during the build phase, so dh-cargo's
+   default behaviour (resolve crates against crates.io / Debian's
+   `librust-*-dev` archive) doesn't work for a private rust app.
+   `packages/ppa/build.sh` instead vendors every crate into the
+   `orig.tar.gz` via `cargo vendor`, and `debian/rules` drives
+   `cargo build --release --frozen --offline` directly.
 
 4. **Set maintainer identity**
 
@@ -50,12 +58,13 @@ target.
 dch -i
 git add debian/changelog && git commit -m "debian: changelog 2.4.x"
 
-# Build + upload for one Ubuntu series.
-./packages/ppa/build.sh noble        # 24.04 LTS
-
-# Repeat for older series if you want broad coverage.
-./packages/ppa/build.sh jammy        # 22.04 LTS
-./packages/ppa/build.sh oracular     # 24.10
+# Build + upload for one Ubuntu series.  Only noble (24.04) and
+# newer ship a recent-enough rustc for our crate tree (ratatui
+# 0.30 + crossterm 0.29 need rust >= 1.74).  jammy (22.04) ships
+# rust 1.61 and won't build — skip it.
+./packages/ppa/build.sh noble        # 24.04 LTS — supported
+./packages/ppa/build.sh oracular     # 24.10     — supported
+./packages/ppa/build.sh plucky       # 25.04     — supported
 ```
 
 The script:

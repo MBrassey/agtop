@@ -62,6 +62,22 @@ echo "==> Staging upstream + debian/ into ${src_dir}"
 git archive --format=tar HEAD | (mkdir -p "$src_dir" && cd "$src_dir" && tar -xf -)
 # Pristine upstream tarball — must NOT contain debian/.
 ( cd "$src_dir" && rm -rf debian )
+
+# Vendor every Cargo dep into the upstream tree.  Launchpad PPA
+# build farms are network-isolated; without vendored crates the
+# build fails with `cargo: failed to fetch` on the first dep.
+# The `.cargo/config.toml` redirects all crate fetches to the
+# vendor/ tree.  Both files are part of the orig.tar.gz so the
+# PPA builder sees a fully self-contained source.
+echo "==> Vendoring crates ($(grep -c '^\[\[package\]\]' Cargo.lock 2>/dev/null || echo '?') deps) into source"
+( cd "$src_dir" && \
+    mkdir -p .cargo && \
+    # NOTE: do NOT use --quiet — it suppresses the config-toml
+    # output `cargo vendor` writes to stdout, which is exactly
+    # what we capture into .cargo/config.toml.  Progress chatter
+    # goes to stderr, so let it through.
+    cargo vendor --locked vendor/ > .cargo/config.toml 2>/dev/null )
+
 ( cd "$build_dir" && tar --owner=0 --group=0 --numeric-owner -czf "agtop_${version}.orig.tar.gz" "agtop-${version}" )
 # Now overlay debian/ for the package build.
 git archive --format=tar HEAD debian | (cd "$src_dir" && tar -xf -)
