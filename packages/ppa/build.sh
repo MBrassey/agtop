@@ -106,7 +106,13 @@ EOF
       # chmod 700 so gpg stops emitting 'unsafe ownership' warnings.
       if [ -d /host-gnupg ] && [ ! -d /root/.gnupg ]; then
         cp -a /host-gnupg /root/.gnupg
+        # cp -a preserves host uid/gid, which inside the container
+        # appears as a stranger to root.  gpg refuses keyrings it
+        # doesn't own ('No secret key' / 'unsafe ownership').  Reown
+        # everything to root and restore canonical perms.
+        chown -R root:root /root/.gnupg
         chmod 700 /root/.gnupg
+        find /root/.gnupg -type d -exec chmod 700 {} \\;
         find /root/.gnupg -type f -exec chmod 600 {} \\;
         # Wipe stale lock files / agent sockets / scdaemon sockets
         # / dirmngr sockets that cp -a inherited from the host's
