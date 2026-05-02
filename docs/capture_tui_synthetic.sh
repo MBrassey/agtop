@@ -41,6 +41,31 @@ Synthetic skill manifest used only for the agtop demo screenshots.
 MD
 done
 
+# Seed the Claude Code plugin marketplace + enabled list so the
+# popup's "plugins" line resolves the same way it does on a real
+# host.  Mirrors the actual ~/.claude/plugins/installed_plugins.json
+# and ~/.claude/settings.json shape; agtop just intersects them.
+mkdir -p "$fake_home/.claude/plugins"
+cat > "$fake_home/.claude/plugins/installed_plugins.json" <<'JSON'
+{
+  "version": 2,
+  "plugins": {
+    "caveman@caveman": [{"scope":"user","version":"ef6050c5e184"}],
+    "frontend-design@claude-plugins-official": [{"scope":"user","version":"unknown"}],
+    "wakatime@wakatime": [{"scope":"user","version":"3.1.6"}]
+  }
+}
+JSON
+cat > "$fake_home/.claude/settings.json" <<'JSON'
+{
+  "enabledPlugins": {
+    "caveman@caveman": true,
+    "frontend-design@claude-plugins-official": true,
+    "wakatime@wakatime": true
+  }
+}
+JSON
+
 # Each record's `timestamp` is months-old on purpose: agtop reads the
 # first record as session_started_ms, and the popup tags `(resumed)`
 # whenever the session age exceeds process uptime by >60s.  The
