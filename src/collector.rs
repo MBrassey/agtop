@@ -578,7 +578,12 @@ impl Collector {
         }
 
         let live_refs: Vec<LiveAgentRef> = agents.iter()
-            .map(|a| LiveAgentRef { pid: a.pid, cwd: a.cwd.as_str(), label: a.label.as_str() })
+            .map(|a| LiveAgentRef {
+                pid: a.pid,
+                cwd: a.cwd.as_str(),
+                label: a.label.as_str(),
+                uptime_sec: a.uptime_sec,
+            })
             .collect();
         let merged = sessions::merge(vec![
             claude::summarise(&live_refs, now),

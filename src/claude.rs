@@ -390,19 +390,32 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
         return SessionsResult::empty();
     }
 
-    // Build the live-cwd → pid map keyed on the *forward-encoded*
+    // Build the live-cwd → pids map keyed on the *forward-encoded*
     // cwd (slashes → hyphens).  Claude Code's project-dir encoding
     // is lossy — `/home/u/foo-bar` and `/home/u/foo/bar` both
     // produce `-home-u-foo-bar`, so reverse-decoding is ambiguous.
     // Encoding-forward is the only correct match.
-    let mut encoded_cwd_to_pid: HashMap<String, u32> = HashMap::new();
+    //
+    // The map carries a Vec because multiple live `claude` PIDs
+    // can share a cwd (parallel sessions in the same project from
+    // different terminals).  Pre-2.4.4 agtop used a single-pid
+    // HashMap which non-deterministically dropped all-but-one PID
+    // depending on iteration order — the popup's "no Claude
+    // session found" message was a race condition, not a real
+    // missing session.  We sort each Vec by uptime ascending so the
+    // newest-spawned pid pairs with the newest-touched JSONL below.
+    let mut encoded_cwd_to_pids: HashMap<String, Vec<(u32, u64)>> = HashMap::new();
     for a in live_agents {
         if a.label == "claude" || a.label == "claude-code" {
             let enc = encode_cwd(a.cwd);
             if !enc.is_empty() {
-                encoded_cwd_to_pid.insert(enc, a.pid);
+                encoded_cwd_to_pids.entry(enc).or_default().push((a.pid, a.uptime_sec));
             }
         }
+    }
+    for v in encoded_cwd_to_pids.values_mut() {
+        // Sort newest-pid-first (lowest uptime first).
+        v.sort_by_key(|(_pid, uptime)| *uptime);
     }
 
     let read_dir = match fs::read_dir(&root) {
@@ -441,11 +454,30 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             jsonls.push((p, mtime, size));
         }
 
+        // Pair JSONL files to live PIDs for this project dir.  When
+        // there are N pids and M jsonls in the same cwd, we line up
+        // the freshest pid with the freshest-touched jsonl, and so
+        // on.  Stronger than the old "only-most-recent jsonl gets
+        // the only-pid" rule — supports parallel sessions correctly.
+        let mut by_path_pid: HashMap<PathBuf, u32> = HashMap::new();
+        if let Some(pids) = encoded_cwd_to_pids.get(&raw_name) {
+            // Sort jsonls by mtime descending.
+            let mut sorted_paths: Vec<&(PathBuf, u64, u64)> = jsonls.iter().collect();
+            sorted_paths.sort_by(|a, b| b.1.cmp(&a.1));
+            for (i, (jp, _, _)) in sorted_paths.iter().enumerate() {
+                if let Some((pid, _)) = pids.get(i) {
+                    by_path_pid.insert(jp.clone(), *pid);
+                } else {
+                    break;
+                }
+            }
+        }
+
         for (path, mtime, size) in &jsonls {
             let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             let age_ms = now_ms.saturating_sub(*mtime);
             let is_most_recent = most_recent_path.as_deref() == Some(path);
-            let live_pid = if is_most_recent { encoded_cwd_to_pid.get(&raw_name).copied() } else { None };
+            let live_pid = by_path_pid.get(path).copied();
 
             // Only do the expensive tail+parse for live or recently-touched sessions.
             let info = if live_pid.is_some() || age_ms < RECENT_WINDOW_MS {
