@@ -139,6 +139,7 @@ impl SysBackend {
                 in_flight_subagents: Vec::new(),
                 recent_activity: Vec::new(),
                 cpu_history: Vec::new(),
+                tokens_history: Vec::new(),
                 cpu,
                 cpu_raw: cpu,
                 rss: proc.memory(),

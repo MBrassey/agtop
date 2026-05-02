@@ -119,6 +119,14 @@ pub struct Args {
     /// exceeds N.  Useful for "alert me if I'm burning >100k tok/min".
     #[arg(long, value_name = "TOK_PER_MIN")]
     pub threshold_tokens_rate: Option<f64>,
+
+    /// Open the TUI focused on a specific PID with the detail popup
+    /// already showing.  Skips the agent list — useful as a wrapper
+    /// from other tooling: `agtop --pid $(pgrep claude)`.  If the
+    /// PID isn't a known agent on startup, falls back to the regular
+    /// list view.
+    #[arg(long, value_name = "PID")]
+    pub pid: Option<u32>,
 }
 
 pub fn run() -> Result<ExitCode> {

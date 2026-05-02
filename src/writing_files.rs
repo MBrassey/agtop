@@ -19,6 +19,22 @@ use std::path::PathBuf;
 /// Cross-platform entry point.  Returns `Vec<PathBuf>` of files the
 /// target PID has open with write access (O_WRONLY / O_RDWR on POSIX,
 /// FILE_GENERIC_WRITE on Windows).
+///
+/// On Windows the call runs in a watchdog thread with a 2s deadline:
+/// `GetFinalPathNameByHandleW` can stall on remote/SMB handles even
+/// after the FILE_TYPE_DISK pre-filter, and a stuck collector tick
+/// would freeze the entire TUI.  Belt-and-suspenders.
+#[cfg(windows)]
+pub fn read(pid: u32, limit: usize) -> Vec<PathBuf> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(impl_::read(pid, limit));
+    });
+    rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default()
+}
+#[cfg(not(windows))]
 pub fn read(pid: u32, limit: usize) -> Vec<PathBuf> {
     impl_::read(pid, limit)
 }
@@ -177,7 +193,8 @@ mod impl_ {
         STATUS_INFO_LENGTH_MISMATCH, NTSTATUS,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFinalPathNameByHandleW, FILE_GENERIC_WRITE, FILE_NAME_NORMALIZED,
+        GetFileType, GetFinalPathNameByHandleW,
+        FILE_GENERIC_WRITE, FILE_NAME_NORMALIZED, FILE_TYPE_DISK,
     };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE,
@@ -299,6 +316,19 @@ mod impl_ {
                 )
             };
             if ok == 0 || dup.is_null() { continue; }
+
+            // Pre-filter to disk-backed handles only.  GetFinalPathNameByHandleW
+            // can block indefinitely when called on a pipe/mailslot/socket
+            // handle whose other end is a service that never responds —
+            // this previously hung agtop's Windows CI for the full 6h max
+            // execution budget.  GetFileType is non-blocking and reliably
+            // distinguishes disk files (FILE_TYPE_DISK) from pipes / char
+            // devices / network endpoints.
+            let ftype = unsafe { GetFileType(dup) };
+            if ftype != FILE_TYPE_DISK {
+                unsafe { CloseHandle(dup); }
+                continue;
+            }
 
             // Step 4: ask Windows for the final path.
             let mut wbuf = [0u16; 32_768];
