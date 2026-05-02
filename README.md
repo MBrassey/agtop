@@ -46,27 +46,20 @@ transcript preview.
 
 ## Install
 
-| Platform        | Command                                |
-| --------------- | -------------------------------------- |
-| Arch / CachyOS  | `yay -S agtop`                         |
-| Debian / Ubuntu | `sudo snap install agtop`              |
-| Mint / Pop!_OS  | `sudo apt install snapd && sudo snap install agtop` |
-| macOS           | `brew install mbrassey/tap/agtop`      |
-| Windows         | `winget install agtop`                 |
-| FreeBSD         | `sudo pkg install agtop`               |
-| Cargo           | `cargo install agtop`                  |
-| npm             | `npm install -g @mbrassey/agtop`       |
-| Prebuilts       | [latest release][rel] — linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64 |
+| Platform                       | Command                                |
+| ------------------------------ | -------------------------------------- |
+| Arch / CachyOS                 | `yay -S agtop`                         |
+| Debian / Ubuntu / Mint / Pop!_OS | apt source — see [below](#debian-ubuntu-apt-source) |
+| macOS                          | `brew install mbrassey/tap/agtop`      |
+| Windows                        | `winget install agtop`                 |
+| FreeBSD                        | `sudo pkg install agtop`               |
+| Cargo                          | `cargo install agtop`                  |
+| npm                            | `npm install -g @mbrassey/agtop`       |
+| Prebuilts                      | [latest release][rel] — linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64 |
 
 [rel]: https://github.com/MBrassey/agtop/releases/latest
 
-> The Snap path is the recommended install on Ubuntu, Mint, and
-> Debian.  An optional self-hosted apt repo at
-> `https://mbrassey.github.io/apt` is also available for users who
-> prefer apt — see [apt source (optional)](#apt-source-optional)
-> below.
-
-#### apt source (optional)
+#### Debian / Ubuntu apt source
 
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
@@ -870,9 +863,17 @@ release workflow fans out to all three primary registries in parallel.
 | AUR            | `packages/pacman/PKGBUILD`               | ✓                     |
 | Homebrew tap   | `homebrew/agtop.rb` → `MBrassey/homebrew-tap` | ✓                |
 | apt repo (deb) | `packages/deb/build.sh` → `MBrassey/apt` (gh-pages) | ✓                |
-| Snap Store     | `snap/snapcraft.yaml` → snapcraft.io        | ✓                     |
 | winget         | `~/code/agtop-winget-port/` → `microsoft/winget-pkgs`    | ✓ (one-line bump per release) |
 | FreeBSD ports  | `~/code/agtop-freebsd-port/` → `freebsd/freebsd-ports`   | ✓ (one-line bump per release) |
+
+> **Snap Store** was retired in 2.4.2 — the `snap install lxd`
+> bootstrap inside `snapcore/action-build` repeatedly failed with
+> `error: unable to contact snap store` on the GitHub-hosted Ubuntu
+> runner, breaking every release for no reason inside our control.
+> The signed apt repo above covers the same audience (Debian /
+> Ubuntu / Mint / Pop!_OS) and has been green every release.
+> `snap/snapcraft.yaml` remains in the tree for anyone who still
+> wants to build locally with `snapcraft pack`.
 
 CI publishes use repo secrets `CRATES_IO_TOKEN`, `NPM_TOKEN`,
 `AUR_SSH_PRIVATE_KEY`, `HOMEBREW_TAP_TOKEN`, `APT_REPO_TOKEN`, and
