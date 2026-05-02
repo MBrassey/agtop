@@ -87,8 +87,12 @@ jobs:
           cd "/tmp/agtop-$VERSION"
           # No GPG signing in CI — `-us -uc` builds an unsigned
           # source package suitable for lintian + format checks.
-          # The maintainer's host signs for real uploads.
-          debuild -S -sa -us -uc
+          # The maintainer's host signs for real uploads.  -d skips
+          # dpkg-checkbuilddeps because we're only producing the
+          # source package here; the actual binary build happens
+          # on Launchpad's farm where build-deps are evaluated
+          # against the target series' archive.
+          debuild -S -sa -us -uc -d
 
       - name: Run lintian
         run: |
