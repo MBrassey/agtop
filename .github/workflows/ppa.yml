@@ -62,11 +62,12 @@ jobs:
           # Prune pre-rendered docs / examples / target trees from
           # every vendored crate.  Lintian flags pre-rendered HTML
           # under `docs/` as `source-is-missing` (DFSG: shipped
-          # binary-form output without source).  We don't need any
-          # of it to compile.  Stripping also shrinks the source
-          # tarball by ~30%.
+          # binary-form output without source).  Also drop the
+          # winapi-*-pc-windows-gnu/lib/lib*.a precompiled import
+          # libraries lintian rejects as unaccompanied binaries.
           ( cd "/tmp/agtop-$version" && \
-              find vendor -type d \( -name docs -o -name target -o -name benches \) -prune -exec rm -rf {} + 2>/dev/null )
+              find vendor -type d \( -name docs -o -name target -o -name benches \) -prune -exec rm -rf {} + 2>/dev/null
+            find "/tmp/agtop-$version/vendor" -type f -path '*/lib/lib*.a' -delete 2>/dev/null )
           # cargo vendor stamps each crate with .cargo-checksum.json
           # listing every file's sha256 — pruning files invalidates
           # those checksums, so regenerate them via `--respect-source-config`

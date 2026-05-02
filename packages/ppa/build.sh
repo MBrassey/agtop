@@ -69,14 +69,15 @@ EOF
     exit 1
   fi
   echo "==> Running build inside ${engine} ubuntu:${series} container"
-  # Mount: source tree + ~/.gnupg (signing) + ~/.devscripts (DEBEMAIL).
-  # Network is needed inside the container for `apt-get install` and
-  # `cargo vendor`; the resulting source package itself is offline-
-  # ready for Launchpad.
+  # Mount: source tree + ~/.gnupg-source (read-only host copy of the
+  # signing keyring; copied into a writable /root/.gnupg inside the
+  # container so gpg2 / keyboxd can write its .lock files).  Network
+  # is needed inside the container for apt-get + cargo vendor; the
+  # resulting source package itself is offline-ready for Launchpad.
   uid=$(id -u); gid=$(id -g)
   exec "$engine" run --rm -it \
     -v "$root":/work \
-    -v "$HOME/.gnupg":/root/.gnupg:ro \
+    -v "$HOME/.gnupg":/host-gnupg:ro \
     -e DEBEMAIL="${DEBEMAIL:-matt@brassey.io}" \
     -e DEBFULLNAME="${DEBFULLNAME:-Matt Brassey}" \
     -e PPA_TARGET="${PPA_TARGET:-ppa:mbrassey/agtop}" \
@@ -100,6 +101,14 @@ EOF
         | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path >/dev/null
       export PATH=\"/root/.cargo/bin:\$PATH\"
       git config --global --add safe.directory /work
+      # Copy the host's read-only GPG mount into a writable
+      # /root/.gnupg so gpg2 + keyboxd can land their .lock files.
+      # chmod 700 so gpg stops emitting 'unsafe ownership' warnings.
+      if [ -d /host-gnupg ] && [ ! -d /root/.gnupg ]; then
+        cp -a /host-gnupg /root/.gnupg
+        chmod 700 /root/.gnupg
+        find /root/.gnupg -type f -exec chmod 600 {} \\;
+      fi
       ./packages/ppa/build.sh '${series}'
     "
 fi
@@ -152,6 +161,34 @@ echo "==> Vendoring crates ($(grep -c '^\[\[package\]\]' Cargo.lock 2>/dev/null 
   echo "    - no network access (cargo vendor must reach crates.io)."
   exit 1
 }
+
+# Prune vendored crate cruft that lintian flags as DFSG /
+# source-is-missing violations:
+#   - vendor/*/docs        — pre-rendered rustdoc HTML / JS without source
+#   - vendor/*/target      — leftover build artefacts (rare but possible)
+#   - vendor/*/benches     — same docs cruft pattern in some crates
+#   - vendor/*/lib/lib*.a  — winapi precompiled import libs (binary
+#                            archives lintian can't reverse to source)
+# After pruning, every crate's .cargo-checksum.json still lists the
+# now-deleted files; cargo build would fail integrity check.  Walk
+# every checksum file and drop entries whose target no longer exists.
+echo "==> Pruning vendored crate cruft + patching checksums"
+( cd "$src_dir" && \
+    find vendor -type d \( -name docs -o -name target -o -name benches \) -prune -exec rm -rf {} + 2>/dev/null
+  # winapi-*-pc-windows-gnu/lib/*.a files are precompiled binary
+  # import libraries — lintian rejects them in source packages.
+  find vendor -type f -path '*/lib/lib*.a' -delete 2>/dev/null
+  python3 -c '
+import json, glob, os
+for ck in glob.glob("vendor/*/.cargo-checksum.json"):
+    crate = os.path.dirname(ck)
+    with open(ck) as f: d = json.load(f)
+    files = d.get("files", {})
+    files = {k: v for k, v in files.items() if os.path.exists(os.path.join(crate, k))}
+    d["files"] = files
+    with open(ck, "w") as f: json.dump(d, f)
+'
+)
 
 ( cd "$build_dir" && tar --owner=0 --group=0 --numeric-owner -czf "agtop_${version}.orig.tar.gz" "agtop-${version}" )
 # Now overlay debian/ for the package build.
