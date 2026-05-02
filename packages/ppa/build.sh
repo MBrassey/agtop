@@ -89,7 +89,13 @@ EOF
       apt-get update -qq >/dev/null
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
         devscripts dput-ng debhelper cargo rustc lintian build-essential \
-        gnupg ca-certificates >/dev/null
+        gnupg ca-certificates git python3 >/dev/null
+      # The /work bind mount is owned by host uid \$(id -u), but the
+      # container runs as root.  Modern git refuses to operate on
+      # repos owned by a different uid unless we explicitly mark
+      # them safe.  Apply both globally (for git inside this shell)
+      # and for any subprocess that re-execs the script.
+      git config --global --add safe.directory /work
       ./packages/ppa/build.sh '${series}'
     "
 fi
