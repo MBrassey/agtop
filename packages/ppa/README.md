@@ -27,12 +27,28 @@ target.
    (`gpg -d`) and follow the confirmation link.  After that, your
    key can sign uploads.
 
-3. **Install host build tools** (Debian / Ubuntu / Mint / Pop!_OS)
+3. **Install host build tools**
+
+   On Debian / Ubuntu / Mint / Pop!_OS:
 
    ```sh
    sudo apt install devscripts dput-ng debhelper \
         cargo rustc lintian build-essential
    ```
+
+   On Arch / CachyOS:
+
+   ```sh
+   yay -S devscripts dput-ng           # AUR — packages aren't in extra
+   sudo pacman -S dpkg lintian          # extra
+   # rustc + cargo: already installed if you build agtop locally.
+   ```
+
+   Alternatively, install `podman` (or `docker`) and skip native
+   tooling — `packages/ppa/build.sh` auto-detects missing `dch` and
+   re-runs itself inside an `ubuntu:${series}` container that has
+   everything pre-installed.  Force this path explicitly with
+   `PPA_FORCE_CONTAINER=1`.
 
    `dh-cargo` is intentionally NOT installed.  Launchpad PPA builders
    have no network access during the build phase, so dh-cargo's

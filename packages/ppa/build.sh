@@ -38,6 +38,62 @@ cd "$root"
 series="${1:-noble}"
 ppa="${PPA_TARGET:-ppa:mbrassey/agtop}"
 
+# Auto-fall-back to a podman/docker container on hosts that don't
+# ship the Debian packaging toolchain natively (e.g. Arch / CachyOS
+# / Fedora).  PPA_NO_CONTAINER=1 forces native execution; PPA_FORCE_CONTAINER=1
+# forces container even if `dch` is on PATH.
+if [ "${PPA_FORCE_CONTAINER:-0}" = "1" ] || \
+   { [ "${PPA_NO_CONTAINER:-0}" != "1" ] && ! command -v dch >/dev/null 2>&1; }; then
+  if [ "${IN_PPA_CONTAINER:-0}" = "1" ]; then
+    echo "==> Already inside the container but dch still missing — bug in this script."
+    exit 1
+  fi
+  engine=""
+  for cand in podman docker; do
+    if command -v "$cand" >/dev/null 2>&1; then engine="$cand"; break; fi
+  done
+  if [ -z "$engine" ]; then
+    cat >&2 <<EOF
+==> Debian packaging tools (dch, debuild, dpkg-buildpackage) not on PATH and no container engine found.
+
+Install on Arch / CachyOS:
+  yay -S devscripts dput-ng           # AUR
+
+Install on Debian / Ubuntu / Mint / Pop!_OS:
+  sudo apt install devscripts dput-ng debhelper cargo rustc lintian build-essential
+
+Or set PPA_FORCE_CONTAINER=1 after installing podman or docker — the
+script will run the build inside an ubuntu:${series} image with
+all tooling preinstalled.
+EOF
+    exit 1
+  fi
+  echo "==> Running build inside ${engine} ubuntu:${series} container"
+  # Mount: source tree + ~/.gnupg (signing) + ~/.devscripts (DEBEMAIL).
+  # Network is needed inside the container for `apt-get install` and
+  # `cargo vendor`; the resulting source package itself is offline-
+  # ready for Launchpad.
+  uid=$(id -u); gid=$(id -g)
+  exec "$engine" run --rm -it \
+    -v "$root":/work \
+    -v "$HOME/.gnupg":/root/.gnupg:ro \
+    -e DEBEMAIL="${DEBEMAIL:-matt@brassey.io}" \
+    -e DEBFULLNAME="${DEBFULLNAME:-Matt Brassey}" \
+    -e PPA_TARGET="${PPA_TARGET:-ppa:mbrassey/agtop}" \
+    -e PPA_REVISION="${PPA_REVISION:-1}" \
+    -e IN_PPA_CONTAINER=1 \
+    -w /work \
+    "ubuntu:${series}" \
+    bash -c "
+      set -e
+      apt-get update -qq >/dev/null
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        devscripts dput-ng debhelper cargo rustc lintian build-essential \
+        gnupg ca-certificates >/dev/null
+      ./packages/ppa/build.sh '${series}'
+    "
+fi
+
 # Resolve current version from Cargo.toml so the PPA build always
 # tracks the upstream tag, regardless of debian/changelog drift.
 version="$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' Cargo.toml)"
