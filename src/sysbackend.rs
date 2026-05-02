@@ -127,6 +127,7 @@ impl SysBackend {
                 context_used: 0,
                 context_limit: 0,
                 loaded_skills: Vec::new(),
+                loaded_plugins: Vec::new(),
                 tool_counts: Vec::new(),
                 ppid_name: proc.parent()
                     .and_then(|pp| self.sys.process(pp))
