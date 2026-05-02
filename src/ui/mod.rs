@@ -450,7 +450,14 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                 .and_then(|p| app.detail_scroll_by_pid.get(&p).copied())
                 .unwrap_or(0);
             app.popup_filter.clear();
-            app.detail_tail = true;
+            // Open scrolled to TOP, not bottom.  Pre-2.4.8 we
+            // pre-enabled live-tail on every popup open which made
+            // draw_detail snap scroll → max_scroll on the first
+            // frame; the user landed at the bottom of the content
+            // before they'd read the model / tokens / cost rows
+            // at the top.  Live-tail re-engages when the user
+            // explicitly presses G / End or wheels to bottom.
+            app.detail_tail = false;
         }
         KeyCode::Char('p') => app.paused = !app.paused,
         KeyCode::Char('r') => {
@@ -587,7 +594,9 @@ fn handle_mouse(app: &mut App, m: MouseEvent) {
                     app.show_detail = true;
                     app.detail_scroll = app.detail_scroll_by_pid.get(pid).copied().unwrap_or(0);
                     app.popup_filter.clear();
-                    app.detail_tail = true;
+                    // Open at top — see Enter/Space handler for the
+                    // rationale on detail_tail = false at open.
+                    app.detail_tail = false;
                 } else {
                     app.selected_pid = Some(*pid);
                 }
