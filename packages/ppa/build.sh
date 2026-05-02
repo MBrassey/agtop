@@ -154,6 +154,7 @@ EOF
     -e LP_USER="$lp_user" \
     -e PPA_NO_UPLOAD="${PPA_NO_UPLOAD:-0}" \
     -e GPG_PASSPHRASE="${GPG_PASSPHRASE:-}" \
+    -e SSH_PASSPHRASE="${SSH_PASSPHRASE:-}" \
     -e IN_PPA_CONTAINER=1 \
     -w /work \
     "ubuntu:${series}" \
@@ -467,7 +468,16 @@ print(f"  remote SSH version: {t.remote_version}")
 
 # Auth via the user's private key (id_ed25519 was copied to /root/.ssh).
 key_path = os.path.expanduser("~/.ssh/id_ed25519")
-key = paramiko.Ed25519Key.from_private_key_file(key_path)
+ssh_pp = os.environ.get("SSH_PASSPHRASE", "") or None
+try:
+    key = paramiko.Ed25519Key.from_private_key_file(key_path, password=ssh_pp)
+except paramiko.ssh_exception.PasswordRequiredException:
+    print("==> SSH key is passphrase-protected.")
+    print("    Pass it via the SSH_PASSPHRASE env var:")
+    print("      SSH_PASSPHRASE='<pass>' GPG_PASSPHRASE='<pass>' ./packages/ppa/build.sh noble")
+    print("    Or strip the passphrase from the key once for unattended uploads:")
+    print("      ssh-keygen -p -f ~/.ssh/id_ed25519 -P 'old' -N ''")
+    sys.exit(3)
 t.auth_publickey(user, key)
 print("  authenticated")
 
