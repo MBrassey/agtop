@@ -1,6 +1,8 @@
 target/
 node_modules/
 dist/
+vendor/
+.cargo/config.toml
 RELEASE_STEPS.md
 PRIVATE_NOTES.md
 dist/

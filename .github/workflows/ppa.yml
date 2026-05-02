@@ -63,6 +63,22 @@ jobs:
           git archive --format=tar HEAD debian | \
               tar -C "/tmp/agtop-$version" -xf -
 
+      - name: Mint per-Cargo-version changelog stanza
+        run: |
+          cd "/tmp/agtop-$VERSION"
+          # debian/changelog's top entry version must match the
+          # orig.tar.gz upstream version or debuild prompts and
+          # fails non-interactively.  Cargo.toml is the source of
+          # truth for the upstream version; mint a synthetic stanza
+          # so we don't have to bump debian/changelog by hand on
+          # every release commit.
+          export DEBEMAIL="${DEBEMAIL:-matt@brassey.io}"
+          export DEBFULLNAME="${DEBFULLNAME:-Matt Brassey}"
+          dch --newversion "${VERSION}-1" \
+              --distribution unstable \
+              --force-bad-version \
+              "Synthetic CI stanza for ${VERSION}." || true
+
       - name: Build source package
         run: |
           cd "/tmp/agtop-$VERSION"
