@@ -187,12 +187,12 @@ AGENT
 fqdn = ppa.launchpad.net
 method = sftp
 incoming = ~%(ppa)s/ubuntu/
-login = ${LP_USER}
+login = \${LP_USER}
 allow_unsigned_uploads = 0
 DPUT
       # Mark the imported key ultimately trusted so debsign doesn't
       # bail on trust depth.
-      keyfp=\$(gpg --list-secret-keys --with-colons '${email_lit:-${DEBEMAIL:-matt@brassey.io}}' | awk -F: '/^fpr:/{print \$10; exit}')
+      keyfp=\$(gpg --list-secret-keys --with-colons \"\$DEBEMAIL\" | awk -F: '/^fpr:/{print \$10; exit}')
       if [ -n \"\$keyfp\" ]; then
         echo \"\$keyfp:6:\" | gpg --import-ownertrust >/dev/null 2>&1
       fi
