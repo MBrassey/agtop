@@ -181,7 +181,16 @@ AGENT
       echo \"==> Importing public key\"
       gpg --batch --import /public-key.gpg
       echo \"==> Importing signing key into container gpg (passphrase prompt incoming)\"
-      gpg --pinentry-mode loopback --import /secret-key.gpg
+      # gpg --import returns non-zero if any sub-step fails (e.g.
+      # 'error sending to agent: Bad passphrase' during the agent
+      # cache step) even when the key blob successfully landed on
+      # disk.  We don't care here — the key IS imported; debsign
+      # later will prompt for the passphrase again.  Continue past
+      # any non-zero exit.
+      gpg --pinentry-mode loopback --import /secret-key.gpg || true
+      # Restart gpg-agent to clear any stale 'Bad passphrase' cache
+      # so the next prompt at debsign time gets a clean slate.
+      gpgconf --kill gpg-agent 2>/dev/null || true
       echo \"==> Trust-marking imported key\"
       keyfp=\$(gpg --list-secret-keys --with-colons \"\$DEBEMAIL\" | awk -F: '/^fpr:/{print \$10; exit}')
       echo \"    fingerprint: \$keyfp\"
