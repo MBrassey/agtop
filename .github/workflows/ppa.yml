@@ -19,10 +19,13 @@ on:
       - 'packages/ppa/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - '.github/workflows/ppa.yml'
   pull_request:
     paths:
       - 'debian/**'
       - 'packages/ppa/**'
+      - '.github/workflows/ppa.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
