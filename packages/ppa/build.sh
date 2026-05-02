@@ -168,16 +168,19 @@ GPG
 allow-loopback-pinentry
 AGENT
       # Public-key import is unconditionally batch-clean.
-      gpg --batch --import /public-key.gpg >/dev/null 2>&1
-      # Secret-key import:
-      #   - encrypted exports need the passphrase to decrypt during
-      #     import.  --batch + loopback without --passphrase-fd dies
-      #     silently.
-      #   - drop --batch so pinentry-loopback prompts on the
-      #     container's tty.  User types passphrase once.
-      #   - keep stderr visible so a failure isn't swallowed.
+      echo \"==> Importing public key\"
+      gpg --batch --import /public-key.gpg
       echo \"==> Importing signing key into container gpg (passphrase prompt incoming)\"
       gpg --pinentry-mode loopback --import /secret-key.gpg
+      echo \"==> Trust-marking imported key\"
+      keyfp=\$(gpg --list-secret-keys --with-colons \"\$DEBEMAIL\" | awk -F: '/^fpr:/{print \$10; exit}')
+      echo \"    fingerprint: \$keyfp\"
+      if [ -n \"\$keyfp\" ]; then
+        echo \"\$keyfp:6:\" | gpg --import-ownertrust 2>&1 || true
+      fi
+      gpg --list-secret-keys
+
+      echo \"==> Setting up SSH for SFTP upload\"
       # SSH key for SFTP upload to Launchpad.  Copy the read-only
       # mounted private key into a writable, root-owned location
       # because ssh refuses keys with permissive permissions or
@@ -199,13 +202,7 @@ incoming = ~%(ppa)s/ubuntu/
 login = \${LP_USER}
 allow_unsigned_uploads = 0
 DPUT
-      # Mark the imported key ultimately trusted so debsign doesn't
-      # bail on trust depth.
-      keyfp=\$(gpg --list-secret-keys --with-colons \"\$DEBEMAIL\" | awk -F: '/^fpr:/{print \$10; exit}')
-      if [ -n \"\$keyfp\" ]; then
-        echo \"\$keyfp:6:\" | gpg --import-ownertrust >/dev/null 2>&1
-      fi
-      gpg --list-secret-keys
+      echo \"==> Re-entering build.sh inside container\"
       ./packages/ppa/build.sh '${series}'
     "
 fi
