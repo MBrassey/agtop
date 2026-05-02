@@ -1,0 +1,5 @@
+version=4
+opts="filenamemangle=s%(?:.*?/)?v?([\d.]+)\.tar\.gz%agtop-$1.tar.gz%, \
+      uversionmangle=s/-(alpha|beta|rc)(\d*)/~$1$2/" \
+  https://github.com/MBrassey/agtop/tags \
+  (?:.*?/)?v?([\d.]+)\.tar\.gz

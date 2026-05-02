@@ -1,0 +1,5 @@
+agtop (2.4.2-1) unstable; urgency=medium
+
+  * Initial Debian packaging (Closes: #NNNNNN).
+
+ -- Matt Brassey <matt@brassey.io>  Fri, 02 May 2026 03:15:00 +0000

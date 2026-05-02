@@ -1,0 +1,165 @@
+.\" agtop.1 — manual page for agtop(1)
+.TH AGTOP 1 "May 2026" "agtop 2.4.2" "User Commands"
+.SH NAME
+agtop \- terminal UI for monitoring AI coding agents
+.SH SYNOPSIS
+.B agtop
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B agtop
+is a top-like process monitor specialised for AI coding agents.
+It detects Claude Code, OpenAI Codex, Block Goose, Aider, Google
+Gemini, Cursor, Continue, Opencode, Copilot CLI, and other agent
+CLIs out of the box, and reads each one's session transcript on
+disk to enrich its row with the current tool, model, in-flight
+subagents, cumulative token usage, estimated dollar cost,
+context-window fill, and loaded skills / plugins.
+.SH OPTIONS
+.TP
+.B \-1, \-\-once
+Print a one-shot snapshot and exit (no TUI).
+.TP
+.B \-j, \-\-json
+Emit a machine-readable JSON snapshot; implies
+.BR \-\-once .
+.TP
+.BI \-i\ SECONDS,\ \-\-interval= SECONDS
+TUI / iteration refresh interval (default 1.5).
+.TP
+.BI \-n\ COUNT,\ \-\-iterations= COUNT
+With
+.BR \-\-once ,
+print N snapshots delimited by ``---''.
+.TP
+.BI \-f\ SUBSTR,\ \-\-filter= SUBSTR
+Only show agents whose label / cmdline / cwd / project / pid
+contains SUBSTR.
+.TP
+.BI \-s\ KEY,\ \-\-sort= KEY
+One of
+.BR smart ,
+.BR cpu ,
+.BR mem ,
+.BR tokens ,
+.BR uptime ,
+.BR agent .
+Default
+.BR smart .
+.TP
+.BI \-m\ LABEL=REGEX,\ \-\-match= LABEL=REGEX
+Add a custom agent matcher.  Repeatable.
+.TP
+.B \-\-no-color
+Disable ANSI colors in
+.B \-\-once
+/
+.B \-\-json
+output.
+.TP
+.BI \-\-theme= NAME
+TUI palette: one of
+.BR default ,
+.BR dracula ,
+.BR nord ,
+.BR gruvbox ,
+.BR monochrome .
+.TP
+.BI \-\-top= N
+With
+.BR \-\-once ,
+only show top N agents (0 = all).
+.TP
+.B \-\-list-builtins
+Print the built-in matcher list and exit.
+.TP
+.BI \-\-prices= PATH
+TOML file overriding / extending the bundled model price table.
+.TP
+.B \-\-watch
+One summary line per tick to stdout; pipes cleanly.
+.TP
+.BI \-\-threshold-cpu= PERCENT
+In
+.BR \-\-watch ,
+exit 3 if aggregate CPU% exceeds N.
+.TP
+.BI \-\-threshold-tokens-rate= TOK_PER_MIN
+In
+.BR \-\-watch ,
+exit 4 if average tokens/min exceeds N.
+.TP
+.BI \-\-pid= PID
+Open the TUI focused on a specific PID with the detail popup
+already showing.
+.TP
+.B \-V, \-\-version
+Print version and exit.
+.TP
+.B \-h, \-\-help
+Print full help and exit.
+.SH ENVIRONMENT
+.TP
+.B AGTOP_MATCH
+Semicolon-separated
+.RB ` LABEL=REGEX '
+matchers (additive to built-ins).  Equivalent to repeating
+.BR \-m .
+.TP
+.B AGTOP_PRICES
+Path to a TOML price-table override file (equivalent to
+.BR \-\-prices ).
+.TP
+.B NO_COLOR
+When set, disables ANSI colors in
+.B \-\-once
+/
+.B \-\-json
+output.
+.SH FILES
+.TP
+.B ~/.claude/projects/<encoded-cwd>/<session>.jsonl
+Claude Code session transcripts.
+.TP
+.B ~/.codex/sessions/<YYYY>/<MM>/<DD>/<rollout>.jsonl
+OpenAI Codex rollout transcripts.
+.TP
+.B ~/.config/goose/sessions/
+Block Goose session transcripts.
+.TP
+.B <cwd>/.aider.chat.history.md
+Aider chat history.
+.TP
+.B ~/.gemini/sessions/<id>.json
+Google Gemini session transcripts.
+.TP
+.B ~/.claude/skills/<name>/SKILL.md
+.RB \(em
+.B <cwd>/.claude/skills/<name>/SKILL.md
+Claude Code skill manifests (user-global + project-local).
+.TP
+.B ~/.claude/plugins/installed_plugins.json
+.RB \(em
+.B ~/.claude/settings.json
+Claude Code plugin marketplace + per-user enabled-plugin map.
+.SH EXIT STATUS
+.TP
+.B 0
+Successful exit.
+.TP
+.B 2
+Argument parse error or runtime error.
+.TP
+.B 3
+.BR \-\-watch ' '\-\-threshold-cpu '
+exceeded.
+.TP
+.B 4
+.BR \-\-watch ' '\-\-threshold-tokens-rate '
+exceeded.
+.SH SEE ALSO
+.BR top (1),
+.BR htop (1),
+.BR btop (1),
+.BR ps (1).
+.SH AUTHOR
+Matt Brassey <matt@brassey.io>
