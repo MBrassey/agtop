@@ -144,11 +144,15 @@ Run `agtop --help` for the full flag list.
 | CPU% / RSS / vsize / threads / state / start-time | `/proc/<pid>/stat` | sysinfo | sysinfo | sysinfo |
 | Total / available system memory | `/proc/meminfo` | sysinfo | sysinfo | sysinfo |
 | Per-process read / write bytes  | `/proc/<pid>/io` | sysinfo `disk_usage()` | sysinfo `disk_usage()` | (sysinfo gap) |
-| Writable open files             | `/proc/<pid>/fdinfo` + `fd/` readlink | direct FFI to `proc_pidinfo` / `proc_pidfdinfo` (libSystem.dylib) | `NtQuerySystemInformation(SystemExtendedHandleInformation)` + `DuplicateHandle` + `GetFinalPathNameByHandleW` | — |
+| Writable open files             | `/proc/<pid>/fdinfo` + `fd/` readlink | direct FFI to `proc_pidinfo` / `proc_pidfdinfo` (libSystem.dylib) | `NtQuerySystemInformation(SystemExtendedHandleInformation)` + `DuplicateHandle` + `GetFinalPathNameByHandleW` | libprocstat — `procstat_getfiles` |
+| Read-only open files            | `/proc/<pid>/fd` filtered by `fdinfo:flags` | libproc with BSD `FREAD`/`FWRITE` filter on `fi_openflags` | NtQSI + `FILE_READ_DATA` ∧ ¬ `FILE_WRITE_DATA` access mask | libprocstat read-flag filter |
+| Children process listing        | `/proc/<pid>/task/*/children` | sysinfo parent-walk | sysinfo parent-walk | sysinfo parent-walk |
+| Established TCP connections     | `/proc/<pid>/net/tcp{,6}` | libproc `PROC_PIDFDSOCKETINFO` + `tcpsi_state` | `GetExtendedTcpTable(TCP_TABLE_OWNER_PID_CONNECTIONS)` | libprocstat sockstat decode |
 
-The Linux backend lives in `src/proc_.rs`; the cross-platform sysinfo
-shim is in `src/sysbackend.rs`. Native writable-FD enumeration
-(macOS + Windows) is in `src/writing_files.rs` — see
+The Linux backend lives in `src/proc_.rs`; the cross-platform
+sysinfo shim is in `src/sysbackend.rs`. Native FD enumeration is
+split across `src/writing_files.rs` (write-mode), `src/reading_files.rs`
+(read-mode), and `src/net_count.rs` (ESTABLISHED TCP). See
 [Implementation notes](#implementation-notes) below for the FFI
 details.
 
@@ -356,9 +360,9 @@ Per-agent fields worth highlighting:
 | `loaded_skills` | Names of Claude Code skills resolvable from `<cwd>/.claude/skills/<name>/SKILL.md` and `~/.claude/skills/<name>/SKILL.md`. Empty for non-Claude vendors. |
 | `read_bytes` / `write_bytes` | Cumulative IO since process start. Linux `/proc/<pid>/io`; macOS / Windows `sysinfo::Process::disk_usage().total_*`. 0 on *BSD (sysinfo gap). |
 | `writing_files` / `writing_dirs` | Open files with write access (and their parent dirs). Linux `/proc/<pid>/fdinfo`; macOS direct FFI to `proc_pidfdinfo`; Windows `NtQuerySystemInformation` + `DuplicateHandle`. Empty on *BSD. |
-| `reading_files`  | Files the process has open in read-only mode. Linux only. Surfaces what the agent is reading right now (project files during context indexing, MCP server configs, hook scripts) — useful when CPU is up but no tokens are flowing. |
-| `children`       | Immediate child processes (`(pid, comm)` pairs) the agent has spawned. Captures hook invocations, MCP server processes, shell commands. Linux only. |
-| `net_established`| Count of established TCP connections (v4 + v6) the process owns. Non-zero indicates the agent is talking to an API / MCP server / network resource even when no tokens are visibly flowing. Linux only. |
+| `reading_files`  | Files the process has open in read-only mode. Surfaces what the agent is reading right now (project files during context indexing, MCP server configs, hook scripts) — useful when CPU is up but no tokens are flowing. Native on Linux (`/proc/<pid>/fd`), macOS (libproc `proc_pidfdinfo` + BSD `FREAD`/`FWRITE` flags), Windows (`NtQuerySystemInformation` + `FILE_READ_DATA` access mask), FreeBSD (`libprocstat`). Empty on OpenBSD / NetBSD (kernel doesn't track per-fd paths). |
+| `children`       | Immediate child processes (`(pid, comm)` pairs) the agent has spawned. Captures hook invocations, MCP server processes, shell commands. Linux walks `/proc/<pid>/task/*/children`; macOS / Windows / *BSD reverse-walk sysinfo's parent map and bucket per pid. |
+| `net_established`| Count of established TCP connections the process owns. Non-zero indicates the agent is talking to an API / MCP server / network resource even when no tokens are visibly flowing. Linux parses `/proc/<pid>/net/tcp{,6}`; macOS uses libproc's `PROC_PIDFDSOCKETINFO` + `tcpsi_state` lookup; Windows calls `GetExtendedTcpTable` filtered to `MIB_TCP_STATE_ESTAB` + owning pid; FreeBSD walks libprocstat's filestat list and decodes the sockstat `proto` + `state` fields. 0 on OpenBSD / NetBSD. |
 | `read_rate_bps` / `write_rate_bps` | Per-tick disk-IO rate in bytes per second, computed as Δ(`read_bytes`/`write_bytes`) ÷ Δt against the previous snapshot. 0 on the first sample for any pid. Available wherever `read_bytes`/`write_bytes` is. |
 | `gpu_pct` / `gpu_mem_bytes` | NVIDIA GPU utilisation (0-100%) and VRAM usage attributed to this PID. Populated by parsing `nvidia-smi --query-compute-apps` once per snapshot; 0 on hosts without an NVIDIA GPU or when this PID isn't using it. AMD / Apple Silicon support is on the roadmap. |
 | `dangerous` | True when the cmdline includes `--dangerously-skip-permissions`, `--no-permissions`, `--allow-dangerous`, `--yolo`, or starts with `sudo claude` / `sudo codex`. |
@@ -628,22 +632,39 @@ export AGTOP_MATCH="internal-bot=python.*src/agent\.py"
 
 ## Platforms
 
-| | Process metrics | Sessions | Cost / context / skills | IO bytes | Writable open files |
-| -- | :--: | :--: | :--: | :--: | :--: |
-| Linux x86_64 / aarch64 | native `/proc` | ✓ | ✓ | ✓ | ✓ |
-| macOS x86_64 / aarch64 | `sysinfo`      | ✓ | ✓ | ✓ (`sysinfo`) | ✓ (FFI: `proc_pidinfo` / `proc_pidfdinfo`) |
-| Windows x86_64         | `sysinfo`      | ✓ | ✓ | ✓ (`sysinfo`) | ✓ (FFI: `NtQuerySystemInformation` + `DuplicateHandle`) |
-| FreeBSD x86_64         | `sysinfo`      | ✓ | ✓ | (sysinfo gap) | ✓ (FFI: `libprocstat` — `procstat_getfiles`) |
-| OpenBSD / NetBSD       | `sysinfo`      | ✓ | ✓ | (sysinfo gap) | (kernel doesn't track per-fd paths) |
+Full feature parity across Linux, macOS, Windows, and FreeBSD.
+OpenBSD / NetBSD lack kernel-level fd-path tracking so the
+writable / reading file enumeration is empty there; everything
+else works.
+
+|                        | Process metrics | Sessions / cost / context / skills | IO bytes | Writable files | Reading files | Children (tree) | Net established | `K` kill |
+| ---------------------- | :--: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
+| Linux x86_64 / aarch64 | `/proc` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| macOS x86_64 / aarch64 | `sysinfo` | ✓ | ✓ | ✓ libproc | ✓ libproc | ✓ | ✓ libproc | ✓ |
+| Windows x86_64         | `sysinfo` | ✓ | ✓ | ✓ NtQSI    | ✓ NtQSI    | ✓ | ✓ GetExtendedTcpTable | ✓ TerminateProcess |
+| FreeBSD x86_64         | `sysinfo` | ✓ | ✓ | gap (sysinfo) | ✓ libprocstat | ✓ libprocstat | ✓ | ✓ libprocstat | ✓ |
+| OpenBSD / NetBSD       | `sysinfo` | ✓ | ✓ | gap (sysinfo) | gap (kernel)  | gap (kernel)  | ✓ | gap (priv) | ✓ |
 
 CI runs `cargo build --release && cargo test --release` on
 ubuntu-latest, macos-latest, and windows-latest, plus
 `cargo check --release` on the cross-targets matrix
 (linux x86_64 + aarch64, macos x86_64 + aarch64, windows-msvc,
-windows-gnu, freebsd-x86_64). The writable-FD self-test runs on all
-three test runners — opens a tempfile, asserts the path appears in
-`writing_files::read(self_pid)` — so each native FD impl is verified
-on real OS hardware on every push.
+windows-gnu, freebsd-x86_64). Three integration tests exercise
+the native FFI on real hardware every push:
+
+- `writing_files::tests::enumerates_self_open_writable_file` — opens
+  a tempfile O_WRONLY, asserts the path appears in `writing_files::read(self_pid)`.
+- `reading_files::tests::enumerates_self_open_readonly_file` — opens
+  the tempfile O_RDONLY, asserts it appears in `reading_files::read(self_pid)`.
+- `net_count::tests::counts_self_established_tcp` — opens a localhost
+  TCP loop (listener + connect + accept), asserts `net_count::established(self_pid) >= 2`.
+
+24/24 tests pass on Linux. The macOS implementation was validated
+on a real `mac-m4.metal` instance running macOS Sequoia 15.7.5
+(xnu-11417); the libproc `socket_fdinfo` layout (792 bytes,
+`tcpsi_state` at offset 320 within `socket_info`) and BSD-style
+`FREAD`/`FWRITE` flag interpretation in `fi_openflags` are pinned
+in code comments so future SDK drift surfaces as a test failure.
 
 ---
 
@@ -753,7 +774,7 @@ work normally.
 ```
 agtop/
 ├── Cargo.toml · Cargo.lock
-├── src/                              ~8.7 k lines · 22 tests
+├── src/                              ~11 k lines · 24 tests
 │   ├── main.rs · cli.rs · theme.rs · collector.rs
 │   ├── ui/                          (multi-file module, since 2.4.0)
 │   │   ├── mod.rs                   App state, run(), key + mouse handlers, draw dispatcher
@@ -763,7 +784,9 @@ agtop/
 │   ├── pricing.rs · pricing_data.rs (auto-generated, ~1800 entries)
 │   ├── proc_.rs                     Linux /proc backend
 │   ├── sysbackend.rs                sysinfo backend (macOS / Windows / *BSD)
-│   ├── writing_files.rs             native FD enum (Linux + macOS FFI + Windows FFI + FreeBSD libprocstat)
+│   ├── writing_files.rs             writable-FD enum (Linux + macOS FFI + Windows FFI + FreeBSD libprocstat)
+│   ├── reading_files.rs             read-only-FD enum, same per-OS dispatch (since 2.4.9)
+│   ├── net_count.rs                 ESTABLISHED-TCP count per pid (Linux /proc, macOS libproc, Windows GetExtendedTcpTable, FreeBSD libprocstat)
 │   ├── skills.rs                    Claude Code skill discovery
 │   ├── plugins.rs                   Claude Code plugin discovery (since 2.4.0)
 │   ├── claude.rs · codex.rs · goose.rs · aider.rs · gemini.rs · generic.rs
@@ -840,6 +863,7 @@ with the key whose public half is at
 | `local` cost on an Ollama row is correct but you want to track power draw | Outside agtop's scope — pair with `nvtop` / `powertop`. | n/a |
 | Header reads `mem 0/0B` on a non-Linux host | Pre-2.3 build (sysinfo backend hardcoded these to 0) | Upgrade to `agtop ≥ 2.3.0`. |
 | Per-process IO bytes / writing-files blank on macOS / Windows | Pre-2.3 build (Linux-only) | Upgrade to `agtop ≥ 2.3.0`; native FFI now populates both on macOS + Windows. |
+| Reading files / network count / children blank on macOS / Windows | Pre-2.4.9 build | Upgrade to `agtop ≥ 2.4.12`; macOS libproc + Windows GetExtendedTcpTable + sysinfo parent-walk now populate these fields on every OS. |
 | Per-process IO bytes / writing-files blank on FreeBSD | sysinfo doesn't expose disk IO and there's no portable cross-BSD FD-enumeration API | Out of scope — would need a FreeBSD-specific `procstat_getfiles` impl. |
 | Context-window bar shows >100% on Claude Sonnet/Opus | Pre-2.3.1 build (didn't account for undeclared 1M-context variants) | Upgrade — the collector now self-calibrates the limit when an observed prompt exceeds the table-derived cap. |
 | Context-window bar amber/red but I can keep going | Fill = latest turn's prompt size; some agents trim cache between turns | Treat the bar as a leading indicator, not a hard threshold. |
