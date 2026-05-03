@@ -68,27 +68,30 @@ echo "==> Using ${changes_path}"
 
 # 2. Probe the relay's network to Launchpad.
 echo "==> Probing relay '${relay}' for SSH connectivity to ppa.launchpad.net:22"
-banner_check=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$relay" \
-  'timeout 6 bash -c "exec 3<>/dev/tcp/ppa.launchpad.net/22; head -c 30 <&3"' 2>&1)
+# No BatchMode — relay might need passphrase / TOFU prompt; we want
+# those to surface to the user, not get silently rejected.
+banner_check=$(ssh -o ConnectTimeout=15 "$relay" \
+  'timeout 6 bash -c "exec 3<>/dev/tcp/ppa.launchpad.net/22; head -c 30 <&3"' 2>&1) \
+  || { echo "==> SSH to relay '${relay}' failed."; echo "    output: ${banner_check}"; exit 3; }
 if ! echo "$banner_check" | grep -q "SSH-"; then
   echo "    relay can't reach ppa.launchpad.net:22 either."
-  echo "    captured: ${banner_check}"
+  echo "    captured: '${banner_check}'"
   echo "    Try a different relay (us-east, eu-west) — Launchpad's PPA"
-  echo "    SSH endpoint shadow-bans some ASNs."
+  echo "    SSH endpoint shadow-bans some ASNs / regions."
   exit 3
 fi
 echo "    relay reaches Launchpad: ${banner_check}"
 
 # 3. Ensure relay has dput-ng.  Skip if already present.
 echo "==> Checking dput on relay"
-if ! ssh -o BatchMode=yes "$relay" 'command -v dput >/dev/null 2>&1'; then
+if ! ssh "$relay" 'command -v dput >/dev/null 2>&1'; then
   echo "    installing dput-ng on relay (sudo apt)"
   ssh "$relay" 'sudo apt-get update -qq && sudo apt-get install -y -qq dput-ng python3-paramiko openssh-client'
 fi
 
 # 4. Copy artefacts to relay.
 echo "==> Staging files on relay:${remote_dir}/"
-ssh -o BatchMode=yes "$relay" "mkdir -p \"\$HOME/${remote_dir}\""
+ssh "$relay" "mkdir -p \"\$HOME/${remote_dir}\""
 # scp every file referenced by the .changes plus the .changes itself.
 files=( "$changes_path" )
 while IFS= read -r f; do
