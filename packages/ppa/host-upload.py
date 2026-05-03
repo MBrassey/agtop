@@ -86,29 +86,40 @@ def main() -> int:
     if not candidates:
         sys.exit("no DNS results for ppa.launchpad.net")
 
-    # Try each address, banner-peek before committing.
+    # Try each address, banner-peek before committing.  Launchpad's
+    # PPA SSH endpoint is intermittent today — banner returns one
+    # tick, times out the next.  Retry up to 12 times with a short
+    # backoff between attempts before giving up.
+    max_attempts = int(os.environ.get("PPA_RETRIES", "12"))
     sock = None
     last_err: Exception | None = None
-    for fam, addr in candidates:
-        try:
-            print(f"    trying {addr}...")
-            s = socket.socket(fam, socket.SOCK_STREAM)
-            s.settimeout(15)
-            s.connect(addr)
-            s.settimeout(20)
-            peek = s.recv(20, socket.MSG_PEEK)
-            if peek.startswith(b"SSH-"):
-                print(f"    banner OK, using {addr}")
-                sock = s
-                break
-            print(f"      no banner (peek={peek!r}), trying next")
-            s.close()
-            last_err = RuntimeError(f"no banner from {addr}")
-        except (OSError, socket.timeout) as e:
-            print(f"      {type(e).__name__}: {e}")
-            last_err = e
+    for attempt in range(1, max_attempts + 1):
+        for fam, addr in candidates:
+            try:
+                print(f"  [{attempt}/{max_attempts}] trying {addr}...")
+                s = socket.socket(fam, socket.SOCK_STREAM)
+                s.settimeout(20)
+                s.connect(addr)
+                s.settimeout(25)
+                peek = s.recv(20, socket.MSG_PEEK)
+                if peek.startswith(b"SSH-"):
+                    print(f"    banner OK, using {addr}")
+                    sock = s
+                    break
+                print(f"      no banner (peek={peek!r}), trying next")
+                s.close()
+                last_err = RuntimeError(f"no banner from {addr}")
+            except (OSError, socket.timeout) as e:
+                print(f"      {type(e).__name__}: {e}")
+                last_err = e
+        if sock is not None:
+            break
+        # backoff: 5s, 10s, 15s, 20s, then 30s capped
+        delay = min(5 * attempt, 30)
+        print(f"    all candidates failed; sleeping {delay}s before retry")
+        time.sleep(delay)
     if sock is None:
-        sys.exit(f"no usable Launchpad SSH endpoint: {last_err}")
+        sys.exit(f"no usable Launchpad SSH endpoint after {max_attempts} attempts: {last_err}")
     sock.settimeout(120)
 
     # Start SSH transport.
