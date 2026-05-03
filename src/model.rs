@@ -32,10 +32,10 @@ impl Status {
             Status::Busy => "BUSY",
             Status::Spawning => "SPWN",
             Status::Active => "ACTV",
-            Status::Idle => "idle",
+            Status::Idle => "IDLE",
             Status::Waiting => "WAIT",
             Status::Completed => "DONE",
-            Status::Stale => "stale",
+            Status::Stale => "STAL",
         }
     }
     pub fn glyph(self) -> &'static str {

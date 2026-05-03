@@ -192,10 +192,10 @@ activity are blended so an agent mid-generation isn't reported as idle.
 | ● **BUSY** | live process **and** transcript ≤ 30 s old, **or** any tool in flight, **or** CPU% ≥ 10 |
 | ● **SPWN** | live process with one or more `Task` / `Agent` *subagents* in flight |
 | ● **ACTV** | live process with transcript activity in the last 5 min, **or** CPU% ≥ 3 |
-| ○ idle     | live process up but quiet for >5 min and CPU% below threshold |
+| ○ **IDLE** | live process up but quiet for >5 min and CPU% below threshold |
 | ◌ **WAIT** | no live process, but session activity in the last 24 h |
 | ✓ **DONE** | session ended (Claude `stop_reason: end_turn`, Codex `session_end`) |
-| · stale    | last activity older than 24 h |
+| · **STAL** | last activity older than 24 h |
 
 Processes invoked with `--dangerously-skip-permissions`, `--no-permissions`,
 `--allow-dangerous`, `--yolo`, or `sudo {claude,codex}` are flagged with
