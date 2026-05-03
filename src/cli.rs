@@ -127,6 +127,21 @@ pub struct Args {
     /// list view.
     #[arg(long, value_name = "PID")]
     pub pid: Option<u32>,
+
+    /// Which "tokens" number to display + sort by:
+    ///   cumulative (default) — every turn's reported usage summed
+    ///                           across the whole session, including
+    ///                           cache_read + cache_write reuse.
+    ///                           Matches what the API bills for.
+    ///   fresh                 — non-cache input + output only
+    ///                           (`tokens_input - tokens_cache_read + tokens_output`).
+    ///                           Approximates "tokens you paid full
+    ///                           rate for" — useful when long-running
+    ///                           sessions with heavy cache reuse
+    ///                           dominate the cumulative view.
+    #[arg(long, value_name = "MODE", default_value = "cumulative",
+          value_parser = ["cumulative", "fresh"])]
+    pub tokens: String,
 }
 
 pub fn run() -> Result<ExitCode> {

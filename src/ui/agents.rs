@@ -3,7 +3,7 @@
 //! tree-mode sub-rows, sticky group headers, and per-column
 //! visibility (compact rows + 1–7 toggles).
 
-use super::{App, Sort, COL_CPU, COL_DANGER, COL_MEM, COL_PID, COL_SUB, COL_TOK, COL_UPTIME};
+use super::{App, Sort, TokenMode, COL_CPU, COL_DANGER, COL_MEM, COL_PID, COL_SUB, COL_TOK, COL_UPTIME};
 use crate::format::{bytes, dur, pct, shorten, si};
 use crate::model::{Agent, Status};
 use crate::theme;
@@ -37,7 +37,10 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
         Sort::Smart => {} // already sorted by collector
         Sort::Cpu     => agents.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)),
         Sort::Mem     => agents.sort_by(|a, b| b.rss.cmp(&a.rss)),
-        Sort::Tokens  => agents.sort_by(|a, b| b.tokens_total.cmp(&a.tokens_total)),
+        Sort::Tokens  => {
+            let m = app.tokens_mode;
+            agents.sort_by(|a, b| m.value(b).cmp(&m.value(a)));
+        }
         Sort::Uptime  => agents.sort_by(|a, b| b.uptime_sec.cmp(&a.uptime_sec)),
         Sort::Agent   => agents.sort_by(|a, b| a.label.cmp(&b.label)),
     }
@@ -95,8 +98,9 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
                     m2.cmp(&m1).then(p1.cmp(p2))
                 }
                 Sort::Tokens => {
-                    let t1: u64 = l1.iter().map(|a| a.tokens_total).sum();
-                    let t2: u64 = l2.iter().map(|a| a.tokens_total).sum();
+                    let m = app.tokens_mode;
+                    let t1: u64 = l1.iter().map(|a| m.value(a)).sum();
+                    let t2: u64 = l2.iter().map(|a| m.value(a)).sum();
                     t2.cmp(&t1).then(p1.cmp(p2))
                 }
                 Sort::Uptime => {
@@ -112,7 +116,7 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             let total_cpu: f64 = list.iter().map(|a| a.cpu).sum();
             let total_mem: u64 = list.iter().map(|a| a.rss).sum();
             let total_sub: u32 = list.iter().map(|a| a.subagents).sum();
-            let total_tok: u64 = list.iter().map(|a| a.tokens_total).sum();
+            let total_tok: u64 = list.iter().map(|a| app.tokens_mode.value(a)).sum();
             let mut header_spans: Vec<Span> = Vec::new();
             header_spans.push(Span::styled("● ", Style::default().fg(theme::border())));
             header_spans.push(Span::styled(proj.clone(),
@@ -151,7 +155,7 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             for a in list {
                 pid_order.push(a.pid);
                 agent_row_indices.push(rows.len());
-                rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint, app.compact_rows, app.cols));
+                rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint, app.compact_rows, app.cols, app.tokens_mode));
             // (second call site — non-grouped path)
                 if app.tree_mode {
                     push_child_rows(&mut rows, a, tint);
@@ -312,7 +316,7 @@ fn push_child_rows<'a>(rows: &mut Vec<Row<'a>>, parent: &'a Agent,
     }
 }
 
-pub(super) fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratatui::style::Color>, compact: bool, cols: u32) -> Row<'a> {
+pub(super) fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratatui::style::Color>, compact: bool, cols: u32, tokens_mode: TokenMode) -> Row<'a> {
     // Compact mode short-circuits per-column toggles by collapsing
     // the bitmap to "label + cpu + mem + danger + status only".  We
     // reuse the same column-gating logic below so there's a single
@@ -413,8 +417,9 @@ pub(super) fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratat
     // Token chip — fixed 6-char slot, value clipped to 5 visible chars so
     // even "100M+" abbreviations don't push downstream columns.
     if show(COL_TOK) {
-        if a.tokens_total > 0 {
-            let s = si(a.tokens_total);
+        let tok_val = tokens_mode.value(a);
+        if tok_val > 0 {
+            let s = si(tok_val);
             let clipped: String = s.chars().take(5).collect();
             spans.push(Span::styled(format!(" {:>5}", clipped),
                                     Style::default().fg(theme::c_chart_tok())));
