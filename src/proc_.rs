@@ -177,15 +177,28 @@ pub fn read_children(pid: u32, limit: usize) -> Vec<(u32, String)> {
 /// state is ESTABLISHED (state code `01` for TCP).  Surfaces "agent
 /// is talking to its API / an MCP server" in the popup.
 pub fn count_net_established(pid: u32) -> u32 {
+    // /proc/<pid>/net/tcp{,6} format (header line skipped):
+    //   sl  local_address rem_address   st tx_queue:rx_queue tr ...
+    // Pre-2.4.10 we read state from cols[2], which is actually
+    // rem_address — the bug silently set the count to 0 forever.
+    // Correct columns: sl=0, local=1, remote=2, state=3.
+    //
+    // Note: the Linux kernel exposes the same table for every pid
+    // in the same network namespace (it's a netns-wide view, not
+    // per-pid).  An agent that shares netns with other processes
+    // will see those processes' connections too — accept this for
+    // simplicity; correlating socket inode → owner pid would
+    // require an O(N) /proc/*/fd walk per tick.
     let mut n = 0u32;
     for proto in ["tcp", "tcp6"] {
         let path = format!("/proc/{pid}/net/{proto}");
         let Ok(text) = fs::read_to_string(&path) else { continue };
         for line in text.lines().skip(1) {
             let mut cols = line.split_whitespace();
-            let _local = cols.next();
+            let _sl     = cols.next();
+            let _local  = cols.next();
             let _remote = cols.next();
-            let state = cols.next().unwrap_or("");
+            let state   = cols.next().unwrap_or("");
             // 01 = TCP_ESTABLISHED in the kernel's enum.
             if state == "01" { n += 1; }
         }
