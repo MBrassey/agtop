@@ -265,19 +265,14 @@ AGENT
       # paramiko handles the upload reliably once Launchpad's
       # SSH banner is responding.
       apt-get install -y -qq openssh-client python3-paramiko >/dev/null 2>&1 || true
-      # Critical: pin to ppa.launchpad.net's IPv6 endpoint.
-      # Launchpad's IPv4 (185.125.190.80) currently silently drops
-      # connections from this network's IP range (some kind of
-      # rate-limit / shadowban that only applies to v4), but the
-      # IPv6 endpoint (2620:2d:4000:1::81) accepts and serves the
-      # SSH banner instantly.  paramiko prefers v4 by default;
-      # putting only the v6 IP in /etc/hosts overrides DNS and
-      # forces sftp through v6.
-      # /etc/hosts is a bind-mount in docker; sed -i can't rename
-      # the file (EBUSY).  Read → filter → write in place via cat.
-      grep -v 'ppa\\.launchpad\\.net' /etc/hosts > /tmp/hosts.new || true
-      echo '2620:2d:4000:1::81 ppa.launchpad.net' >> /tmp/hosts.new
-      cat /tmp/hosts.new > /etc/hosts
+      # No /etc/hosts override anymore — the inline Python uploader
+      # below tries v4 first, then v6, and accepts whichever returns
+      # an SSH banner.  Letting glibc's getaddrinfo return both
+      # families and picking the live one inside the script handles
+      # the case where one family is shadowbanned + the other has
+      # routing issues (or vice versa) without needing build-time
+      # assumptions about which family is "good" today.
+      true  # placeholder — removed pin lives here historically
       cat > /root/.dput.cf <<DPUT
 [ppa]
 fqdn = ppa.launchpad.net
