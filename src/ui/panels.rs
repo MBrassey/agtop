@@ -44,8 +44,12 @@ pub(super) fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App)
     if a.cost_usd > 0.0 {
         chip("cost",   format_cost(a.cost_usd), theme::c_wait());
     }
-    if a.tokens_total > 0 {
-        chip("tokens", si(a.tokens_total),     theme::c_chart_tok());
+    // Header tokens chip respects --tokens mode: cumulative shows
+    // every-turn-summed total; fresh shows non-cache input + output.
+    let agg_tokens: u64 = snap.agents.iter().map(|x| app.tokens_mode.value(x)).sum();
+    if agg_tokens > 0 {
+        let label = if app.tokens_mode == super::TokenMode::Fresh { "tokens·fresh" } else { "tokens" };
+        chip(label, si(agg_tokens), theme::c_chart_tok());
     }
     chip("cpu",       pct(a.cpu),              theme::c_chart_cpu());
     chip("mem",       format!("{}/{}", bytes(mem_used), bytes(snap.mem_total)),

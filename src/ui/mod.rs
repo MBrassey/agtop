@@ -54,6 +54,32 @@ pub(super) const COL_DANGER: u32 = 1 << 6;  // 7  — dangerous left-edge marker
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub(super) enum Sort { Smart, Cpu, Mem, Uptime, Tokens, Agent }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(super) enum TokenMode { Cumulative, Fresh }
+
+impl TokenMode {
+    /// Resolve the "displayed tokens" value for an agent.
+    ///
+    ///   Cumulative: tokens_total (= every turn summed, includes
+    ///               cache_read re-reads of the same prompt).
+    ///   Fresh:      tokens_input - tokens_cache_read + tokens_output
+    ///               (saturating).  Approximates "non-cache-hit
+    ///               tokens" — what the user paid full input rate
+    ///               for, not the inflated total.
+    pub(super) fn value(self, a: &crate::model::Agent) -> u64 {
+        match self {
+            TokenMode::Cumulative => a.tokens_total,
+            TokenMode::Fresh => {
+                let fresh_in = a.tokens_input.saturating_sub(a.tokens_cache_read);
+                fresh_in.saturating_add(a.tokens_output)
+            }
+        }
+    }
+    pub(super) fn label(self) -> &'static str {
+        match self { TokenMode::Cumulative => "cumulative", TokenMode::Fresh => "fresh" }
+    }
+}
+
 impl Sort {
     fn cycle(self) -> Self {
         match self {
@@ -158,6 +184,9 @@ pub(super) struct App {
     /// `compact_rows` is on this is ignored (compact has its own
     /// fixed rule of "everything optional → off").
     pub(super) cols: u32,
+    /// Token metric used everywhere `tokens_total` is displayed
+    /// or sorted on.  CLI flag `--tokens cumulative|fresh`.
+    pub(super) tokens_mode: TokenMode,
     pub(super) quit: bool,
 }
 
@@ -219,6 +248,10 @@ pub fn run(collector: Collector, args: Args) -> Result<()> {
         agents_total_rows: 0,
         compact_rows: false,
         cols: COL_PID | COL_CPU | COL_MEM | COL_UPTIME | COL_SUB | COL_TOK | COL_DANGER,
+        tokens_mode: match args.tokens.as_str() {
+            "fresh" => TokenMode::Fresh,
+            _       => TokenMode::Cumulative,
+        },
         quit: false,
     };
 

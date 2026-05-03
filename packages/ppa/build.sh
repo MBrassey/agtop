@@ -450,15 +450,55 @@ files.append(os.path.basename(changes_path))
 files = sorted(set(files))
 print("files:", files)
 
-# Pre-resolve to IPv6 address ourselves; pass a socket to Transport.
+# Pre-resolve and try every address family / record we get back,
+# in order: v4 first (more often routed correctly), then v6.  The
+# first family that completes the SSH banner-read wins.  Pre-2.4.x
+# we forced v6-only because v4 was shadowbanned at the time; that
+# blocked uploads when v6 routing later went away on user's ISP.
 host = "ppa.launchpad.net"
-print(f"resolving {host} (IPv6 only)…")
-ai = socket.getaddrinfo(host, 22, socket.AF_INET6, socket.SOCK_STREAM)
-addr = ai[0][4]
-print(f"  → {addr}")
-sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+print(f"resolving {host}…")
+candidates = []
+for fam in (socket.AF_INET, socket.AF_INET6):
+    try:
+        for entry in socket.getaddrinfo(host, 22, fam, socket.SOCK_STREAM):
+            candidates.append((fam, entry[4]))
+    except socket.gaierror:
+        pass
+print(f"  candidates: {[c[1] for c in candidates]}")
+
+sock = None
+last_err = None
+for fam, addr in candidates:
+    try:
+        s = socket.socket(fam, socket.SOCK_STREAM)
+        s.settimeout(20)
+        print(f"  trying {addr}…")
+        s.connect(addr)
+        # Confirm the SSH banner actually arrives before committing.
+        # Some endpoints accept TCP then go silent (rate-limited).
+        s.settimeout(15)
+        peek = s.recv(20, socket.MSG_PEEK)
+        if not peek.startswith(b"SSH-"):
+            print(f"    no banner (peek={peek!r}), trying next")
+            s.close()
+            last_err = RuntimeError(f"no SSH banner from {addr}")
+            continue
+        print(f"    banner OK, using {addr}")
+        sock = s
+        break
+    except (OSError, socket.timeout) as e:
+        print(f"    {type(e).__name__}: {e}")
+        last_err = e
+        continue
+
+if sock is None:
+    print("==> No reachable Launchpad SSH endpoint.")
+    print(f"    Last error: {last_err}")
+    print("    Likely a transient routing or rate-limit issue.")
+    print("    Build artefacts already signed — copy from /work/dist-ppa/")
+    print("    and dput from a host with reachable :22 to ppa.launchpad.net.")
+    sys.exit(4)
 sock.settimeout(60)
-sock.connect(addr)
 print("  TCP connected, starting SSH transport")
 
 t = paramiko.Transport(sock)
