@@ -699,12 +699,14 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &mut App) {
                   dim("Task subagents currently in flight")]),
         line(vec![Span::styled("    ● ACTV ", Style::default().fg(theme::c_active())),
                   dim("process running recently")]),
-        line(vec![Span::styled("    ○ idle ", Style::default().fg(theme::c_idle())),
+        line(vec![Span::styled("    ○ IDLE ", Style::default().fg(theme::c_idle()).add_modifier(Modifier::BOLD)),
                   dim("process up but quiet for >60s")]),
-        line(vec![Span::styled("    ◌ WAIT ", Style::default().fg(theme::c_wait())),
+        line(vec![Span::styled("    ◌ WAIT ", Style::default().fg(theme::c_wait()).add_modifier(Modifier::BOLD)),
                   dim("no live process, recent session activity")]),
-        line(vec![Span::styled("    ✓ DONE ", Style::default().fg(theme::c_done())),
+        line(vec![Span::styled("    ✓ DONE ", Style::default().fg(theme::c_done()).add_modifier(Modifier::BOLD)),
                   dim("session ended (stop_reason)")]),
+        line(vec![Span::styled("    · STAL ", Style::default().fg(theme::fg_dim()).add_modifier(Modifier::BOLD)),
+                  dim("last activity older than 24 h")]),
     ];
 
     // Help reuses the same scroll surface as the detail popup so the
