@@ -421,3 +421,43 @@ mod impl_ {
     use super::*;
     pub fn read(_pid: u32, _limit: usize) -> Vec<PathBuf> { Vec::new() }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::fs::OpenOptions;
+
+    /// Cross-platform end-to-end test.  Open a tempfile read-only,
+    /// assert our enumerator finds it for the current process.
+    /// Linux + macOS + Windows have native paths; FreeBSD has
+    /// libprocstat; the rest fall through to the empty stub.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    fn enumerates_self_open_readonly_file() {
+        // Write a file, then re-open it read-only so the test
+        // process holds an O_RDONLY fd to it.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        {
+            let mut w = OpenOptions::new().write(true).open(&path).unwrap();
+            writeln!(w, "agtop reading_files self-test").unwrap();
+        }
+        let _r = OpenOptions::new().read(true).open(&path).unwrap();
+
+        let pid = std::process::id();
+        let files = read(pid, 4096);
+        let canon = std::fs::canonicalize(&path).unwrap_or(path.clone());
+        let stem = path.file_name().unwrap().to_string_lossy();
+        let found = files.iter().any(|p| {
+            p == &path || p == &canon
+                || p.to_string_lossy().contains(stem.as_ref())
+        });
+        assert!(found,
+            "reading_files::read({}) did not include the test tempfile.\n\
+             Opened: {:?}\n\
+             Returned ({} entries):\n{}",
+            pid, path, files.len(),
+            files.iter().take(20).map(|p| format!("  {}", p.display())).collect::<Vec<_>>().join("\n"));
+    }
+}
