@@ -65,6 +65,22 @@ impl SysBackend {
         builtins: &[Matcher],
         user: &[UserMatcher],
     ) -> Vec<Agent> {
+        // Pre-compute parent → children map by walking every process
+        // once.  sysinfo doesn't expose a children iterator natively,
+        // so we reverse-walk parents and bucket per-pid.  Tree mode
+        // in the agents panel reads `agent.children` to render
+        // indented sub-rows under each agent — pre-2.4.x this was
+        // /proc-only, leaving macOS / Windows / *BSD with no tree.
+        let mut by_parent: std::collections::HashMap<u32, Vec<(u32, String)>> =
+            std::collections::HashMap::new();
+        for (pid, proc) in self.sys.processes() {
+            if let Some(parent) = proc.parent() {
+                let pp = parent.as_u32();
+                let comm = proc.name().to_string_lossy().into_owned();
+                by_parent.entry(pp).or_default().push((pid.as_u32(), comm));
+            }
+        }
+
         let mut out = Vec::new();
         for (pid, proc) in self.sys.processes() {
             let cmdline_parts: Vec<&str> = proc.cmd().iter()
@@ -161,13 +177,25 @@ impl SysBackend {
                 write_bytes: proc.disk_usage().total_written_bytes,
                 writing_files,
                 writing_dirs,
-                // sysinfo doesn't expose per-process FD lists or
-                // child enumeration on macOS / Windows / *BSD;
-                // these stay empty.  /proc/<pid>/net/tcp is also
-                // Linux-only.
-                reading_files: Vec::new(),
-                children: Vec::new(),
-                net_established: 0,
+                // Reading-files + net-established are populated below
+                // via platform-specific paths (libproc on macOS,
+                // GetExtendedTcpTable on Windows).  Children is
+                // built from the parent → children map computed
+                // above.
+                reading_files: crate::reading_files::read(pid.as_u32(), 6)
+                    .iter()
+                    .map(|p| crate::format::sanitize_control(&p.to_string_lossy()))
+                    .collect(),
+                children: by_parent.get(&pid.as_u32())
+                    .cloned()
+                    .map(|mut v| {
+                        v.truncate(8);
+                        v.into_iter()
+                            .map(|(c, n)| (c, crate::format::sanitize_control(&n)))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                net_established: crate::net_count::established(pid.as_u32()),
                 read_rate_bps: 0,
                 write_rate_bps: 0,
                 gpu_pct: 0.0,

@@ -1,6 +1,6 @@
 [package]
 name = "agtop"
-version = "2.4.8"
+version = "2.4.9"
 edition = "2021"
 rust-version = "1.74"
 description = "Terminal UI for monitoring AI coding agents (Claude Code, Codex, Aider, Cursor, Gemini, Goose, ...) — like top, but for agents."
@@ -38,6 +38,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
     "Wdk_System_SystemInformation",
     "Wdk_Foundation",
 ] }

@@ -75,6 +75,7 @@ impl TokenMode {
             }
         }
     }
+    #[allow(dead_code)]
     pub(super) fn label(self) -> &'static str {
         match self { TokenMode::Cumulative => "cumulative", TokenMode::Fresh => "fresh" }
     }
@@ -575,14 +576,27 @@ fn copy_via_osc52(payload: &str) {
 fn send_sigterm(pid: u32) {
     unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
 }
-#[cfg(not(unix))]
-fn send_sigterm(_pid: u32) {
-    // Windows: TerminateProcess via OpenProcess(PROCESS_TERMINATE).
-    // Out of scope for now — kill is rarely the right action for
-    // an agent on Windows anyway (Ctrl-C in the terminal is
-    // friendlier).  The K-key opens the confirm dialog regardless;
-    // pressing y here is just a no-op on non-Unix.
+#[cfg(windows)]
+fn send_sigterm(pid: u32) {
+    // Windows equivalent: OpenProcess(PROCESS_TERMINATE) +
+    // TerminateProcess.  Best-effort: silently no-op if the process
+    // is gone, the user lacks permissions, or the kernel refuses.
+    // Exit code 1 mirrors what most Windows tooling uses for "killed
+    // by user".
+    unsafe {
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        use windows_sys::Win32::Foundation::CloseHandle;
+        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !h.is_null() {
+            let _ = TerminateProcess(h, 1);
+            let _ = CloseHandle(h);
+        }
+    }
 }
+#[cfg(not(any(unix, windows)))]
+fn send_sigterm(_pid: u32) { /* no-op on truly exotic targets */ }
 
 fn handle_mouse(app: &mut App, m: MouseEvent) {
     // Wheel routing: when either popup is open, the wheel scrolls

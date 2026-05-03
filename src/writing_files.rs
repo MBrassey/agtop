@@ -362,6 +362,7 @@ mod impl_ {
 // there can return numbers but not paths — almost useless for agtop's
 // "writing files" surface.  Falls through to the empty-Vec stub.
 #[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
+#[allow(clashing_extern_declarations)]
 mod impl_ {
     use super::*;
     use std::ffi::{c_char, c_int, c_uint, c_void, CStr};

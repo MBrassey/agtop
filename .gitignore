@@ -19,3 +19,4 @@ packages/pacman/pkg/
 packages/pacman/agtop-*.tar.gz
 packages/pacman/.stage/
 dist-ppa/
+.claude/

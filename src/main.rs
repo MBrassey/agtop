@@ -19,6 +19,8 @@ mod proc_;
 mod sessions;
 mod plugins;
 mod skills;
+mod reading_files;
+mod net_count;
 mod sysbackend;
 mod writing_files;
 mod theme;

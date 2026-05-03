@@ -39,7 +39,7 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
         Sort::Mem     => agents.sort_by(|a, b| b.rss.cmp(&a.rss)),
         Sort::Tokens  => {
             let m = app.tokens_mode;
-            agents.sort_by(|a, b| m.value(b).cmp(&m.value(a)));
+            agents.sort_by_key(|a| std::cmp::Reverse(m.value(a)));
         }
         Sort::Uptime  => agents.sort_by(|a, b| b.uptime_sec.cmp(&a.uptime_sec)),
         Sort::Agent   => agents.sort_by(|a, b| a.label.cmp(&b.label)),
@@ -174,7 +174,7 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             let tint = Some(theme::group_tint(group_index));
             pid_order.push(a.pid);
             agent_row_indices.push(rows.len());
-            rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint, app.compact_rows, app.cols));
+            rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint, app.compact_rows, app.cols, app.tokens_mode));
             if app.tree_mode {
                 push_child_rows(&mut rows, a, tint);
             }
