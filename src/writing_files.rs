@@ -160,11 +160,15 @@ mod impl_ {
                 )
             };
             if n <= 0 { continue; }
-            // O_WRONLY = 1, O_RDWR = 2 (POSIX).  Treat fi_openflags
-            // as u32 (its declared type) — casting to i32 first
-            // would flip sign on the high bit.
+            // libproc fi_openflags uses BSD FREAD/FWRITE semantics
+            // (<sys/file.h>: FREAD=1, FWRITE=2), NOT POSIX O_RDONLY/
+            // O_WRONLY/O_RDWR.  The previous mask (libc::O_WRONLY |
+            // libc::O_RDWR) coincidentally matched FREAD|FWRITE bits
+            // and worked-by-accident for writable detection.  Make the
+            // semantics explicit: include when FWRITE is set.
+            const FWRITE: u32 = 0x2;
             let flags: u32 = info.pfi.fi_openflags;
-            if flags & (libc::O_WRONLY as u32 | libc::O_RDWR as u32) == 0 { continue; }
+            if (flags & FWRITE) == 0 { continue; }
 
             // vip_path is NUL-terminated c_char (i8 on Apple).
             let path = &info.pvip.vip_path;

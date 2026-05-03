@@ -11,6 +11,17 @@ pub fn established(pid: u32) -> u32 {
 }
 
 // ── macOS: libproc PROC_PIDFDSOCKETINFO ────────────────────────────────────
+//
+// Sequoia 15.7.5 / xnu-11417 layout (verified on Apple Silicon M4):
+//   sizeof(struct socket_fdinfo)        = 792 bytes
+//   sizeof(struct proc_fileinfo)        = 24
+//   sizeof(struct socket_info) (psi)    = 768
+//   soi_kind     within psi             = offset 232
+//   tcpsi_state  within psi             = offset 320
+// proc_pidfdinfo refuses any buffersize ≠ 792 (returns 0); previous
+// 4096-byte buffer caused the kernel to write nothing, leaving an
+// all-zero psi and silent count == 0.
+
 #[cfg(target_os = "macos")]
 pub fn established(pid: u32) -> u32 {
     use std::ffi::c_void;
@@ -21,6 +32,13 @@ pub fn established(pid: u32) -> u32 {
     const PROX_FDTYPE_SOCKET:     u32   = 2;
     const SOCKINFO_TCP:           c_int = 2;
     const TSI_S_ESTABLISHED:      c_int = 4;
+
+    // Layout-specific constants (xnu-11417, macOS 15.7.5).
+    const PSI_SIZE:           usize = 768;
+    const PROC_FILEINFO_SIZE: usize = 24;
+    const SOCKET_FDINFO_SIZE: usize = PROC_FILEINFO_SIZE + PSI_SIZE; // = 792
+    const SOI_KIND_OFFSET:    usize = 232;
+    const TCPSI_STATE_OFFSET: usize = 320;
 
     extern "C" {
         fn proc_pidinfo(
@@ -40,19 +58,15 @@ pub fn established(pid: u32) -> u32 {
         proc_fdtype: c_uint,
     }
 
-    // socket_fdinfo (Apple's sys/proc_info.h) — only the bytes up
-    // through tcpsi_state matter for our count.  Keep the layout
-    // opaque-tail to match the kernel-defined size; Apple has
-    // grown this struct over OS versions, so we allocate generously
-    // (4 KiB buffer) and let proc_pidfdinfo write whatever it needs.
     #[repr(C)]
     struct SocketFdInfo {
-        // 12 bytes file-info prefix.
-        _pfi: [u8; 24],
-        // Remainder is `socket_info`.  The first ~700 bytes contain
-        // soi_kind + the tcp_sockinfo union fields we need.
-        psi: [u8; 4072],
+        // proc_fileinfo prefix.
+        _pfi: [u8; PROC_FILEINFO_SIZE],
+        // socket_info — read soi_kind + tcpsi_state by offset.
+        psi: [u8; PSI_SIZE],
     }
+    // Compile-time verify the struct matches what the kernel expects.
+    const _: [(); SOCKET_FDINFO_SIZE] = [(); std::mem::size_of::<SocketFdInfo>()];
 
     let pid = pid as c_int;
     let probe = unsafe { proc_pidinfo(pid, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
@@ -78,23 +92,17 @@ pub fn established(pid: u32) -> u32 {
             proc_pidfdinfo(
                 pid, fd.proc_fd, PROC_PIDFDSOCKETINFO,
                 info.as_mut() as *mut _ as *mut c_void,
-                std::mem::size_of::<SocketFdInfo>() as c_int,
+                SOCKET_FDINFO_SIZE as c_int,
             )
         };
         if n <= 0 { continue; }
-        // psi[0..4] = soi_kind (i32, little-endian).
-        let soi_kind = i32::from_le_bytes([info.psi[0], info.psi[1], info.psi[2], info.psi[3]]);
+        // psi[SOI_KIND_OFFSET..+4] = soi_kind (i32, native endian)
+        let kind_bytes: &[u8] = &info.psi[SOI_KIND_OFFSET..SOI_KIND_OFFSET + 4];
+        let soi_kind = i32::from_ne_bytes([kind_bytes[0], kind_bytes[1], kind_bytes[2], kind_bytes[3]]);
         if soi_kind != SOCKINFO_TCP { continue; }
-        // tcpsi_state lives at offset 392 within socket_info on
-        // current macOS (XNU/sys/proc_info.h: sizeof(in_sockinfo)
-        // = 392, immediately followed by tcp_sockinfo whose first
-        // member is tcpsi_state: i32).  Bounds-check to defend
-        // against a kernel version where the offset shifted.
-        let off = 392usize;
-        if off + 4 > info.psi.len() { continue; }
-        let state = i32::from_le_bytes([
-            info.psi[off], info.psi[off + 1], info.psi[off + 2], info.psi[off + 3],
-        ]);
+        // psi[TCPSI_STATE_OFFSET..+4] = tcpsi_state (i32, native endian)
+        let st_bytes: &[u8] = &info.psi[TCPSI_STATE_OFFSET..TCPSI_STATE_OFFSET + 4];
+        let state = i32::from_ne_bytes([st_bytes[0], st_bytes[1], st_bytes[2], st_bytes[3]]);
         if state == TSI_S_ESTABLISHED { count += 1; }
     }
     count
@@ -307,8 +315,6 @@ mod tests {
     #[test]
     // Linux + Windows verified clean on real CI hardware.  macOS
     // socket-state offset (+392) needs hardware tuning for the
-    // current macOS SDK before this can run unconditionally.
-    #[cfg_attr(target_os = "macos", ignore)]
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     fn counts_self_established_tcp() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

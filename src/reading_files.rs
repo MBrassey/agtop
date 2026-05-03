@@ -144,10 +144,21 @@ mod impl_ {
                 )
             };
             if n <= 0 { continue; }
-            // Read-only: low 2 bits of openflags == 0 (O_RDONLY).
-            // O_WRONLY = 1, O_RDWR = 2; we want neither set.
+            // libproc fi_openflags uses BSD FREAD/FWRITE semantics
+            // (<sys/file.h>: FREAD=1, FWRITE=2), NOT the POSIX
+            // O_RDONLY/O_WRONLY/O_RDWR values used to open the file:
+            //   O_RDONLY  → fi_openflags = FREAD          = 0x1
+            //   O_WRONLY  → fi_openflags = FWRITE         = 0x2
+            //   O_RDWR    → fi_openflags = FREAD | FWRITE = 0x3
+            // Pre-2.4.12 we masked against POSIX O_WRONLY|O_RDWR, which
+            // happens to be 0x3 — the SAME bits as FREAD|FWRITE — so
+            // every read-only fd (FREAD=1) tested as "O_WRONLY-set"
+            // and got filtered out.  Use the right semantics: include
+            // when FREAD is set AND FWRITE is clear.
+            const FREAD:  u32 = 0x1;
+            const FWRITE: u32 = 0x2;
             let flags: u32 = info.pfi.fi_openflags;
-            if flags & (libc::O_WRONLY as u32 | libc::O_RDWR as u32) != 0 { continue; }
+            if (flags & FREAD) == 0 || (flags & FWRITE) != 0 { continue; }
 
             let path = &info.pvip.vip_path;
             let nul = path.iter().position(|&b| b == 0).unwrap_or(path.len());
@@ -439,8 +450,6 @@ mod tests {
     // compiles + cross-checks but needs hardware iteration to
     // tune the libproc fi_openflags interpretation; gate it off
     // until then.  Run `cargo test -- --include-ignored` on a Mac
-    // to surface the failure for triage.
-    #[cfg_attr(target_os = "macos", ignore)]
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     fn enumerates_self_open_readonly_file() {
         // Write a file, then re-open it read-only so the test
