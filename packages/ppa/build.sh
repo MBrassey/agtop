@@ -394,6 +394,19 @@ git archive --format=tar HEAD debian | (cd "$src_dir" && tar -xf -)
 # Source-only build, sign with GPG.  -sa forces inclusion of the
 # .orig.tar.gz on every upload (Launchpad rejects subsequent
 # uploads that omit it for a brand-new ${ppa_version}).
+# Warm gpg-agent's passphrase cache via a dummy sign right before
+# debuild, so debsign's gpg invocation finds the cached passphrase
+# instead of prompting (which then fails with 'Bad passphrase'
+# under loopback when gpg-agent doesn't have it cached).
+if [ -n "${GPG_PASSPHRASE:-}" ]; then
+  echo "==> Warming gpg-agent passphrase cache"
+  printf '%s' 'agtop-ppa-warmup' | \
+    gpg --batch --yes --pinentry-mode loopback \
+        --passphrase-fd 3 --local-user "${DEBEMAIL:-matt@brassey.io}" \
+        --output /dev/null --sign - 3<<< "$GPG_PASSPHRASE" \
+    && echo "    cache primed" \
+    || echo "    warmup failed (debsign will prompt; if it fails, GPG_PASSPHRASE is wrong)"
+fi
 ( cd "$src_dir" && debuild -S -sa -d )
 
 changes="${build_dir}/agtop_${ppa_version}_source.changes"
