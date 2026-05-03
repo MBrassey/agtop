@@ -18,3 +18,4 @@ packages/pacman/src/
 packages/pacman/pkg/
 packages/pacman/agtop-*.tar.gz
 packages/pacman/.stage/
+dist-ppa/
