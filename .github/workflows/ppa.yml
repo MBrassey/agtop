@@ -70,21 +70,12 @@ jobs:
             find "/tmp/agtop-$version/vendor" -type f -path '*/lib/lib*.a' -delete 2>/dev/null )
           # cargo vendor stamps each crate with .cargo-checksum.json
           # listing every file's sha256 — pruning files invalidates
-          # those checksums, so regenerate them via `--respect-source-config`
-          # by re-running vendor.  Cheaper alternative: rewrite the
-          # checksum files inline to drop pruned entries.
+          # those checksums, so packages/ppa/vendor-prune.py walks
+          # every checksum and drops entries whose target no longer
+          # exists.  Externalised because inlining python source in
+          # YAML's block scalar broke the parser.
           ( cd "/tmp/agtop-$version" && \
-              python3 -c '
-import json, glob, os, hashlib
-for ck in glob.glob("vendor/*/.cargo-checksum.json"):
-    crate_dir = os.path.dirname(ck)
-    with open(ck) as f: d = json.load(f)
-    files = d.get("files", {})
-    files = {k: v for k, v in files.items()
-             if os.path.exists(os.path.join(crate_dir, k))}
-    d["files"] = files
-    with open(ck, "w") as f: json.dump(d, f)
-' )
+              python3 "$GITHUB_WORKSPACE/packages/ppa/vendor-prune.py" )
           tar --owner=0 --group=0 --numeric-owner \
               -czf "/tmp/agtop_${version}.orig.tar.gz" \
               -C /tmp "agtop-$version"
