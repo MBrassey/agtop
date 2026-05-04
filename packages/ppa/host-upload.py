@@ -145,22 +145,22 @@ def main() -> int:
     print("    authenticated")
 
     sftp = paramiko.SFTPClient.from_transport(t)
-    print(f"    remote pwd before cd: {sftp.normalize('.')}")
-    # CRITICAL: Launchpad's SFTP lands you in the incoming directory
-    # for UBUNTU'S PRIMARY ARCHIVE.  Uploading there as a non-DD
-    # rejects with "The signer of this package has no upload rights
-    # to this distribution's primary archive. Did you mean to upload
-    # to a PPA?".  To target a PPA, cd into ~<user>/<archive>/ubuntu/
-    # (this is what dput-ng's `incoming = ~%(ppa)s/ubuntu/` resolves
-    # to).
-    incoming = f"~{user}/{archive}/ubuntu"
-    try:
-        sftp.chdir(incoming)
-    except IOError:
-        # Some SFTP servers don't expand ~; try without the prefix
-        # (relative-to-home).
-        sftp.chdir(f"{user}/{archive}/ubuntu")
-    print(f"    remote pwd after cd:  {sftp.normalize('.')}")
+    print(f"    remote pwd: {sftp.normalize('.')}")
+    # CRITICAL: Launchpad's SFTP default landing dir is the incoming
+    # queue for UBUNTU'S PRIMARY ARCHIVE — uploading there rejects
+    # with 'The signer of this package has no upload rights to this
+    # distribution's primary archive.  Did you mean to upload to a
+    # PPA?'.  Per-PPA uploads must target ~<user>/<archive>/ubuntu/
+    # (what dput-ng's `incoming = ~%(ppa)s/ubuntu/` resolves to).
+    #
+    # paramiko.SFTPClient.chdir() calls stat() first to verify the
+    # target is a directory; Launchpad's SFTP returns None for stat
+    # on those paths, raising TypeError before chdir actually runs.
+    # Skip the stat dance by setting _cwd directly OR by passing
+    # the full path to each put().  Using full path is more robust
+    # — works regardless of paramiko / server stat-quirk evolution.
+    remote_prefix = f"~{user}/{archive}/ubuntu"
+    print(f"    PPA incoming target: {remote_prefix}/")
 
     # Upload each file with a progress callback.
     for f in files:
@@ -179,7 +179,7 @@ def main() -> int:
         # paramiko raises 'size mismatch in put! None != N'.  We
         # still know the upload succeeded because put() returns
         # without raising on transport errors.
-        sftp.put(str(local), f, callback=cb, confirm=False)
+        sftp.put(str(local), f"{remote_prefix}/{f}", callback=cb, confirm=False)
         print()
 
     sftp.close()
