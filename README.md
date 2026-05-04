@@ -49,7 +49,8 @@ transcript preview.
 | Platform                       | Command                                |
 | ------------------------------ | -------------------------------------- |
 | Arch / CachyOS                 | `yay -S agtop`                         |
-| Debian / Ubuntu / Mint / Pop!_OS | apt source — see [below](#debian-and-ubuntu-apt-source) |
+| Ubuntu / Mint / Pop!_OS        | Launchpad PPA — `sudo add-apt-repository ppa:mbrassey/agtop && sudo apt install agtop` |
+| Debian                         | apt source — see [below](#debian-apt-source) |
 | macOS                          | `brew install mbrassey/tap/agtop`      |
 | Windows                        | `winget install agtop`                 |
 | FreeBSD                        | `sudo pkg install agtop`               |
@@ -59,7 +60,26 @@ transcript preview.
 
 [rel]: https://github.com/MBrassey/agtop/releases/latest
 
-#### Debian and Ubuntu apt source
+#### Ubuntu / Mint / Pop!_OS — Launchpad PPA
+
+The package is built and signed by Launchpad's amd64 / arm64 farm
+straight from the upstream tag, so updates land within minutes of a
+release without touching this repo's CI.
+
+```sh
+sudo add-apt-repository ppa:mbrassey/agtop
+sudo apt update && sudo apt install agtop
+```
+
+Watch the build queue at
+<https://launchpad.net/~mbrassey/+archive/ubuntu/agtop>.  Subsequent
+updates flow through `sudo apt update && sudo apt upgrade` like any
+other apt package.
+
+#### Debian apt source
+
+Launchpad PPAs target Ubuntu series only.  Debian users add the
+self-hosted apt repo:
 
 ```sh
 sudo install -d -m 0755 /etc/apt/keyrings
@@ -70,10 +90,10 @@ echo "deb [signed-by=/etc/apt/keyrings/agtop.gpg] https://mbrassey.github.io/apt
 sudo apt update && sudo apt install agtop
 ```
 
-> The `install -d` line is required on Ubuntu 20.04 / older Debian
-> where `/etc/apt/keyrings/` doesn't exist by default — without it
-> the `gpg --dearmor` write fails silently and `apt update` skips
-> the source.
+> The `install -d` line is required on older Debian releases where
+> `/etc/apt/keyrings/` doesn't exist by default — without it the
+> `gpg --dearmor` write fails silently and `apt update` skips the
+> source.
 
 Subsequent updates flow through `sudo apt update && sudo apt upgrade`
 like any other apt package.
