@@ -128,21 +128,53 @@ def main() -> int:
     t.start_client(timeout=60)
     print(f"    remote: {t.remote_version}")
 
-    # Load key.
-    key_path = args.key
-    pp = args.key_passphrase or None
-    try:
-        key = paramiko.Ed25519Key.from_private_key_file(key_path, password=pp)
-    except paramiko.ssh_exception.PasswordRequiredException:
-        if not sys.stdin.isatty():
-            sys.exit("SSH key has passphrase; set SSH_PASSPHRASE env var")
-        pp = getpass.getpass(f"Passphrase for {key_path}: ")
-        key = paramiko.Ed25519Key.from_private_key_file(key_path, password=pp)
-    except paramiko.ssh_exception.SSHException as e:
-        sys.exit(f"can't load {key_path}: {e}.  Try `ssh-keygen -p -f {key_path}` to remove passphrase.")
+    # Auth strategy:
+    #   1. ssh-agent (or gpg-agent's ssh socket) if SSH_AUTH_SOCK is
+    #      set and holds at least one identity — zero-prompt path,
+    #      preferred when the user has already unlocked their key
+    #      for this session.
+    #   2. paramiko load from key_path, falling back to interactive
+    #      passphrase prompt if the key is encrypted.
+    authed = False
+    auth_sock = os.environ.get("SSH_AUTH_SOCK")
+    if auth_sock:
+        try:
+            agent = paramiko.Agent()
+            agent_keys = agent.get_keys()
+        except Exception as e:
+            print(f"    ssh-agent at {auth_sock} unusable: {e}")
+            agent_keys = ()
+        if agent_keys:
+            print(f"    ssh-agent has {len(agent_keys)} key(s); trying agent auth")
+            for ak in agent_keys:
+                try:
+                    t.auth_publickey(user, ak)
+                    print(f"    authenticated via ssh-agent ({ak.get_name()} {ak.get_fingerprint().hex()[:16]})")
+                    authed = True
+                    break
+                except paramiko.ssh_exception.AuthenticationException:
+                    continue
+            if not authed:
+                print("    none of the agent keys were accepted; falling back to file-based key")
+        else:
+            print(f"    ssh-agent at {auth_sock} has no identities loaded; run: ssh-add {args.key}")
 
-    t.auth_publickey(user, key)
-    print("    authenticated")
+    if not authed:
+        key_path = args.key
+        pp = args.key_passphrase or None
+        try:
+            key = paramiko.Ed25519Key.from_private_key_file(key_path, password=pp)
+        except paramiko.ssh_exception.PasswordRequiredException:
+            if not sys.stdin.isatty():
+                sys.exit(f"SSH key {key_path} has passphrase.  Either:\n"
+                         f"  - run  ssh-add {key_path}  in your shell first (recommended), or\n"
+                         f"  - set  SSH_PASSPHRASE=...  env var when invoking this script")
+            pp = getpass.getpass(f"Passphrase for {key_path}: ")
+            key = paramiko.Ed25519Key.from_private_key_file(key_path, password=pp)
+        except paramiko.ssh_exception.SSHException as e:
+            sys.exit(f"can't load {key_path}: {e}.  Try `ssh-keygen -p -f {key_path}` to remove passphrase.")
+        t.auth_publickey(user, key)
+        print("    authenticated via key file")
 
     sftp = paramiko.SFTPClient.from_transport(t)
     print(f"    remote pwd: {sftp.normalize('.')}")
