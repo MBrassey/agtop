@@ -159,7 +159,12 @@ def main() -> int:
                 pct = (done / total * 100) if total else 0
                 print(f"\r    -> {f} ({size:,} bytes) {pct:5.1f}%", end="", flush=True)
                 last[0] = now
-        sftp.put(str(local), f, callback=cb)
+        # confirm=False: Launchpad's PPA incoming/ is upload-only,
+        # sftp.stat() on a just-uploaded file returns no size and
+        # paramiko raises 'size mismatch in put! None != N'.  We
+        # still know the upload succeeded because put() returns
+        # without raising on transport errors.
+        sftp.put(str(local), f, callback=cb, confirm=False)
         print()
 
     sftp.close()
