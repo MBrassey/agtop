@@ -145,7 +145,22 @@ def main() -> int:
     print("    authenticated")
 
     sftp = paramiko.SFTPClient.from_transport(t)
-    print(f"    remote pwd: {sftp.normalize('.')}")
+    print(f"    remote pwd before cd: {sftp.normalize('.')}")
+    # CRITICAL: Launchpad's SFTP lands you in the incoming directory
+    # for UBUNTU'S PRIMARY ARCHIVE.  Uploading there as a non-DD
+    # rejects with "The signer of this package has no upload rights
+    # to this distribution's primary archive. Did you mean to upload
+    # to a PPA?".  To target a PPA, cd into ~<user>/<archive>/ubuntu/
+    # (this is what dput-ng's `incoming = ~%(ppa)s/ubuntu/` resolves
+    # to).
+    incoming = f"~{user}/{archive}/ubuntu"
+    try:
+        sftp.chdir(incoming)
+    except IOError:
+        # Some SFTP servers don't expand ~; try without the prefix
+        # (relative-to-home).
+        sftp.chdir(f"{user}/{archive}/ubuntu")
+    print(f"    remote pwd after cd:  {sftp.normalize('.')}")
 
     # Upload each file with a progress callback.
     for f in files:
