@@ -141,7 +141,17 @@ EOF
   if [ "${PPA_NETWORK:-host}" = "bridge" ]; then
     net_flag=()
   fi
-  exec "$engine" run --rm -it \
+  # -t only when stdin is a TTY (interactive run).  CI / automation
+  # invokes this with stdin redirected from /dev/null; -t in that
+  # mode aborts with 'cannot attach stdin to a TTY-enabled container'.
+  tty_flag=()
+  [ -t 0 ] && tty_flag=(-it)
+  # Run (don't exec) so we can sign + upload from the host after
+  # the container exits.  Container output is unsigned because
+  # forwarding gpg-agent into the docker namespace is fragile;
+  # the host-side debsign below uses the host agent's cached
+  # passphrase (no prompt, no env var).
+  "$engine" run --rm "${tty_flag[@]}" \
     "${net_flag[@]}" \
     -v "$root":/work \
     -v "$secret_export":/secret-key.gpg:ro \
@@ -156,6 +166,8 @@ EOF
     -e GPG_PASSPHRASE="${GPG_PASSPHRASE:-}" \
     -e SSH_PASSPHRASE="${SSH_PASSPHRASE:-}" \
     -e IN_PPA_CONTAINER=1 \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
     -w /work \
     "ubuntu:${series}" \
     bash -c "
@@ -296,7 +308,36 @@ SSHCFG
       fi
       echo \"==> Re-entering build.sh inside container\"
       ./packages/ppa/build.sh '${series}'
+      # Container ran as root → chown dist-ppa/ back to the host
+      # uid:gid so the user can rm/inspect without sudo.
+      if [ -d /work/dist-ppa ] && [ -n \"\${HOST_UID:-}\" ]; then
+        chown -R \"\${HOST_UID}:\${HOST_GID:-\${HOST_UID}}\" /work/dist-ppa || true
+      fi
     "
+
+  container_status=$?
+  if [ $container_status -ne 0 ]; then
+    echo "==> Container build failed (exit $container_status)" >&2
+    exit $container_status
+  fi
+
+  # Container produced unsigned dist-ppa/*.dsc and *_source.changes.
+  # Sign on the host so we use the host gpg-agent's cached passphrase
+  # (no second prompt, no GPG_PASSPHRASE env var, no agent socket
+  # forwarding through docker).
+  if [ -d "$root/dist-ppa" ] && ls "$root/dist-ppa"/*.dsc >/dev/null 2>&1; then
+    echo "==> Signing source package on host (uses host gpg-agent)"
+    python3 "$here/host-sign.py" --dir "$root/dist-ppa" --key "$email"
+  fi
+
+  if [ "${PPA_NO_UPLOAD:-0}" != "1" ]; then
+    echo "==> Uploading signed source pkg to ${ppa_target_default}"
+    python3 "$here/host-upload.py" --target "$ppa_target_default"
+  else
+    echo "==> PPA_NO_UPLOAD=1 — skipping upload.  Sign + upload manually with:"
+    echo "      python3 packages/ppa/host-upload.py"
+  fi
+  exit 0
 fi
 
 # Resolve current version from Cargo.toml so the PPA build always
@@ -398,7 +439,12 @@ if [ -n "${GPG_PASSPHRASE:-}" ]; then
     && echo "    cache primed" \
     || echo "    warmup failed (debsign will prompt; if it fails, GPG_PASSPHRASE is wrong)"
 fi
-( cd "$src_dir" && debuild -S -sa -d )
+# Build unsigned in the container.  Signing happens on the host
+# (after the container exits) using debsign + the host gpg-agent's
+# cached passphrase — which means the container never needs the
+# secret-key passphrase at all and we don't have to forward the
+# agent socket through the docker namespace boundary.
+( cd "$src_dir" && debuild -S -sa -us -uc -d )
 
 changes="${build_dir}/agtop_${ppa_version}_source.changes"
 [ -f "$changes" ] || { echo "expected $changes — debuild output mismatch"; ls "$build_dir"; exit 1; }
