@@ -364,16 +364,7 @@ echo "==> Pruning vendored crate cruft + patching checksums"
   # winapi-*-pc-windows-gnu/lib/*.a files are precompiled binary
   # import libraries — lintian rejects them in source packages.
   find vendor -type f -path '*/lib/lib*.a' -delete 2>/dev/null
-  python3 -c '
-import json, glob, os
-for ck in glob.glob("vendor/*/.cargo-checksum.json"):
-    crate = os.path.dirname(ck)
-    with open(ck) as f: d = json.load(f)
-    files = d.get("files", {})
-    files = {k: v for k, v in files.items() if os.path.exists(os.path.join(crate, k))}
-    d["files"] = files
-    with open(ck, "w") as f: json.dump(d, f)
-'
+  python3 "$root/packages/ppa/vendor-prune.py"
 )
 
 ( cd "$build_dir" && tar --owner=0 --group=0 --numeric-owner -czf "agtop_${version}.orig.tar.gz" "agtop-${version}" )
