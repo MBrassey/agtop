@@ -17,14 +17,21 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export RUSTFLAGS = -C link-arg=-Wl,-z,relro,-z,now
 export CARGO_NET_OFFLINE = true
 
+# Pin to noble's rustc-1.85 / cargo-1.85.  Stock noble ships
+# rustc 1.75 (no edition2024); a number of our deps — clap_derive,
+# ratatui, et al — require edition2024 which landed in Rust 1.85.
+CARGO  ?= /usr/bin/cargo-1.85
+RUSTC  ?= /usr/bin/rustc-1.85
+export CARGO RUSTC
+
 %:
 	dh $@
 
 override_dh_auto_build:
-	cargo build --release --frozen --offline --locked
+	$(CARGO) build --release --frozen --offline --locked
 
 override_dh_auto_test:
-	cargo test --release --frozen --offline --locked
+	$(CARGO) test --release --frozen --offline --locked
 
 override_dh_auto_install:
 	install -Dm755 target/release/agtop \
