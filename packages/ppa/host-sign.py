@@ -61,27 +61,37 @@ def update_changes_for_dsc(changes: Path, dsc: Path) -> None:
     out_lines: list[str] = []
     section: str | None = None
     for line in body.splitlines():
-        if re.match(r"^[A-Z][A-Za-z-]*:", line):
+        # Section header.  Must allow digits so `Checksums-Sha1:` and
+        # `Checksums-Sha256:` are detected — earlier `[A-Za-z-]*`
+        # bailed at the digit and dropped both stanzas through the
+        # default `out_lines.append(line)` branch unmodified.
+        if re.match(r"^[A-Z][A-Za-z0-9-]*:", line):
             section = line.split(":", 1)[0]
             out_lines.append(line)
             continue
+        # str.split() drops the leading whitespace, so tok[0] is the
+        # hash itself (not an empty string).  Files: layout is
+        # `<md5> <size> <section> <priority> <filename>` (5 cols);
+        # Checksums-Sha{1,256}: layout is `<hash> <size> <filename>`
+        # (3 cols).  Preserve every column except the hash + size we
+        # need to replace.
         if section == "Files" and line.startswith(" ") and line.rstrip().endswith(name):
             tok = line.split()
-            tok[1] = md5
-            tok[2] = str(size)
-            out_lines.append(" " + " ".join(tok[1:]))
+            tok[0] = md5
+            tok[1] = str(size)
+            out_lines.append(" " + " ".join(tok))
             continue
         if section == "Checksums-Sha1" and line.startswith(" ") and line.rstrip().endswith(name):
             tok = line.split()
-            tok[1] = sha1
-            tok[2] = str(size)
-            out_lines.append(" " + " ".join(tok[1:]))
+            tok[0] = sha1
+            tok[1] = str(size)
+            out_lines.append(" " + " ".join(tok))
             continue
         if section == "Checksums-Sha256" and line.startswith(" ") and line.rstrip().endswith(name):
             tok = line.split()
-            tok[1] = sha256
-            tok[2] = str(size)
-            out_lines.append(" " + " ".join(tok[1:]))
+            tok[0] = sha256
+            tok[1] = str(size)
+            out_lines.append(" " + " ".join(tok))
             continue
         out_lines.append(line)
     changes.write_text("\n".join(out_lines) + "\n")
