@@ -17,11 +17,13 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export RUSTFLAGS = -C link-arg=-Wl,-z,relro,-z,now
 export CARGO_NET_OFFLINE = true
 
-# Pin to noble's rustc-1.85 / cargo-1.85.  Stock noble ships
-# rustc 1.75 (no edition2024); a number of our deps — clap_derive,
-# ratatui, et al — require edition2024 which landed in Rust 1.85.
-CARGO  ?= /usr/bin/cargo-1.85
-RUSTC  ?= /usr/bin/rustc-1.85
+# Pin to noble's rustc-1.89 / cargo-1.89.  Stock noble ships
+# rustc 1.75 (no edition2024); a number of our deps require Rust
+# >= 1.88 (sysinfo, ratatui, darling, instability, time…) and
+# edition2024 (clap_derive et al, stabilised in 1.85).  1.89 is
+# the highest noble-main rustc that satisfies both.
+CARGO  ?= /usr/bin/cargo-1.89
+RUSTC  ?= /usr/bin/rustc-1.89
 export CARGO RUSTC
 
 %:
