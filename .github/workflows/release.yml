@@ -386,6 +386,51 @@ jobs:
   # we lost was redundant.  snap/snapcraft.yaml is kept around for
   # users who still want to build locally with `snapcraft pack`.
 
+  publish-winget:
+    name: Publish to winget (microsoft/winget-pkgs)
+    # SHA256SUMS must be on the release before wingetcreate computes
+    # the installer hash from the URL (it re-downloads, but matching
+    # the published sums catches any mismatch early).
+    needs: [build, sha256sums]
+    runs-on: windows-latest
+    steps:
+      - name: Resolve version
+        id: ver
+        shell: bash
+        # Tag is `v<X>.<Y>.<Z>`; the manifest version field expects
+        # the bare semver without the leading `v`.
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install wingetcreate
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe --version
+
+      - name: Submit manifest update
+        shell: pwsh
+        env:
+          WINGET_PAT: ${{ secrets.WINGET_PAT }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:WINGET_PAT)) {
+            Write-Host "::warning::WINGET_PAT secret not set — skipping winget submission"
+            exit 0
+          }
+          $ver = "${{ steps.ver.outputs.version }}"
+          $url = "https://github.com/MBrassey/agtop/releases/download/v$ver/agtop-windows-x86_64.zip"
+          # `update -s -t` opens the PR against microsoft/winget-pkgs
+          # via the user's fork (auto-detected from the token). The
+          # tool fetches the URL, computes sha256, patches the three
+          # YAML manifests under manifests/m/MBrassey/agtop/$ver/,
+          # commits, pushes branch `agtop-$ver` to the fork, and
+          # opens the PR — same flow as scripts/finalize_winget_port.sh
+          # but driven entirely by CI.
+          .\wingetcreate.exe update MBrassey.agtop `
+            --version $ver `
+            --urls "$url|x64" `
+            --submit `
+            --token $env:WINGET_PAT
+
   publish-homebrew:
     name: Publish to Homebrew tap
     needs: build
