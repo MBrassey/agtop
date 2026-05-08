@@ -298,6 +298,14 @@ fn analyse(records: &[Value]) -> AnalysisOut {
 /// the encoding is lossy).
 fn encode_cwd(cwd: &str) -> String {
     if cwd.is_empty() { return String::new(); }
+    // Sysinfo on Windows hands back paths with a trailing `\` for many
+    // processes (`C:\workspace\proj1\`); without trimming, the encoded
+    // dir name picks up a stray trailing `-` and never matches Claude
+    // Code's own encoding (`C--workspace-proj1`).  Preserve bare-root
+    // paths (`/`, `C:\`) by keeping the original when the trim would
+    // empty the string.
+    let trimmed = cwd.trim_end_matches(&['/', '\\'][..]);
+    let cwd = if trimmed.is_empty() { cwd } else { trimmed };
     let mut chars = cwd.chars();
     let first = chars.next().unwrap();
     // Windows drive letter — `C:\Users\u\proj` → `C--Users-u-proj`
@@ -565,5 +573,41 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     SessionsResult {
         sessions: crate::model::Sessions { sessions, recent_tasks, active, busy, waiting, completed },
         by_pid,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_posix_cwd() {
+        assert_eq!(encode_cwd("/home/u/code/proj"), "-home-u-code-proj");
+        assert_eq!(encode_cwd("/home/u/code/proj/"), "-home-u-code-proj");
+        assert_eq!(encode_cwd("/"), "-");
+    }
+
+    #[test]
+    fn encode_windows_cwd() {
+        assert_eq!(encode_cwd(r"C:\Users\u\proj"), "C--Users-u-proj");
+        // Trailing backslash from Windows sysinfo must NOT leak into the
+        // encoded dir name — Claude Code's own encoding produces no
+        // trailing dash, and a mismatched key dropped agents off the
+        // session-attached pipeline (jakeagtop.png repro).
+        assert_eq!(encode_cwd(r"C:\workspace\proj1\"), "C--workspace-proj1");
+        assert_eq!(encode_cwd(r"C:\workspace\proj1"), "C--workspace-proj1");
+        // Mixed separators (some shells normalise to forward slash).
+        assert_eq!(encode_cwd(r"C:/workspace/proj1"), "C--workspace-proj1");
+        assert_eq!(encode_cwd(""), "");
+    }
+
+    #[test]
+    fn encode_idempotent_with_or_without_trailing_sep() {
+        assert_eq!(
+            encode_cwd(r"C:\workspace\proj1\"),
+            encode_cwd(r"C:\workspace\proj1"));
+        assert_eq!(
+            encode_cwd("/home/u/code/proj/"),
+            encode_cwd("/home/u/code/proj"));
     }
 }
