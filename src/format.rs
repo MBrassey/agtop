@@ -200,7 +200,11 @@ fn derive_project_raw(cwd: &str, exe: &str, cmdline: &str, label: &str) -> Strin
         return format!("{} {}", label, trimmed);
     }
     // Tertiary: exe basename, if it's not just a copy of the label.
-    let exe_basename = exe.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    // Windows exes use backslash separators and `.exe` suffix.
+    let exe_trimmed = exe.trim_end_matches(&['/', '\\'][..]);
+    let exe_basename = exe_trimmed.rsplit(['/', '\\'])
+        .find(|s| !s.is_empty()).unwrap_or("")
+        .trim_end_matches(".exe");
     if !exe_basename.is_empty() && exe_basename != label && exe_basename != "?" {
         return exe_basename.to_string();
     }

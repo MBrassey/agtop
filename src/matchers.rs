@@ -18,32 +18,41 @@ pub fn builtin() -> Vec<Matcher> {
     // word-boundary prefix: start, forward slash, backslash (Windows
     // paths), or whitespace.
     const P: &str = r"(^|[\s/\\])";
+    // Trailing word-boundary: whitespace, end, or a Windows shim
+    // suffix (.exe / .cmd / .ps1 / .bat). On Windows, npm-installed
+    // CLIs are exposed as `<name>.cmd` shims and the bare exe shows
+    // up as `<name>.exe`; without these the cmdline `claude.exe` or
+    // `claude.cmd --print` would never match `claude(\s|$)`.
+    const E: &str = r"(\.(exe|cmd|ps1|bat))?(\s|$)";
     let m = |label: &'static str, body: &str| Matcher {
         label,
         re: Regex::new(body).expect("builtin regex"),
     };
     let p = |s: &str| format!("{P}{s}");
     vec![
-        m("claude",       &p(r"claude(-code)?(\s|$)")),
-        m("claude-code",  r"@anthropic-ai/claude-code"),
-        m("codex",        &p(r"codex(\s|$)")),
-        m("openai-codex", r"@openai/codex"),
+        m("claude",       &p(&format!(r"claude(-code)?{E}"))),
+        // Scoped npm package paths: forward slash on Linux/macOS, but
+        // backslash on Windows (`...\node_modules\@anthropic-ai\claude-code\cli.js`).
+        // Same for the other scoped agents below.
+        m("claude-code",  r"@anthropic-ai[/\\]claude-code"),
+        m("codex",        &p(&format!(r"codex{E}"))),
+        m("openai-codex", r"@openai[/\\]codex"),
         m("aider",        &p(r"aider(\s|$|\.)")),
-        m("cursor-agent", &p(r"cursor-agent(\s|$)")),
-        m("gemini",       &p(r"gemini(-cli)?(\s|$)")),
-        m("goose",        &p(r"goose(\s|$)")),
-        m("continue",     &p(r"continue(-cli|-agent)?(\s|$)")),
-        m("opencode",     &p(r"opencode(\s|$)")),
+        m("cursor-agent", &p(&format!(r"cursor-agent{E}"))),
+        m("gemini",       &p(&format!(r"gemini(-cli)?{E}"))),
+        m("goose",        &p(&format!(r"goose{E}"))),
+        m("continue",     &p(&format!(r"continue(-cli|-agent)?{E}"))),
+        m("opencode",     &p(&format!(r"opencode{E}"))),
         m("copilot",      r"gh[\s-]copilot|github-copilot-cli"),
-        m("cody",         &p(r"cody(\s|$)")),
-        m("amp",          r"(^|[\s/])amp(\s|$)|@sourcegraph/amp"),
-        m("crush",        &p(r"crush(\s|$)")),
-        m("mods",         &p(r"mods(\s|$)")),
-        m("sgpt",         &p(r"sgpt(\s|$)")),
-        m("llm",          &p(r"llm(\s|$)")),
+        m("cody",         &p(&format!(r"cody{E}"))),
+        m("amp",          r"(^|[\s/\\])amp(\.(exe|cmd|ps1|bat))?(\s|$)|@sourcegraph[/\\]amp"),
+        m("crush",        &p(&format!(r"crush{E}"))),
+        m("mods",         &p(&format!(r"mods{E}"))),
+        m("sgpt",         &p(&format!(r"sgpt{E}"))),
+        m("llm",          &p(&format!(r"llm{E}"))),
         m("ollama",       &p(r"ollama(\s+(run|chat|serve)|$)")),
-        m("fabric",       &p(r"fabric(\s|$)")),
-        m("block-goose",  &p(r"goose-server")),
+        m("fabric",       &p(&format!(r"fabric{E}"))),
+        m("block-goose",  &p(&format!(r"goose-server{E}"))),
     ]
 }
 
@@ -135,5 +144,43 @@ mod tests {
         let b = builtin();
         let u: Vec<UserMatcher> = vec![];
         assert_eq!(classify("", &b, &u), None);
+    }
+
+    // Windows paths use backslash separators and CLI shims expose the
+    // tool as `<name>.cmd` / `<name>.exe`. Pre-2.4.x these were silent
+    // misses and produced an empty Agents pane on Windows even when
+    // Claude/Codex were running — see dist/jakeagtop.png for the
+    // user-reported repro. Lock the regression in.
+    #[test]
+    fn windows_npm_global_paths() {
+        let b = builtin();
+        let u: Vec<UserMatcher> = vec![];
+        // npm-on-Windows global install: claude-code via node.exe shim.
+        assert_eq!(
+            classify(
+                r"C:\Program Files\nodejs\node.exe C:\Users\jake\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\cli.js",
+                &b, &u),
+            Some("claude-code"));
+        assert_eq!(
+            classify(
+                r"node.exe C:\Users\jake\AppData\Roaming\npm\node_modules\@openai\codex\dist\cli.js chat",
+                &b, &u),
+            Some("openai-codex"));
+        assert_eq!(
+            classify(
+                r"node C:\Users\jake\AppData\Roaming\npm\node_modules\@sourcegraph\amp\bin\amp.js",
+                &b, &u),
+            Some("amp"));
+    }
+
+    #[test]
+    fn windows_cmd_and_exe_shims() {
+        let b = builtin();
+        let u: Vec<UserMatcher> = vec![];
+        assert_eq!(classify(r"C:\Users\jake\AppData\Roaming\npm\claude.cmd --print", &b, &u), Some("claude"));
+        assert_eq!(classify(r"C:\Users\jake\AppData\Roaming\npm\codex.cmd chat", &b, &u), Some("codex"));
+        assert_eq!(classify(r"C:\bin\claude.exe", &b, &u), Some("claude"));
+        assert_eq!(classify(r"C:\bin\gemini.exe --interactive", &b, &u), Some("gemini"));
+        assert_eq!(classify(r"goose.exe session", &b, &u), Some("goose"));
     }
 }

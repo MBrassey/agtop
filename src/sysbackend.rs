@@ -94,8 +94,20 @@ impl SysBackend {
             // Sanitise sysinfo-derived strings the same way the
             // Linux backend does — argv[0] / cwd / exe come from
             // attacker-influenced sources and could contain ANSI.
-            let cwd = crate::format::sanitize_control(
-                &proc.cwd().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
+            let cwd_raw = proc.cwd().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+            // Sysinfo on Windows hands back paths with a trailing
+            // separator for many processes (`C:\workspace\proj1\`).
+            // Both display and downstream cwd→session matching
+            // (claude / codex / gemini / goose all key sessions on a
+            // raw string-equal of cwd) break against a trailing slash,
+            // so normalise here.  Preserve drive-root (`C:\`, `/`)
+            // by only trimming when there's path content beyond it.
+            let cwd_norm = if cwd_raw.len() > 3 {
+                cwd_raw.trim_end_matches(&['/', '\\'][..]).to_string()
+            } else {
+                cwd_raw
+            };
+            let cwd = crate::format::sanitize_control(&cwd_norm);
             let exe = crate::format::sanitize_control(
                 &proc.exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
             let cmdline = crate::format::sanitize_control(&cmdline);
