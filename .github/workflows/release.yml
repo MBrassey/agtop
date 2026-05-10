@@ -42,6 +42,16 @@ jobs:
           EOF
 
       - name: Build release
+        # Statically link the MSVC C runtime on Windows so agtop.exe runs
+        # on a clean Windows install with no VC++ Redistributable present.
+        # Without +crt-static the binary needs vcruntime140.dll /
+        # msvcp140.dll on the target machine — winget users on freshly-
+        # imaged Windows hosts hit a silent loader failure (no console
+        # output, exit code 0xC0000135) when the runner image's CRT
+        # version was newer than what they had installed.  Costs ~1 MB
+        # binary size; in return the winget install just works.
+        env:
+          RUSTFLAGS: ${{ matrix.target == 'x86_64-pc-windows-msvc' && '-C target-feature=+crt-static' || '' }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package (unix)
