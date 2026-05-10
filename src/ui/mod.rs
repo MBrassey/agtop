@@ -21,7 +21,7 @@ use crate::theme;
 use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
-            KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
+            KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -292,6 +292,13 @@ fn main_loop<B: ratatui::backend::Backend + io::Write>(
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // crossterm on Windows fires KeyEventKind::Press AND ::Release for
+    // every keystroke (POSIX terminals only fire Press).  Without this
+    // filter every Space / Enter toggled the detail popup open on Press
+    // and immediately closed it on Release — looked like the popup
+    // flashed and disappeared.  Drop everything except Press so the
+    // handler runs exactly once per keystroke on every platform.
+    if key.kind != KeyEventKind::Press { return; }
     // Cap filter length — defuses a 1MB-paste DoS that'd run case-insensitive
     // contains() against every agent every tick.
     const FILTER_MAX: usize = 256;
