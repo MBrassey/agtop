@@ -413,9 +413,13 @@ jobs:
 
       - name: Install wingetcreate
         shell: pwsh
+        # `version` is a subcommand on wingetcreate, not a `--version`
+        # flag — feeding it the GNU-style flag exits 1 and falls
+        # through to the help screen.  Use the subcommand for the
+        # smoke check.
         run: |
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          .\wingetcreate.exe --version
+          .\wingetcreate.exe version
 
       - name: Submit manifest update
         shell: pwsh
