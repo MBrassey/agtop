@@ -40,8 +40,16 @@ const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;  // 5 minutes
 const TAIL_BYTES: u64 = 256 * 1024;
 const HEAD_BYTES: u64 = 4 * 1024; // session_meta is at the top of the file
 
-fn root() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".codex").join("sessions")
+/// Every `<home>/.codex/sessions` that exists on disk — own home
+/// plus any extras (WSL `/mnt/c/Users/*`, `AGTOP_EXTRA_HOMES`).
+fn roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = crate::paths::home_roots().into_iter()
+        .map(|h| h.join(".codex").join("sessions"))
+        .filter(|p| p.exists())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    out
 }
 
 // 64 MiB hard-cap on tail reads — defensive against pathological / symlinked
@@ -298,8 +306,8 @@ fn classify_status(
 }
 
 pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
-    let root = root();
-    if !root.exists() {
+    let roots = roots();
+    if roots.is_empty() {
         return SessionsResult::empty();
     }
     // Map cwd -> live codex pid.
@@ -314,7 +322,18 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     let mut sessions: Vec<Session> = Vec::new();
     let mut recent_tasks: Vec<RecentTask> = Vec::new();
 
-    let files = walk_jsonls(&root, 4);
+    // Multi-root walk: WSL build picks up Windows-side sessions and
+    // vice versa.  Canonicalise per-file before insert to drop cross-mount
+    // duplicates (same file at `/home/u/.codex/...` and
+    // `/mnt/c/Users/u/.codex/...`).
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut files: Vec<PathBuf> = Vec::new();
+    for r in &roots {
+        for f in walk_jsonls(r, 4) {
+            let canon = std::fs::canonicalize(&f).unwrap_or_else(|_| f.clone());
+            if seen.insert(canon) { files.push(f); }
+        }
+    }
     // Group files by their session_meta cwd. Some users have many rollouts
     // for the same project; the most recently modified one is "the" session
     // for that cwd.

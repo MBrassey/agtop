@@ -23,8 +23,16 @@ const RECENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 const BUSY_WINDOW_MS:   u64 = 30 * 1000;
 const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;
 
-fn root() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".gemini").join("sessions")
+/// Every `<home>/.gemini/sessions` that exists — own home plus any
+/// extras (WSL `/mnt/c/Users/*`, `AGTOP_EXTRA_HOMES`).
+fn roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = crate::paths::home_roots().into_iter()
+        .map(|h| h.join(".gemini").join("sessions"))
+        .filter(|p| p.exists())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    out
 }
 
 fn read_whole(path: &Path) -> String {
@@ -92,8 +100,8 @@ fn classify(is_live: bool, age_ms: u64) -> Status {
 }
 
 pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
-    let root = root();
-    if !root.exists() { return SessionsResult::empty(); }
+    let roots = roots();
+    if roots.is_empty() { return SessionsResult::empty(); }
 
     let mut cwd_to_pid: HashMap<String, u32> = HashMap::new();
     for a in live_agents {
@@ -103,9 +111,15 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     let mut sessions: Vec<Session> = Vec::new();
     let mut recent_tasks: Vec<RecentTask> = Vec::new();
     let mut by_pid: HashMap<u32, Session> = HashMap::new();
+    let mut seen_files: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
 
-    let rd = match fs::read_dir(&root) { Ok(d) => d, Err(_) => return SessionsResult::empty() };
+    for root in &roots {
+    let rd = match fs::read_dir(root) { Ok(d) => d, Err(_) => continue };
     for ent in rd.flatten() {
+        // Cross-mount dedupe: same JSON visible at both `~/.gemini/...`
+        // and `/mnt/c/Users/u/.gemini/...` would surface twice.
+        let canon = std::fs::canonicalize(ent.path()).unwrap_or_else(|_| ent.path());
+        if !seen_files.insert(canon) { continue; }
         let p = ent.path();
         if p.extension().and_then(|s| s.to_str()) != Some("json") { continue; }
         let md = match fs::metadata(&p) { Ok(m) => m, Err(_) => continue };
@@ -164,6 +178,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
         }
         sessions.push(sess);
     }
+    } // end outer roots loop
 
     sessions.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
     recent_tasks.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));

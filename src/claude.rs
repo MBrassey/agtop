@@ -18,8 +18,18 @@ pub const BUSY_WINDOW_MS: u64 = 30 * 1000;
 pub const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;   // 5 minutes
 pub const TAIL_BYTES: u64 = 256 * 1024;
 
-pub fn root() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".claude").join("projects")
+/// Every `<home>/.claude/projects` that exists on disk — own home
+/// plus any extras (WSL `/mnt/c/Users/*`, `AGTOP_EXTRA_HOMES`).
+/// Used by `summarise` so the Linux WSL build picks up Windows-side
+/// Claude sessions and vice versa.
+pub fn roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = crate::paths::home_roots().into_iter()
+        .map(|h| h.join(".claude").join("projects"))
+        .filter(|p| p.exists())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    out
 }
 
 fn read_tail(path: &Path, bytes: u64) -> String {
@@ -389,12 +399,12 @@ fn classify_status(
 }
 
 pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
-    let root = root();
+    let roots = roots();
     let mut sessions: Vec<Session> = Vec::new();
     let mut recent_tasks: Vec<RecentTask> = Vec::new();
     let mut by_pid: HashMap<u32, Session> = HashMap::new();
 
-    if !root.exists() {
+    if roots.is_empty() {
         return SessionsResult::empty();
     }
 
@@ -426,9 +436,11 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
         v.sort_by_key(|(_pid, uptime)| *uptime);
     }
 
-    let read_dir = match fs::read_dir(&root) {
+    let mut seen_session_files: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for root in &roots {
+    let read_dir = match fs::read_dir(root) {
         Ok(d) => d,
-        Err(_) => return SessionsResult::empty(),
+        Err(_) => continue,
     };
 
     for ent in read_dir.flatten() {
@@ -482,6 +494,12 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
         }
 
         for (path, mtime, size) in &jsonls {
+            // Cross-root dedupe: same session file accessed via two
+            // mount paths (`/home/u/.claude/...` and
+            // `/mnt/c/Users/u/.claude/...`) would otherwise appear
+            // twice.  Canonicalise + insert; skip on duplicate.
+            let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            if !seen_session_files.insert(canon) { continue; }
             let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             let age_ms = now_ms.saturating_sub(*mtime);
             let is_most_recent = most_recent_path.as_deref() == Some(path);
@@ -560,6 +578,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             sessions.push(sess);
         }
     }
+    } // end outer roots loop
 
     sessions.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
     recent_tasks.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));

@@ -21,6 +21,7 @@ mod plugins;
 mod skills;
 mod reading_files;
 mod net_count;
+mod paths;
 mod sysbackend;
 mod writing_files;
 mod theme;
