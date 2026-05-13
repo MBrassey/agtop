@@ -38,6 +38,7 @@ use std::time::{Duration, Instant};
 mod popup;
 mod panels;
 mod agents;
+mod game;
 
 // Column-visibility bitmap flags for the agents panel.  Status badge
 // and agent label are always shown — every other column has a digit
@@ -188,6 +189,13 @@ pub(super) struct App {
     /// Token metric used everywhere `tokens_total` is displayed
     /// or sorted on.  CLI flag `--tokens cumulative|fresh`.
     pub(super) tokens_mode: TokenMode,
+    /// Hidden side-scrolling dodger easter egg.  Toggled with `` ` ``.
+    /// `None` = inactive (zero overhead); `Some` = game replaces the
+    /// bottom-right panel slot and intercepts SPACE / `b` / `Z` /
+    /// `` ` `` / Esc.  All other keys still drive normal agtop behaviour.
+    /// Visibility intentionally narrower than peers — `GameState`
+    /// itself only escapes to `crate::ui` (private_interfaces lint).
+    pub(in crate::ui) game: Option<game::GameState>,
     pub(super) quit: bool,
 }
 
@@ -253,6 +261,7 @@ pub fn run(collector: Collector, args: Args) -> Result<()> {
             "fresh" => TokenMode::Fresh,
             _       => TokenMode::Cumulative,
         },
+        game: None,
         quit: false,
     };
 
@@ -274,6 +283,13 @@ fn main_loop<B: ratatui::backend::Backend + io::Write>(
         if !app.paused && app.last_tick.elapsed() >= app.interval {
             app.snap = app.collector.snapshot();
             app.last_tick = Instant::now();
+        }
+
+        // Easter-egg game tick (no-op when inactive).  Driven off the
+        // 100ms event-poll cadence below; reads the latest snapshot
+        // for spawn rate / scroll speed / energy refill mappings.
+        if let Some(g) = app.game.as_mut() {
+            g.tick(&app.snap);
         }
 
         terminal.draw(|f| draw(f, app)).map_err(|e| anyhow::anyhow!("ratatui draw failed: {e}"))?;
@@ -299,6 +315,43 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // flashed and disappeared.  Drop everything except Press so the
     // handler runs exactly once per keystroke on every platform.
     if key.kind != KeyEventKind::Press { return; }
+
+    // Easter-egg game key interception.  Only runs when the game is
+    // active and no other modal owns the foreground; SPACE / b / ` /
+    // Esc go to the game, everything else falls through so the
+    // normal agtop keys (q, /, j/k, etc.) still work.
+    if app.game.is_some()
+        && !app.typing_filter
+        && !app.show_help
+        && !app.show_detail
+        && app.confirm_kill.is_none()
+    {
+        let game_intercepts = matches!(key.code,
+            KeyCode::Char(' ') | KeyCode::Char('b') | KeyCode::Char('Z')
+            | KeyCode::Char('`') | KeyCode::Esc
+        );
+        if game_intercepts {
+            if let Some(g) = app.game.as_mut() {
+                match g.handle_key(key) {
+                    game::KeyDispatch::CloseGame => app.game = None,
+                    game::KeyDispatch::Handled => {}
+                }
+            }
+            return;
+        }
+    }
+    // Toggle ON: backtick with no popup / modal active.  When game is
+    // already active the interception block above handles toggle-off.
+    if app.game.is_none()
+        && key.code == KeyCode::Char('`')
+        && !app.typing_filter
+        && !app.show_help
+        && !app.show_detail
+        && app.confirm_kill.is_none()
+    {
+        app.game = Some(game::GameState::new());
+        return;
+    }
     // Cap filter length — defuses a 1MB-paste DoS that'd run case-insensitive
     // contains() against every agent every tick.
     const FILTER_MAX: usize = 256;
@@ -699,6 +752,34 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     panels::draw_header(f, chunks[0], &app.snap, app);
 
+    // Full-screen game: the body area belongs entirely to the dodger.
+    // Header (live agent chips — the game's input signals) and footer
+    // (key hints) stay so the user can see what's driving the
+    // mappings and how to back out.
+    if app.game.as_ref().map(|g| g.fullscreen).unwrap_or(false) {
+        // Wipe sessions_rect so wheel events don't try to scroll a
+        // panel that isn't drawn this frame.
+        app.sessions_rect = Rect::default();
+        // Reset agents bookkeeping (no agents table this frame).
+        app.clickable_rows.clear();
+        app.visible_pid_order.clear();
+        app.agents_total_rows = 0;
+        if let Some(g) = app.game.as_mut() {
+            g.draw(f, chunks[1]);
+        }
+        panels::draw_footer(f, chunks[2], app);
+        if let Some(pid) = app.confirm_kill {
+            popup::draw_confirm_kill(f, area, &app.snap, pid);
+        } else if app.show_help {
+            popup::draw_help(f, area, app);
+        } else if app.show_detail {
+            popup::draw_detail(f, area, app);
+        } else if app.typing_filter {
+            popup::draw_filter_input(f, area, &app.filter);
+        }
+        return;
+    }
+
     // Body: left | right; left has agents on top + projects/activity on bottom.
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -710,15 +791,29 @@ fn draw(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(8), Constraint::Length(10)])
         .split(body[0]);
 
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    // Right column.  When the game is active we merge the bottom two
+    // slots (status distribution + sessions) into one taller panel
+    // so the dodger has playable headroom — six inner rows is the
+    // floor; merging gives ≥12 reliably.
+    let right_constraints: &[Constraint] = if app.game.is_some() {
+        &[
+            Constraint::Length(10),    // CPU
+            Constraint::Length(10),    // Memory
+            Constraint::Length(8),     // Tokens
+            Constraint::Min(14),       // Game (merged status + sessions slot)
+        ]
+    } else {
+        &[
             Constraint::Length(10),    // CPU panel: sparkline + per-agent bars
             Constraint::Length(10),    // Memory by agent + system gauge
             Constraint::Length(8),     // Tokens panel: rate sparkline + per-agent
             Constraint::Length(8),     // Status distribution bars
             Constraint::Min(6),        // Claude sessions panel
-        ])
+        ]
+    };
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(right_constraints)
         .split(body[1]);
 
     agents::draw_agents(f, left[0], app);
@@ -726,9 +821,23 @@ fn draw(f: &mut Frame, app: &mut App) {
     panels::draw_cpu_panel(f, right[0], &app.snap);
     panels::draw_memory_panel(f, right[1], &app.snap);
     panels::draw_tokens_panel(f, right[2], &app.snap, app.interval);
-    panels::draw_status_distribution(f, right[3], &app.snap);
-    app.sessions_rect = right[4];
-    panels::draw_sessions(f, right[4], &app.snap, &mut app.sessions_scroll);
+    // Easter-egg: when the game is active, it owns the bottom of the
+    // right column (replacing both status distribution + sessions).
+    // Toggle back with `` ` `` to restore them.
+    if app.game.is_some() {
+        // Wipe the cached sessions rect so wheel events over this
+        // area don't try to scroll a panel that isn't being drawn.
+        // Write the rect before taking &mut on game to keep the two
+        // disjoint field borrows trivially in sequence.
+        app.sessions_rect = Rect::default();
+        if let Some(g) = app.game.as_mut() {
+            g.draw(f, right[3]);
+        }
+    } else {
+        panels::draw_status_distribution(f, right[3], &app.snap);
+        app.sessions_rect = right[4];
+        panels::draw_sessions(f, right[4], &app.snap, &mut app.sessions_scroll);
+    }
 
     panels::draw_footer(f, chunks[2], app);
 
