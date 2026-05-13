@@ -85,9 +85,43 @@ impl SysBackend {
         for (pid, proc) in self.sys.processes() {
             let cmdline_parts: Vec<&str> = proc.cmd().iter()
                 .filter_map(|s| s.to_str()).collect();
-            let cmdline = cmdline_parts.join(" ");
-            if cmdline.is_empty() { continue; }
-            let label = match classify(&cmdline, builtins, user) {
+            let mut cmdline = cmdline_parts.join(" ");
+            let exe_str = proc.exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let name_str = proc.name().to_string_lossy().into_owned();
+            // Windows: sysinfo's proc.cmd() reads the PEB via
+            // ReadProcessMemory, which fails for processes in another
+            // session (svchost-spawned, elevated, or other-user).
+            // Pre-2.4.19 this dropped every native `claude.exe` /
+            // `codex.exe` from the Agents pane because we skipped
+            // empty cmdlines outright.  Fall back to exe() and name()
+            // — sysinfo populates those via GetModuleFileNameEx which
+            // succeeds in more cases.  Keeps display non-empty too.
+            if cmdline.is_empty() {
+                cmdline = if !exe_str.is_empty() { exe_str.clone() }
+                          else { name_str.clone() };
+            }
+            // Build a richer classifier input so a process whose
+            // cmdline is just `node.exe` but whose exe path is
+            // `...\@anthropic-ai\claude-code\cli.js` still matches.
+            // (sysinfo on Windows sometimes hands back exe() with the
+            // npm-shim target rather than node.exe itself.)  Joining
+            // with a space keeps each token at a word boundary so the
+            // builtin regexes' `(^|[\s/\\])` anchors still fire.
+            let mut classify_input = String::with_capacity(
+                cmdline.len() + exe_str.len() + name_str.len() + 2);
+            classify_input.push_str(&cmdline);
+            if !exe_str.is_empty() {
+                classify_input.push(' ');
+                classify_input.push_str(&exe_str);
+            }
+            if !name_str.is_empty() {
+                classify_input.push(' ');
+                classify_input.push_str(&name_str);
+            }
+            if classify_input.trim().is_empty() { continue; }
+            let label = match classify(&classify_input, builtins, user) {
                 Some(l) => l.to_string(),
                 None => continue,
             };

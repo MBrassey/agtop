@@ -26,10 +26,19 @@ const TAIL_BYTES:       u64 = 256 * 1024;
 
 fn candidate_roots() -> Vec<PathBuf> {
     let mut v = Vec::new();
-    if let Some(h) = dirs::home_dir() {
+    // Walk every home prefix discovered by paths::home_roots — own home,
+    // WSL `/mnt/c/Users/*`, plus `AGTOP_EXTRA_HOMES`.  Both XDG-config
+    // and XDG-data layouts; Goose has shipped sessions at both
+    // historically depending on the install.
+    for h in crate::paths::home_roots() {
         v.push(h.join(".config").join("goose").join("sessions"));
         v.push(h.join(".local").join("share").join("goose").join("sessions"));
+        // Windows-native Goose uses %APPDATA%\Block\goose; under WSL
+        // that surfaces at `/mnt/c/Users/<u>/AppData/Roaming/Block/goose/sessions`.
+        v.push(h.join("AppData").join("Roaming").join("Block").join("goose").join("sessions"));
     }
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|p| seen.insert(p.clone()));
     v
 }
 
