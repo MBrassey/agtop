@@ -369,9 +369,11 @@ pub(super) fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratat
         Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)));
     spans.push(Span::raw(" "));
 
-    // PID
+    // PID — for WSL-hosted agents this is the namespaced u32; the
+    // helper strips the upper bits and returns the real Linux PID
+    // inside the guest so the row reads naturally.
     if show(COL_PID) {
-        spans.push(Span::styled(format!("{:>7}", a.pid),
+        spans.push(Span::styled(format!("{:>7}", a.display_pid()),
                                 Style::default().fg(theme::fg_dim())));
         spans.push(Span::raw(" "));
     }

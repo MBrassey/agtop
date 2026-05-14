@@ -203,7 +203,7 @@ pub(super) fn draw_activity(f: &mut Frame, area: Rect, snap: &Snapshot) {
             Span::styled(format!("{:<12}", shorten(&e.label, 12)),
                 Style::default().fg(theme::agent_color(&e.label))),
             Span::raw(" "),
-            Span::styled(format!("pid {:<7}", e.pid),
+            Span::styled(format!("pid {:<7}", crate::model::display_pid(e.pid)),
                 Style::default().fg(theme::fg_dim())),
         ];
         if !cwd.is_empty() {

@@ -338,9 +338,20 @@ fn handle_key(app: &mut App, key: KeyEvent) {
                     // original process exited and the kernel
                     // reassigned that pid to an unrelated process,
                     // we'd otherwise SIGTERM the wrong target.
-                    let still_present = app.snap.agents.iter().any(|a| a.pid == pid);
-                    if still_present {
-                        send_sigterm(pid);
+                    let agent = app.snap.agents.iter().find(|a| a.pid == pid);
+                    if let Some(a) = agent {
+                        if let Some(distro) = a.host.strip_prefix("wsl:") {
+                            // WSL-hosted: SIGTERM has to be delivered
+                            // *inside* the guest, so we shell out via
+                            // wsl.exe.  Linux PID is the lower 24 bits
+                            // of the namespaced u32.
+                            #[cfg(windows)]
+                            send_sigterm_wsl(distro, a.display_pid());
+                            #[cfg(not(windows))]
+                            { let _ = distro; }
+                        } else {
+                            send_sigterm(pid);
+                        }
                     }
                 }
             }
@@ -604,6 +615,21 @@ fn send_sigterm(pid: u32) {
 }
 #[cfg(not(any(unix, windows)))]
 fn send_sigterm(_pid: u32) { /* no-op on truly exotic targets */ }
+
+/// Deliver SIGTERM to a PID *inside* a WSL2 distro.  Windows-only —
+/// we can't reach into the guest kernel from the Win32 process API,
+/// so we shell out via `wsl.exe -d <distro> -u root -- kill -TERM <pid>`.
+/// The `-u root` is necessary because non-root users can't signal
+/// processes owned by other users (the WSL default login user may
+/// not own the target).  Failure is silent: the row either
+/// disappears on the next tick or it doesn't.
+#[cfg(windows)]
+fn send_sigterm_wsl(distro: &str, linux_pid: u32) {
+    let _ = std::process::Command::new("wsl.exe")
+        .args(["-d", distro, "-u", "root", "--exec",
+               "/bin/kill", "-TERM", &linux_pid.to_string()])
+        .output();
+}
 
 fn handle_mouse(app: &mut App, m: MouseEvent) {
     // Wheel routing: when either popup is open, the wheel scrolls

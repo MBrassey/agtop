@@ -401,6 +401,7 @@ impl Collector {
                 write_rate_bps: 0,
                 gpu_pct: 0.0,
                 gpu_mem_bytes: 0,
+                host: String::new(),
             };
 
             agg_cpu += smoothed;
@@ -742,6 +743,18 @@ impl Collector {
         };
         sys.refresh();
         let mut agents = sys.collect_agents(&self.builtins, &self.user);
+
+        // Windows-only: pull live Linux agents from every running WSL
+        // distro and append.  PIDs are pre-namespaced (top bit set,
+        // distro idx in next 7 bits) inside wsl_backend so the
+        // per-pid HashMaps below don't collide between Windows and
+        // Linux PIDs that happen to share a numeric value.  CPU% is
+        // computed by the same prev-vs-current delta logic the
+        // Windows-native path uses.
+        #[cfg(windows)]
+        {
+            agents.extend(crate::wsl_backend::collect(&self.builtins, &self.user));
+        }
 
         // Spawn / exit events.
         let live_pids: std::collections::HashSet<u32> = agents.iter().map(|a| a.pid).collect();

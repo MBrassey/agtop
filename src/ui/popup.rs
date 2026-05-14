@@ -38,7 +38,7 @@ pub(super) fn draw_confirm_kill(f: &mut Frame, area: Rect, snap: &Snapshot, pid:
             Span::styled(format!("  {} ", a.status.glyph()), theme::status_style(a.status)),
             Span::styled(format!("{:<10} ", a.label),
                 Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("pid {} ", a.pid),
+            Span::styled(format!("pid {} ", a.display_pid()),
                 Style::default().fg(theme::fg_dim())),
             Span::styled(format!("· {}", a.project),
                 Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)),
@@ -86,7 +86,7 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
                 theme::status_style(a.status)),
             Span::styled(format!("{} ", a.label),
                 Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("pid {} ", a.pid), Style::default().fg(theme::fg_dim())),
+            Span::styled(format!("pid {} ", a.display_pid()), Style::default().fg(theme::fg_dim())),
             Span::styled(format!("· {} ", a.project),
                 Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)),
         ]));
