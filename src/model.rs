@@ -211,6 +211,51 @@ pub struct Agent {
     /// VRAM used by this PID in bytes.  See `gpu_pct`.
     #[serde(default)]
     pub gpu_mem_bytes: u64,
+
+    /// Host the process lives on.  Empty (default) means the same OS
+    /// agtop is running on.  For Windows-side agtop, WSL agents pulled
+    /// in via `wsl_backend` carry `"wsl:<distro>"` here so the UI can
+    /// disambiguate.  PID is then namespaced (top bit set, distro idx
+    /// in next 7 bits, real Linux PID in low 24) so the collector's
+    /// per-pid HashMaps stay collision-free across hosts.
+    #[serde(default)]
+    pub host: String,
+}
+
+impl Agent {
+    /// PID as the user expects to see it.  WSL-hosted agents have
+    /// their PID namespaced into the upper bits of u32; this strips
+    /// the namespace and returns the real Linux PID inside the
+    /// guest.  For native agents returns the stored PID unchanged.
+    pub fn display_pid(&self) -> u32 {
+        if self.host.starts_with("wsl:") {
+            self.pid & 0x00FFFFFF
+        } else {
+            self.pid
+        }
+    }
+}
+
+/// Upper bit reserved for non-native (WSL) PIDs so the collector's
+/// per-pid HashMaps (cpu_smooth, agent_cpu_hist, prev, …) can't
+/// collide between a Windows PID and a Linux-inside-WSL PID that
+/// happens to share the same numeric value.
+#[allow(dead_code)] // only referenced from the Windows-only wsl_backend module
+pub const WSL_PID_BASE: u32 = 0x8000_0000;
+
+/// Encode `(distro_idx, linux_pid)` into a single namespaced u32.
+/// 128 distros × 16 M PIDs — far exceeds any realistic install.
+#[allow(dead_code)] // only referenced from the Windows-only wsl_backend module
+pub fn encode_wsl_pid(distro_idx: u8, linux_pid: u32) -> u32 {
+    WSL_PID_BASE | ((distro_idx as u32 & 0x7F) << 24) | (linux_pid & 0x00FF_FFFF)
+}
+
+/// Reverse of [`encode_wsl_pid`] — strips the namespace bits and
+/// returns the real Linux PID inside the guest.  Used by UI display
+/// sites that only have a raw PID (e.g. the activity event log)
+/// rather than the full Agent struct.
+pub fn display_pid(pid: u32) -> u32 {
+    if pid & WSL_PID_BASE != 0 { pid & 0x00FF_FFFF } else { pid }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

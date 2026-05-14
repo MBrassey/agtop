@@ -23,6 +23,8 @@ mod reading_files;
 mod net_count;
 mod paths;
 mod sysbackend;
+#[cfg(windows)]
+mod wsl_backend;
 mod writing_files;
 mod theme;
 mod ui;

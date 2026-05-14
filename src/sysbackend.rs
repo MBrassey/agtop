@@ -246,6 +246,7 @@ impl SysBackend {
                 write_rate_bps: 0,
                 gpu_pct: 0.0,
                 gpu_mem_bytes: 0,
+                host: String::new(),
             });
         }
         out
