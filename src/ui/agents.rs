@@ -371,10 +371,22 @@ pub(super) fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratat
 
     // PID — for WSL-hosted agents this is the namespaced u32; the
     // helper strips the upper bits and returns the real Linux PID
-    // inside the guest so the row reads naturally.
+    // inside the guest so the row reads naturally.  A small coloured
+    // `w` prefix marks WSL rows without widening the column.
     if show(COL_PID) {
-        spans.push(Span::styled(format!("{:>7}", a.display_pid()),
-                                Style::default().fg(theme::fg_dim())));
+        let pid_str = format!("{}", a.display_pid());
+        if a.host.starts_with("wsl:") {
+            // Right-align inside 7 cells: pad, glyph, digits.
+            let pad = 7usize.saturating_sub(1 + pid_str.len());
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled("w",
+                Style::default().fg(theme::c_chart_tok()).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(pid_str,
+                Style::default().fg(theme::fg_dim())));
+        } else {
+            spans.push(Span::styled(format!("{:>7}", pid_str),
+                                    Style::default().fg(theme::fg_dim())));
+        }
         spans.push(Span::raw(" "));
     }
 
