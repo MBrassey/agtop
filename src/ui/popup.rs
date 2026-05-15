@@ -34,15 +34,20 @@ pub(super) fn draw_confirm_kill(f: &mut Frame, area: Rect, snap: &Snapshot, pid:
     f.render_widget(block, r);
     let mut lines: Vec<Line> = Vec::new();
     if let Some(a) = agent {
-        lines.push(Line::from(vec![
+        let mut header = vec![
             Span::styled(format!("  {} ", a.status.glyph()), theme::status_style(a.status)),
             Span::styled(format!("{:<10} ", a.label),
                 Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)),
             Span::styled(format!("pid {} ", a.display_pid()),
                 Style::default().fg(theme::fg_dim())),
-            Span::styled(format!("· {}", a.project),
-                Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)),
-        ]));
+        ];
+        if !a.host.is_empty() {
+            header.push(Span::styled(format!("{} ", a.host),
+                Style::default().fg(theme::c_chart_tok()).add_modifier(Modifier::BOLD)));
+        }
+        header.push(Span::styled(format!("· {}", a.project),
+            Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)));
+        lines.push(Line::from(header));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
             "  Sending SIGTERM gives the agent a chance to clean up.",
@@ -81,15 +86,23 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::border()))
-        .title(Line::from(vec![
-            Span::styled(format!(" {} {} ", a.status.glyph(), a.status.label()),
-                theme::status_style(a.status)),
-            Span::styled(format!("{} ", a.label),
-                Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("pid {} ", a.display_pid()), Style::default().fg(theme::fg_dim())),
-            Span::styled(format!("· {} ", a.project),
-                Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)),
-        ]));
+        .title({
+            let mut title = vec![
+                Span::styled(format!(" {} {} ", a.status.glyph(), a.status.label()),
+                    theme::status_style(a.status)),
+                Span::styled(format!("{} ", a.label),
+                    Style::default().fg(theme::agent_color(&a.label)).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("pid {} ", a.display_pid()),
+                    Style::default().fg(theme::fg_dim())),
+            ];
+            if !a.host.is_empty() {
+                title.push(Span::styled(format!("{} ", a.host),
+                    Style::default().fg(theme::c_chart_tok()).add_modifier(Modifier::BOLD)));
+            }
+            title.push(Span::styled(format!("· {} ", a.project),
+                Style::default().fg(theme::border()).add_modifier(Modifier::BOLD)));
+            Line::from(title)
+        });
     let inner = block.inner(r);
     f.render_widget(ratatui::widgets::Clear, r);
     f.render_widget(block, r);
@@ -102,6 +115,19 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![lab("model"),
         a.model.as_deref().map(|m| val(m.into(), theme::c_chart_tok())).unwrap_or_else(|| dim("(unknown)".into()))]));
+    // Host: where this agent's process actually lives.  Empty (native
+    // = the same OS agtop is running on) is skipped to avoid noise;
+    // WSL agents render as `wsl · <distro>` so the user knows the
+    // PID lives inside the guest, not the Windows kernel.
+    if !a.host.is_empty() {
+        let host_label = if let Some(distro) = a.host.strip_prefix("wsl:") {
+            format!("wsl · {}", distro)
+        } else {
+            a.host.clone()
+        };
+        lines.push(Line::from(vec![lab("host"),
+            val(host_label, theme::c_chart_tok())]));
+    }
     lines.push(Line::from(vec![lab("cpu"),
         val(pct(a.cpu), theme::cpu_color(a.cpu)), Span::raw(" "),
         Span::styled(cpu_spark, Style::default().fg(theme::cpu_color(a.cpu)))]));
