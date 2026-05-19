@@ -4,7 +4,7 @@
 
 use crate::pricing::ModelPrice;
 
-pub const PRICES_UPDATED: &str = "2026-05-14";
+pub const PRICES_UPDATED: &str = "2026-05-19";
 pub const PRICES_SOURCE:  &str = "litellm community registry";
 
 pub const GENERATED: &[(&str, ModelPrice)] = &[
@@ -389,6 +389,14 @@ pub const GENERATED: &[(&str, ModelPrice)] = &[
     ("azure_ai/deepseek-v3.2-speciale", ModelPrice { input_per_mtok: 0.58, output_per_mtok: 1.68, max_input_tokens: Some(163840) }),
     ("azure_ai/global/grok-3", ModelPrice { input_per_mtok: 3.0, output_per_mtok: 15.0, max_input_tokens: Some(131072) }),
     ("azure_ai/global/grok-3-mini", ModelPrice { input_per_mtok: 0.25, output_per_mtok: 1.27, max_input_tokens: Some(131072) }),
+    ("azure_ai/gpt-5.4", ModelPrice { input_per_mtok: 2.5, output_per_mtok: 15.0, max_input_tokens: Some(1050000) }),
+    ("azure_ai/gpt-5.4-2026-03-05", ModelPrice { input_per_mtok: 2.5, output_per_mtok: 15.0, max_input_tokens: Some(1050000) }),
+    ("azure_ai/gpt-5.4-mini", ModelPrice { input_per_mtok: 0.75, output_per_mtok: 4.5, max_input_tokens: Some(400000) }),
+    ("azure_ai/gpt-5.4-mini-2026-03-17", ModelPrice { input_per_mtok: 0.75, output_per_mtok: 4.5, max_input_tokens: Some(400000) }),
+    ("azure_ai/gpt-5.4-nano", ModelPrice { input_per_mtok: 0.2, output_per_mtok: 1.25, max_input_tokens: Some(400000) }),
+    ("azure_ai/gpt-5.4-nano-2026-03-17", ModelPrice { input_per_mtok: 0.2, output_per_mtok: 1.25, max_input_tokens: Some(400000) }),
+    ("azure_ai/gpt-5.4-pro", ModelPrice { input_per_mtok: 30.0, output_per_mtok: 180.0, max_input_tokens: Some(1050000) }),
+    ("azure_ai/gpt-5.4-pro-2026-03-05", ModelPrice { input_per_mtok: 30.0, output_per_mtok: 180.0, max_input_tokens: Some(1050000) }),
     ("azure_ai/gpt-oss-120b", ModelPrice { input_per_mtok: 0.15, output_per_mtok: 0.6, max_input_tokens: Some(131072) }),
     ("azure_ai/grok-3", ModelPrice { input_per_mtok: 3.0, output_per_mtok: 15.0, max_input_tokens: Some(131072) }),
     ("azure_ai/grok-3-mini", ModelPrice { input_per_mtok: 0.25, output_per_mtok: 1.27, max_input_tokens: Some(131072) }),
