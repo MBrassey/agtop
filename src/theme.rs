@@ -249,6 +249,7 @@ pub fn agent_color(label: &str) -> Color {
         "llm"                      => Color::Rgb(165, 215, 210),
         "ollama"                   => Color::Rgb(225, 195, 140),
         "fabric"                   => Color::Rgb(225, 222, 215),
+        "omp" | "pi"               => Color::Rgb(210, 150, 195),
         _ => {
             let palette = [
                 Color::Rgb(165, 215, 210), Color::Rgb(200, 170, 210), Color::Rgb(225, 195, 140),
