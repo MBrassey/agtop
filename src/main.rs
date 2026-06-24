@@ -13,6 +13,7 @@ mod generic;
 mod goose;
 mod matchers;
 mod model;
+mod omp;
 mod pricing;
 mod pricing_data;
 mod proc_;
