@@ -425,7 +425,7 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
         // blank box.
         let has_session   = a.session_id.is_some();
         let has_reader    = matches!(a.label.as_str(),
-            "claude" | "codex" | "goose" | "aider" | "gemini");
+            "claude" | "codex" | "goose" | "aider" | "gemini" | "omp" | "pi");
         let hint: &str = if has_session {
             "  (no recent activity in this session)"
         } else if has_reader {
@@ -439,6 +439,8 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
                 "goose"   => "  (no Goose session found in ~/.config/goose/sessions/)",
                 "aider"   => "  (no .aider.chat.history.md in this cwd yet)",
                 "gemini"  => "  (no Gemini session found in ~/.gemini/sessions/)",
+                "omp"     => "  (no OMP session found for this cwd in ~/.omp/agent/sessions/)",
+                "pi"      => "  (no Pi session found for this cwd in ~/.pi/agent/sessions/)",
                 _ => "  (no session found)",
             }
         } else {
