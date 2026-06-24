@@ -43,6 +43,8 @@ pub fn builtin() -> Vec<Matcher> {
         m("goose",        &p(&format!(r"goose{E}"))),
         m("continue",     &p(&format!(r"continue(-cli|-agent)?{E}"))),
         m("opencode",     &p(&format!(r"opencode{E}"))),
+        m("omp",          &format!(r"{}|@oh-my-pi[/\\]pi-coding-agent", p(&format!(r"omp{E}")))),
+        m("pi",           &format!(r"{}|@earendil-works[/\\]pi-coding-agent", p(&format!(r"pi{E}")))),
         m("copilot",      r"gh[\s-]copilot|github-copilot-cli"),
         m("cody",         &p(&format!(r"cody{E}"))),
         m("amp",          r"(^|[\s/\\])amp(\.(exe|cmd|ps1|bat))?(\s|$)|@sourcegraph[/\\]amp"),
@@ -182,5 +184,28 @@ mod tests {
         assert_eq!(classify(r"C:\bin\claude.exe", &b, &u), Some("claude"));
         assert_eq!(classify(r"C:\bin\gemini.exe --interactive", &b, &u), Some("gemini"));
         assert_eq!(classify(r"goose.exe session", &b, &u), Some("goose"));
+    }
+
+    #[test]
+    fn omp_and_pi_agents() {
+        let b = builtin();
+        let u: Vec<UserMatcher> = vec![];
+        // omp (oh-my-pi): Bun-launched binary, scoped npm package, Windows shims.
+        assert_eq!(classify("bun /home/u/.bun/bin/omp", &b, &u), Some("omp"));
+        assert_eq!(classify("/usr/local/bin/omp -p hi", &b, &u), Some("omp"));
+        assert_eq!(classify(r"node /home/u/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js", &b, &u), Some("omp"));
+        assert_eq!(classify(r"C:\Users\j\AppData\Roaming\npm\omp.cmd", &b, &u), Some("omp"));
+        assert_eq!(classify(r"C:\bin\omp.exe", &b, &u), Some("omp"));
+        // pi: standalone/npm binary, scoped npm package.
+        assert_eq!(classify("/usr/bin/pi", &b, &u), Some("pi"));
+        assert_eq!(classify("/opt/pi-coding-agent/pi", &b, &u), Some("pi"));
+        assert_eq!(classify(r"node /home/u/node_modules/@earendil-works/pi-coding-agent/dist/cli.js", &b, &u), Some("pi"));
+        assert_eq!(classify("pi --resume", &b, &u), Some("pi"));
+        // Negatives / non-collision.
+        assert_eq!(classify("/usr/bin/comp", &b, &u), None);
+        assert_ne!(classify("pip install x", &b, &u), Some("pi"));
+        assert_ne!(classify("pipx run y", &b, &u), Some("pi"));
+        // omp checked first AND its @oh-my-pi scope branch matches -> omp, not pi.
+        assert_eq!(classify(r"node /home/u/node_modules/@oh-my-pi/pi-coding-agent/cli.js", &b, &u), Some("omp"));
     }
 }
