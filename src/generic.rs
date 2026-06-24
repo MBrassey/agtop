@@ -16,7 +16,7 @@ use std::fs;
 use std::path::Path;
 
 // Vendor labels we already enrich in dedicated modules — generic skips these.
-const SKIP_LABELS: &[&str] = &["claude", "claude-code", "codex", "openai-codex"];
+const SKIP_LABELS: &[&str] = &["claude", "claude-code", "codex", "openai-codex", "omp", "pi"];
 
 pub fn summarise(agents: &[Agent], live_agents: &[LiveAgentRef], _now_ms: u64) -> SessionsResult {
     let mut by_pid: HashMap<u32, Session> = HashMap::new();
