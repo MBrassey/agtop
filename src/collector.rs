@@ -2,7 +2,7 @@
 // Holds smoothing state across snapshots so the TUI doesn't jitter.
 
 use crate::sessions::{self, LiveAgentRef};
-use crate::{aider, claude, codex, gemini, generic, goose};
+use crate::{aider, claude, codex, gemini, generic, goose, omp};
 use crate::format::derive_project;
 use crate::pricing::PriceTable;
 use crate::sysbackend::SysBackend;
@@ -592,6 +592,7 @@ impl Collector {
             goose::summarise(&live_refs, now),
             gemini::summarise(&live_refs, now),
             aider::summarise(&live_refs, now),
+            omp::summarise(&live_refs, now),
             generic::summarise(agents, &live_refs, now),
         ]);
 
