@@ -26,7 +26,7 @@ Usage:
   python3 scripts/sync_prices.py --check    # exit 1 if file would change
 """
 from __future__ import annotations
-import argparse, datetime, json, sys, urllib.request, pathlib
+import argparse, datetime, json, math, sys, urllib.request, pathlib
 
 LITELLM_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/"
@@ -79,6 +79,14 @@ def parse_litellm(raw: dict) -> list[tuple[str, float, float, int | None]]:
             o_per_mtok = float(o) * 1_000_000.0
         except (TypeError, ValueError):
             continue
+        # Reject non-finite values (json.load accepts Infinity/NaN): they
+        # render as `inf`/`nan` — not valid Rust float literals — and NaN
+        # also slips the `<= 0.0` gate below, so a poisoned upstream entry
+        # would emit a pricing_data.rs that fails to compile.
+        if not (math.isfinite(i_per_mtok) and math.isfinite(o_per_mtok)):
+            continue
+        if i_per_mtok < 0.0 or o_per_mtok < 0.0:
+            continue
         if i_per_mtok <= 0.0 and o_per_mtok <= 0.0:
             continue
         # max_input_tokens drives the TUI's per-agent context-fill bar.
@@ -95,6 +103,11 @@ def parse_litellm(raw: dict) -> list[tuple[str, float, float, int | None]]:
         except (TypeError, ValueError):
             ctx = None
         key = strip_provider(raw_key)
+        # Reject keys with control characters — they'd need escaping the
+        # simple render_rust() quoting doesn't do and could break the
+        # generated file (or, worse, terminate the string literal early).
+        if any(ord(ch) < 0x20 for ch in key):
+            continue
         # Resolve duplicates by keeping the highest-cost variant; on
         # context-window collisions, prefer the larger window.
         prev = out.get(key)

@@ -18,19 +18,19 @@ use std::path::PathBuf;
 /// Cross-platform entry point.  Returns `Vec<PathBuf>` of files the
 /// target PID has open in read-only mode.
 ///
-/// Windows path runs in a 2-second watchdog thread because
-/// `GetFinalPathNameByHandleW` can stall on remote/SMB handles
-/// even after the FILE_TYPE_DISK pre-filter — same hardening as
-/// `writing_files::read`.
+/// Windows path runs under a 2-second deadline because
+/// `GetFinalPathNameByHandleW` can stall on remote/SMB handles even
+/// after the FILE_TYPE_DISK pre-filter — same hardening as
+/// `writing_files::read`, on a dedicated single-worker watchdog so a
+/// persistently wedged handle refuses later sweeps instead of
+/// stacking one abandoned thread per tick.
 #[cfg(windows)]
 pub fn read(pid: u32, limit: usize) -> Vec<PathBuf> {
-    use std::sync::mpsc;
-    use std::time::Duration;
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(impl_::read(pid, limit));
-    });
-    rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default()
+    use std::sync::OnceLock;
+    use crate::writing_files::watchdog::Watchdog;
+    static DOG: OnceLock<Watchdog> = OnceLock::new();
+    DOG.get_or_init(Watchdog::spawn)
+        .run(std::time::Duration::from_secs(2), move || impl_::read(pid, limit))
 }
 #[cfg(not(windows))]
 pub fn read(pid: u32, limit: usize) -> Vec<PathBuf> {
@@ -337,12 +337,16 @@ mod impl_ {
     const PS_FST_FFLAG_WRITE: c_int = 0x0002;
     const KERN_PROC_PID:      c_int = 1;
 
-    #[repr(C)]
-    struct StqEntry { stqe_next: *mut FileStat }
-
+    // Mirror of `struct filestat` from <libprocstat.h>.  The STAILQ_ENTRY
+    // link (`next`) is at the *tail* of the struct, after fs_path — NOT a
+    // leading field.  A previous leading `next: StqEntry` here added an
+    // 8-byte prefix that shifted every field: fs_path read the real
+    // struct's link pointer and `CStr::from_ptr` scanned a non-string heap
+    // pointer, so on FreeBSD an agent's read-only fds produced garbage
+    // paths or a crash.  This now matches writing_files.rs's (correct)
+    // mirror of the same C struct exactly.
     #[repr(C)]
     struct FileStat {
-        next:       StqEntry,
         fs_type:    c_int,
         fs_flags:   c_int,
         fs_fflags:  c_int,
@@ -352,6 +356,7 @@ mod impl_ {
         fs_offset:  i64,
         fs_typedep: *mut c_void,
         fs_path:    *mut c_char,
+        // STAILQ_ENTRY(filestat) — single next pointer at the tail.
         next_stqe_next: *mut FileStat,
     }
 

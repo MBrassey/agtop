@@ -30,6 +30,19 @@ use crate::proc_::{self, CLK_TCK, PAGE_SIZE};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+/// Deadline on every wsl.exe shellout.  Generous enough to absorb a
+/// VM cold-start after `wsl --shutdown` (~1-3 s); a distro that can't
+/// answer within it (stuck LxssManager, a guest process wedged in an
+/// uninterruptible /proc read blocking the dump script) is skipped
+/// for the tick instead of wedging the collector thread.
+const WSL_TIMEOUT: Duration = Duration::from_millis(5000);
+
+/// Accepted stdout ceiling for the per-distro /proc dump.  Real dumps
+/// are a few hundred KB even on busy guests; a guest inflating argv
+/// via setproctitle could otherwise balloon the blob per tick.
+const WSL_DUMP_MAX: usize = 8 * 1024 * 1024;
 
 /// Per-pid CPU-delta state.  Key is the namespaced (Windows-side) PID;
 /// value is `(utime+stime ticks, wall-clock ms at sample time)`.  The
@@ -53,7 +66,10 @@ pub fn collect(builtins: &[Matcher], user: &[UserMatcher]) -> Vec<Agent> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let mut prev = prev_cpu().lock().expect("wsl prev_cpu mutex poisoned");
+    // A panic on another collector tick would poison the mutex; the map
+    // is just a CPU-delta cache, so recover the guard rather than
+    // propagating the panic into every future tick.
+    let mut prev = prev_cpu().lock().unwrap_or_else(|e| e.into_inner());
     let mut out: Vec<Agent> = Vec::new();
     for (idx, distro) in distros.iter().enumerate() {
         // u8 fits the distro index because we cap encoding at 128
@@ -149,6 +165,8 @@ pub fn collect(builtins: &[Matcher], user: &[UserMatcher]) -> Vec<Agent> {
                 cost_basis: "unknown".into(),
                 context_used: 0,
                 context_limit: 0,
+                time_to_compaction_secs: None,
+                ctx_growth_per_min: None,
                 loaded_skills: Vec::new(),
                 loaded_plugins: Vec::new(),
                 tool_counts: Vec::new(),
@@ -183,7 +201,10 @@ pub fn collect(builtins: &[Matcher], user: &[UserMatcher]) -> Vec<Agent> {
                 write_rate_bps: 0,
                 gpu_pct: 0.0,
                 gpu_mem_bytes: 0,
-                host: format!("wsl:{}", distro),
+                // Distro names are registry-derived and freely chosen by
+                // whoever ran `wsl --import` — strip control / bidi
+                // characters before the name reaches the table + popup.
+                host: format!("wsl:{}", crate::format::sanitize_control(distro)),
             });
         }
     }
@@ -197,13 +218,15 @@ pub fn collect(builtins: &[Matcher], user: &[UserMatcher]) -> Vec<Agent> {
 /// Distros currently in the `Running` state.  `wsl.exe -l --running
 /// --quiet` emits one distro per line in UTF-16 LE.
 fn running_distros() -> Vec<String> {
-    let output = match Command::new("wsl.exe")
-        .args(["-l", "--running", "--quiet"])
-        .output() {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["-l", "--running", "--quiet"]);
+    // Deadline-capped: a stuck WSL service must cost one tick, not the
+    // collector thread.  Distro lists are tiny; 64 KiB is ample.
+    let stdout = match crate::collector::run_capped_max(cmd, WSL_TIMEOUT, 64 * 1024) {
+        Some(b) => b,
+        None => return Vec::new(),
     };
-    decode_utf16(&output.stdout)
+    decode_utf16(&stdout)
         .lines()
         .map(|l| l.trim().trim_matches('\0').to_string())
         .filter(|l| !l.is_empty())
@@ -232,15 +255,15 @@ for d in /proc/[0-9]*; do
   printf '%s %s %s %s %s %s\n' "$pid" "$comm" "$exe" "$cwd" "$cmdline" "$stat"
 done
 "#;
-    let output = Command::new("wsl.exe")
-        .args(["-d", distro, "--exec", "/bin/sh", "-c", SCRIPT])
-        .output()
-        .ok()?;
-    if !output.status.success() { return None; }
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["-d", distro, "--exec", "/bin/sh", "-c", SCRIPT]);
+    // Deadline + output cap: an overrun in either dimension skips the
+    // distro for this tick (None) instead of wedging or ballooning.
+    let stdout = crate::collector::run_capped_max(cmd, WSL_TIMEOUT, WSL_DUMP_MAX)?;
     // wsl.exe outputs the *guest's* stdout verbatim (no UTF-16 conv)
     // when invoked with `--exec`, so this is plain UTF-8.  Decoding
     // as UTF-16 here would corrupt the base64 payload.
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 fn b64_to_string(s: &str) -> String {
@@ -320,5 +343,16 @@ mod tests {
     fn decode_utf16_strips_bom() {
         let bytes = [0xFF, 0xFE, b'h', 0x00, b'i', 0x00];
         assert_eq!(decode_utf16(&bytes), "hi");
+    }
+
+    #[test]
+    fn distro_name_sanitized_for_host() {
+        // Bidi override + ANSI escape in an imported distro name must
+        // not survive into the rendered host string.
+        let hostile = "Ubu\u{202e}ntu\x1b[31m";
+        let host = format!("wsl:{}", crate::format::sanitize_control(hostile));
+        assert!(!host.contains('\u{202e}'));
+        assert!(!host.contains('\x1b'));
+        assert!(host.starts_with("wsl:Ubu"));
     }
 }

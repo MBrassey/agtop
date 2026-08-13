@@ -30,9 +30,9 @@ use crate::sessions::{LiveAgentRef, SessionsResult};
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 const RECENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 const BUSY_WINDOW_MS: u64 = 30 * 1000;        // 30s — covers mid-turn tool waits
@@ -52,29 +52,15 @@ fn roots() -> Vec<PathBuf> {
     out
 }
 
-// 64 MiB hard-cap on tail reads — defensive against pathological / symlinked
-// session files.  All real call sites use ≤ 256 KiB.
-const MAX_TAIL: u64 = 64 * 1024 * 1024;
-
 fn read_tail(path: &Path, bytes: u64) -> String {
-    let mut f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
-    let len = match f.metadata() { Ok(m) => m.len(), Err(_) => return String::new() };
-    if len == 0 { return String::new(); }
-    let take = bytes.min(len).min(MAX_TAIL);
-    if f.seek(SeekFrom::End(-(take as i64))).is_err() {
-        return String::new();
-    }
-    let mut buf = String::with_capacity(take as usize);
-    let _ = f.take(take).read_to_string(&mut buf);
-    buf
+    crate::readfile::tail(path, bytes)
 }
 
 fn read_head(path: &Path, bytes: u64) -> String {
-    let take = bytes.min(MAX_TAIL);
-    let f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
-    let mut buf = String::with_capacity(take as usize);
-    let _ = f.take(take).read_to_string(&mut buf);
-    buf
+    // Lossy UTF-8 head read: the previous `read_to_string` returned "" when
+    // the 4 KiB header boundary split a multibyte char, which *permanently*
+    // orphaned that rollout (its session_meta cwd never parsed).
+    crate::readfile::head(path, bytes)
 }
 
 fn parse_lines(text: &str) -> Vec<Value> {
@@ -119,10 +105,36 @@ fn extract_cwd_from_meta(text: &str) -> Option<String> {
             r.get("workspace").and_then(|v| v.as_str()),
         ];
         for s in candidates.into_iter().flatten() {
-            if !s.is_empty() { return Some(s.to_string()); }
+            // Sanitize at the parse boundary — this string comes from
+            // session-file content, not a real process cwd, and flows
+            // into the rendered project column.
+            if !s.is_empty() { return Some(sanitize_control(s)); }
         }
     }
     None
+}
+
+/// A rollout's session_meta cwd is written once at file creation and never
+/// changes, so cache the header parse per path instead of re-reading 4 KiB
+/// per rollout per tick.  A `None` entry is retried only while the file is
+/// still growing (header may not have been flushed on first sight).
+type CwdCache = Mutex<HashMap<PathBuf, (u64, Option<String>)>>;
+static CWD_CACHE: OnceLock<CwdCache> = OnceLock::new();
+
+fn cwd_for(path: &Path, size: u64) -> Option<String> {
+    let cache = CWD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some((seen_size, cwd)) = map.get(path) {
+            if cwd.is_some() || *seen_size >= size {
+                return cwd.clone();
+            }
+        }
+    }
+    let cwd = extract_cwd_from_meta(&read_head(path, HEAD_BYTES));
+    if let Ok(mut map) = cache.lock() {
+        map.insert(path.to_path_buf(), (size, cwd.clone()));
+    }
+    cwd
 }
 
 #[derive(Default)]
@@ -137,6 +149,9 @@ struct AnalysisOut {
     finished: bool,
     tokens_input: u64,
     tokens_output: u64,
+    /// Prompt-cache read tokens — a subset of `tokens_input`, never an
+    /// additional bucket.  Used for the cached-rate cost discount.
+    tokens_cache_read: u64,
     /// Latest assistant turn's prompt size — see Claude::context_used.
     context_used: u64,
     model: Option<String>,
@@ -156,6 +171,9 @@ fn analyse(records: &[Value]) -> AnalysisOut {
     let mut tool_call_ids: Vec<String> = Vec::new();    // Task / Agent
     let mut all_tool_ids:  Vec<String> = Vec::new();    // any tool
     let mut completed: HashSet<String> = HashSet::new();
+    // Set once a cumulative token_count event is seen; the per-event
+    // legacy accumulator must not add on top of cumulative totals.
+    let mut saw_cumulative = false;
 
     for r in records {
         // Unwrap the optional `payload` envelope.
@@ -231,29 +249,59 @@ fn analyse(records: &[Value]) -> AnalysisOut {
             }
         }
 
-        // Token usage — Codex emits a usage block on response.completed and
-        // a few other events. Probe both nested-payload and flat shapes.
+        // Modern rollouts carry token data as event_msg/token_count with
+        // payload.info.total_token_usage — CUMULATIVE per session, so the
+        // totals are assigned (last record wins), never summed.
+        if let Some(info) = payload.get("info") {
+            if let Some(tot) = info.get("total_token_usage") {
+                let it = tot.get("input_tokens").and_then(|v| v.as_u64());
+                let ot = tot.get("output_tokens").and_then(|v| v.as_u64());
+                if it.is_some() || ot.is_some() {
+                    out.tokens_input  = it.unwrap_or(0);
+                    out.tokens_output = ot.unwrap_or(0);
+                    // cached_input_tokens is a subset of input_tokens.
+                    out.tokens_cache_read = tot.get("cached_input_tokens")
+                        .and_then(|v| v.as_u64()).unwrap_or(0);
+                    saw_cumulative = true;
+                }
+            }
+            if let Some(last) = info.get("last_token_usage") {
+                if let Some(iu) = last.get("input_tokens").and_then(|v| v.as_u64()) {
+                    // Latest turn's prompt size = current context fill
+                    // (input_tokens already includes the cached portion).
+                    out.context_used = iu;
+                    saw_cumulative = true;
+                }
+            }
+        }
+
+        // Legacy usage blocks on response.completed and a few other events.
+        // Probe both nested-payload and flat shapes.
         let usage = payload.get("usage")
             .or_else(|| r.get("usage"))
             .or_else(|| payload.get("response").and_then(|r| r.get("usage")));
         if let Some(u) = usage {
-            // OpenAI uses input_tokens / output_tokens (sometimes prompt_tokens /
-            // completion_tokens on older APIs). Accept either.
-            let it = u.get("input_tokens").and_then(|v| v.as_u64())
-                .or_else(|| u.get("prompt_tokens").and_then(|v| v.as_u64()))
-                .unwrap_or(0);
-            let ot = u.get("output_tokens").and_then(|v| v.as_u64())
-                .or_else(|| u.get("completion_tokens").and_then(|v| v.as_u64()))
-                .unwrap_or(0);
-            // Cached input bonus, when reported.
-            let cr = u.get("input_tokens_details")
-                .and_then(|d| d.get("cached_tokens"))
-                .and_then(|v| v.as_u64()).unwrap_or(0);
-            out.tokens_input  = out.tokens_input.saturating_add(it.saturating_add(cr));
-            out.tokens_output = out.tokens_output.saturating_add(ot);
-            // Latest-turn prompt size = current context fill.  Records
-            // iterate oldest → newest so the last assignment wins.
-            out.context_used = it.saturating_add(cr);
+            if !saw_cumulative {
+                // OpenAI uses input_tokens / output_tokens (sometimes prompt_tokens /
+                // completion_tokens on older APIs). Accept either.
+                let it = u.get("input_tokens").and_then(|v| v.as_u64())
+                    .or_else(|| u.get("prompt_tokens").and_then(|v| v.as_u64()))
+                    .unwrap_or(0);
+                let ot = u.get("output_tokens").and_then(|v| v.as_u64())
+                    .or_else(|| u.get("completion_tokens").and_then(|v| v.as_u64()))
+                    .unwrap_or(0);
+                // Cached reads are a subset of input_tokens — track them
+                // for the cost discount, never add them on top.
+                let cr = u.get("input_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                out.tokens_input  = out.tokens_input.saturating_add(it);
+                out.tokens_output = out.tokens_output.saturating_add(ot);
+                out.tokens_cache_read = out.tokens_cache_read.saturating_add(cr);
+                // Latest-turn prompt size = current context fill.  Records
+                // iterate oldest → newest so the last assignment wins.
+                out.context_used = it;
+            }
         }
 
         // Model — try every place codex might mention it.
@@ -310,12 +358,19 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     if roots.is_empty() {
         return SessionsResult::empty();
     }
-    // Map cwd -> live codex pid.
-    let mut cwd_to_pid: HashMap<String, u32> = HashMap::new();
+    // Map cwd -> live codex pids.  A Vec because parallel codex sessions
+    // can share a cwd — a single-pid map non-deterministically dropped
+    // all-but-one of them (same race claude.rs fixed in 2.4.4).  Sorted
+    // newest-pid-first (lowest uptime) so the freshest rollout below
+    // pairs with the newest process.
+    let mut cwd_to_pids: HashMap<String, Vec<(u32, u64)>> = HashMap::new();
     for a in live_agents {
         if a.label == "codex" || a.label == "openai-codex" {
-            cwd_to_pid.insert(a.cwd.to_string(), a.pid);
+            cwd_to_pids.entry(a.cwd.to_string()).or_default().push((a.pid, a.uptime_sec));
         }
+    }
+    for v in cwd_to_pids.values_mut() {
+        v.sort_by_key(|(_pid, uptime)| *uptime);
     }
 
     let mut by_pid: HashMap<u32, Session> = HashMap::new();
@@ -347,11 +402,12 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             .map(|d| d.as_millis() as u64).unwrap_or(0);
         let size = md.len();
         // Cheap-only: don't bother scanning sessions older than the recent
-        // window unless they belong to a live process.
+        // window unless a *Codex* process is live.  Gating on the all-vendor
+        // live set meant any running agent re-scanned every historical Codex
+        // rollout's header each tick.
         let age_ms = now_ms.saturating_sub(mtime);
-        if age_ms > RECENT_WINDOW_MS && live_agents.is_empty() { continue; }
-        let head = read_head(&path, HEAD_BYTES);
-        if let Some(cwd) = extract_cwd_from_meta(&head) {
+        if age_ms > RECENT_WINDOW_MS && cwd_to_pids.is_empty() { continue; }
+        if let Some(cwd) = cwd_for(&path, size) {
             by_cwd.entry(cwd).or_default().push((path, mtime, size));
         } else {
             orphan.push((path, mtime, size));
@@ -360,22 +416,24 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
 
     // Sort each cwd group by mtime desc and process.
     for (cwd, mut files) in by_cwd {
-        files.sort_by(|a, b| b.1.cmp(&a.1));
-        let live_pid = cwd_to_pid.get(&cwd).copied();
+        files.sort_by_key(|x| std::cmp::Reverse(x.1));
+        let live_pids = cwd_to_pids.get(&cwd);
         for (i, (path, mtime, size)) in files.iter().enumerate() {
             let is_most_recent = i == 0;
+            // Freshest rollout → newest pid, next rollout → next pid.
+            let live_pid = live_pids.and_then(|v| v.get(i)).map(|(pid, _)| *pid);
             let age_ms = now_ms.saturating_sub(*mtime);
-            let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let id = path.file_stem().map(|s| sanitize_control(&s.to_string_lossy())).unwrap_or_default();
 
             // Only do the expensive tail+parse for live or recently-active.
-            let info = if (is_most_recent && live_pid.is_some()) || age_ms < RECENT_WINDOW_MS {
+            let info = if live_pid.is_some() || age_ms < RECENT_WINDOW_MS {
                 analyse(&parse_lines(&read_tail(path, TAIL_BYTES)))
             } else {
                 AnalysisOut::default()
             };
 
             let status = classify_status(
-                is_most_recent && live_pid.is_some(),
+                live_pid.is_some(),
                 age_ms,
                 info.finished,
                 info.in_flight > 0,
@@ -403,12 +461,12 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 recent_activity: info.recent_activity.iter()
                     .map(|s| sanitize_control(s)).collect(),
                 in_flight_tasks: info.in_flight,
-                live_pid: if is_most_recent { live_pid } else { None },
+                live_pid,
                 is_most_recent,
                 tokens_input: info.tokens_input,
                 tokens_output: info.tokens_output,
                 tokens_total: info.tokens_input.saturating_add(info.tokens_output),
-                tokens_cache_read: 0,
+                tokens_cache_read: info.tokens_cache_read,
                 tokens_cache_write: 0,
                 cost_usd: 0.0,
                 context_used: info.context_used,
@@ -417,10 +475,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 model: info.model.as_deref().map(sanitize_control),
             };
 
-            if is_most_recent {
-                if let Some(pid) = live_pid {
-                    by_pid.entry(pid).or_insert_with(|| sess.clone());
-                }
+            if let Some(pid) = live_pid {
+                by_pid.entry(pid).or_insert_with(|| sess.clone());
             }
 
             if let Some(t) = &last_task {
@@ -429,7 +485,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                     recent_tasks.push(RecentTask {
                         project: cwd.clone(),
                         project_short: proj_short.clone(),
-                        task: task.chars().take(120).collect(),
+                        task: sanitize_control(&task).chars().take(120).collect(),
                         mtime_ms: *mtime,
                         status,
                     });
@@ -445,7 +501,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     for (path, mtime, size) in orphan {
         let age_ms = now_ms.saturating_sub(mtime);
         if age_ms > RECENT_WINDOW_MS { continue; }
-        let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let id = path.file_stem().map(|s| sanitize_control(&s.to_string_lossy())).unwrap_or_default();
         sessions.push(Session {
             id, project: "?".into(), project_short: "?".into(),
             file: path.to_string_lossy().into_owned(),
@@ -465,8 +521,8 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
         });
     }
 
-    sessions.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
-    recent_tasks.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    sessions.sort_by_key(|x| std::cmp::Reverse(x.mtime_ms));
+    recent_tasks.sort_by_key(|x| std::cmp::Reverse(x.mtime_ms));
     if recent_tasks.len() > 20 { recent_tasks.truncate(20); }
 
     let waiting   = sessions.iter().filter(|s| s.status == Status::Waiting).count() as u32;
@@ -477,5 +533,64 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     SessionsResult {
         sessions: Sessions { sessions, recent_tasks, active, busy, waiting, completed },
         by_pid,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recs(lines: &[&str]) -> Vec<Value> {
+        parse_lines(&lines.join("\n"))
+    }
+
+    // Modern rollouts: event_msg/token_count carries cumulative totals —
+    // last record wins, cached is a subset of input, context fill comes
+    // from the last turn's input size.
+    #[test]
+    fn modern_token_count_events_are_cumulative() {
+        let out = analyse(&recs(&[
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50,"total_tokens":1050},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50},"model_context_window":272000}}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5000,"cached_input_tokens":4200,"output_tokens":300,"total_tokens":5300},"last_token_usage":{"input_tokens":4000,"cached_input_tokens":3400,"output_tokens":250},"model_context_window":272000}}}"#,
+        ]));
+        assert_eq!(out.tokens_input, 5000);
+        assert_eq!(out.tokens_output, 300);
+        assert_eq!(out.tokens_cache_read, 4200);
+        assert_eq!(out.context_used, 4000);
+    }
+
+    // Legacy usage blocks: input_tokens already includes cached tokens —
+    // a 100k-input turn with 90k cached must not count as 190k.
+    #[test]
+    fn legacy_usage_does_not_double_count_cached() {
+        let out = analyse(&recs(&[
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","usage":{"input_tokens":100000,"output_tokens":500,"input_tokens_details":{"cached_tokens":90000}}}}"#,
+        ]));
+        assert_eq!(out.tokens_input, 100000);
+        assert_eq!(out.tokens_output, 500);
+        assert_eq!(out.tokens_cache_read, 90000);
+        assert_eq!(out.context_used, 100000);
+    }
+
+    // Mixed files: once a cumulative record is seen, legacy per-event
+    // usage must not add on top of it.
+    #[test]
+    fn legacy_events_do_not_add_on_top_of_cumulative() {
+        let out = analyse(&recs(&[
+            r#"{"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":0,"output_tokens":100}}}}"#,
+            r#"{"payload":{"usage":{"input_tokens":500,"output_tokens":20}}}"#,
+        ]));
+        assert_eq!(out.tokens_input, 2000);
+        assert_eq!(out.tokens_output, 100);
+    }
+
+    // The session_meta cwd is untrusted file content rendered in the
+    // project column — bidi/format controls must be stripped at parse.
+    #[test]
+    fn meta_cwd_is_sanitized() {
+        let cwd = extract_cwd_from_meta(
+            "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/tmp/\u{202e}evil\"}}").unwrap();
+        assert!(!cwd.contains('\u{202e}'));
+        assert!(cwd.contains("evil"));
     }
 }

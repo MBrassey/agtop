@@ -3,11 +3,13 @@
 //   <cwd>/.aider.chat.history.md
 //   <cwd>/.aider.input.history
 //
-// The format is plain markdown with `# 2026-04-29 12:34:56.789 UTC` headers
-// and `> user prompt` blocks.  We extract:
+// The format is plain markdown with `# aider chat started at ...` session
+// headers, `#### <text>` user-prompt lines, plain prose for the assistant
+// reply, and `> ` blockquotes for aider's own tool/command announcements
+// ("Applied edit to x.py", "Commit abc123 ...").  We extract:
 //
-//   * last user prompt  (last `>` block before the tail)
-//   * last assistant prose (text between the prompt and the next header)
+//   * last user prompt  (last `#### ` block before the tail)
+//   * last assistant prose (text between the prompt and the next turn)
 //   * mtime of the file → age → status
 //
 // Aider doesn't write structured token usage to disk; cost can still be
@@ -18,35 +20,28 @@ use crate::model::{RecentTask, Session, Sessions, Status};
 use crate::sessions::{LiveAgentRef, SessionsResult};
 
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 const RECENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 const BUSY_WINDOW_MS:   u64 = 30 * 1000;
 const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;
 const TAIL_BYTES:       u64 = 64 * 1024;
-/// Hard-cap tail reads at 64 MiB (real call sites use 64 KiB).  Defensive
-/// against pathological / symlinked aider history files.
-const MAX_TAIL:         u64 = 64 * 1024 * 1024;
 
 fn read_tail(path: &Path, bytes: u64) -> String {
-    let mut f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
-    let len = match f.metadata() { Ok(m) => m.len(), Err(_) => return String::new() };
-    if len == 0 { return String::new(); }
-    let take = bytes.min(len).min(MAX_TAIL);
-    if f.seek(SeekFrom::End(-(take as i64))).is_err() { return String::new(); }
-    let mut buf = String::with_capacity(take as usize);
-    let _ = f.take(take).read_to_string(&mut buf);
-    buf
+    // Shared hardened reader: rejects a FIFO/socket masquerading as the
+    // history file (which would block the synchronous collector), caps the
+    // read, and decodes UTF-8 lossily.
+    crate::readfile::tail(path, bytes)
 }
 
 #[derive(Default)]
 struct ParsedHistory {
     last_user: Option<String>,
     last_assistant: Option<String>,
-    /// Per-turn activity: last few user prompts and assistant responses,
-    /// oldest → newest.  Each line already prefixed with `›`.
+    /// Per-turn activity: last few user prompts, assistant responses, and
+    /// tool announcements, oldest → newest.  Prompt/prose lines prefixed
+    /// with `›`, tool output with `→`.
     recent_activity: Vec<String>,
 }
 
@@ -54,36 +49,42 @@ fn parse_md(text: &str) -> ParsedHistory {
     let mut out = ParsedHistory::default();
     let mut user_lines: Vec<&str> = Vec::new();
     let mut asst_lines: Vec<&str> = Vec::new();
-    let mut in_user = false;
-    let mut all_turns: Vec<(String, String)> = Vec::new();   // (user, assistant)
-    let flush = |u: &mut Vec<&str>, a: &mut Vec<&str>, all: &mut Vec<(String, String)>| {
+    let mut tool_lines: Vec<&str> = Vec::new();
+    let mut all_turns: Vec<(String, String, String)> = Vec::new();   // (user, assistant, tool)
+    let flush = |u: &mut Vec<&str>, a: &mut Vec<&str>, t: &mut Vec<&str>,
+                 all: &mut Vec<(String, String, String)>| {
         let join = |v: &[&str]| v.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
-        let us = join(u); let asx = join(a);
-        if !us.is_empty() || !asx.is_empty() { all.push((us, asx)); }
-        u.clear(); a.clear();
+        let us = join(u); let asx = join(a); let ts = join(t);
+        if !us.is_empty() || !asx.is_empty() || !ts.is_empty() { all.push((us, asx, ts)); }
+        u.clear(); a.clear(); t.clear();
     };
     for line in text.lines() {
-        if line.starts_with("# ") {
-            flush(&mut user_lines, &mut asst_lines, &mut all_turns);
-            in_user = false;
-        } else if let Some(rest) = line.strip_prefix("> ") {
-            in_user = true;
+        // `#### ` lines are the USER speaking (aider prefixes every input
+        // line); `> ` blockquotes are aider's tool/command output, not the
+        // user.  (`#### ` also starts with '#', so test it first.)
+        if let Some(rest) = line.strip_prefix("#### ") {
+            // A prompt after assistant/tool output starts a new turn.
+            if !asst_lines.is_empty() || !tool_lines.is_empty() {
+                flush(&mut user_lines, &mut asst_lines, &mut tool_lines, &mut all_turns);
+            }
             user_lines.push(rest);
-        } else if in_user && line.is_empty() {
-            in_user = false;
-        } else if !in_user {
+        } else if line.starts_with("# ") {
+            flush(&mut user_lines, &mut asst_lines, &mut tool_lines, &mut all_turns);
+        } else if let Some(rest) = line.strip_prefix("> ") {
+            tool_lines.push(rest);
+        } else {
             asst_lines.push(line);
         }
     }
-    flush(&mut user_lines, &mut asst_lines, &mut all_turns);
+    flush(&mut user_lines, &mut asst_lines, &mut tool_lines, &mut all_turns);
 
-    if let Some((u, a)) = all_turns.last() {
+    if let Some((u, a, _t)) = all_turns.last() {
         if !u.is_empty() { out.last_user = Some(u.chars().take(120).collect()); }
         if !a.is_empty() { out.last_assistant = Some(a.chars().take(120).collect()); }
     }
-    // Take the last 4 turns (≤8 lines) for the preview tail.
+    // Take the last 4 turns (≤12 lines) for the preview tail.
     let take = all_turns.len().saturating_sub(4);
-    for (u, a) in &all_turns[take..] {
+    for (u, a, t) in &all_turns[take..] {
         if !u.is_empty() {
             let s: String = u.chars().take(120).collect();
             out.recent_activity.push(format!("› {}", s));
@@ -91,6 +92,10 @@ fn parse_md(text: &str) -> ParsedHistory {
         if !a.is_empty() {
             let s: String = a.chars().take(120).collect();
             out.recent_activity.push(format!("› {}", s));
+        }
+        if !t.is_empty() {
+            let s: String = t.chars().take(120).collect();
+            out.recent_activity.push(format!("→ {}", s));
         }
     }
     out
@@ -169,15 +174,18 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
             if age_ms < RECENT_WINDOW_MS {
                 recent_tasks.push(RecentTask {
                     project: cwd_s, project_short: proj_short,
-                    task: t.clone(), mtime_ms: mtime, status,
+                    // Sanitized + capped like every other vendor — this
+                    // field otherwise reaches the renderer raw.
+                    task: sanitize_control(t).chars().take(120).collect(),
+                    mtime_ms: mtime, status,
                 });
             }
         }
         sessions.push(sess);
     }
 
-    sessions.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
-    recent_tasks.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    sessions.sort_by_key(|x| std::cmp::Reverse(x.mtime_ms));
+    recent_tasks.sort_by_key(|x| std::cmp::Reverse(x.mtime_ms));
     let waiting   = sessions.iter().filter(|s| s.status == Status::Waiting).count() as u32;
     let completed = sessions.iter().filter(|s| s.status == Status::Completed).count() as u32;
     let active    = sessions.iter().filter(|s| matches!(s.status, Status::Active|Status::Busy|Status::Spawning|Status::Idle)).count() as u32;
@@ -185,5 +193,41 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     SessionsResult {
         sessions: Sessions { sessions, recent_tasks, active, busy, waiting, completed },
         by_pid,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HISTORY: &str = "\
+# aider chat started at 2026-04-29 12:34:56
+
+#### add a retry loop to fetch()
+
+I added a retry loop with exponential backoff.
+
+> Applied edit to fetch.py
+> Commit abc123 add retry loop
+
+#### now add a timeout
+
+Done, timeout defaults to 30s.
+";
+
+    // `#### ` lines are the user's prompt; `> ` blockquotes are aider's
+    // tool announcements.  These used to be parsed the other way around,
+    // showing tool output as the user for every turn.
+    #[test]
+    fn user_prompts_and_tool_output_are_attributed_correctly() {
+        let p = parse_md(HISTORY);
+        assert_eq!(p.last_user.as_deref(), Some("now add a timeout"));
+        assert_eq!(p.last_assistant.as_deref(), Some("Done, timeout defaults to 30s."));
+        assert!(p.recent_activity.iter()
+            .any(|l| l == "› add a retry loop to fetch()"));
+        assert!(p.recent_activity.iter()
+            .any(|l| l == "→ Applied edit to fetch.py Commit abc123 add retry loop"));
+        // Tool output must never surface as a speaker line.
+        assert!(p.recent_activity.iter().all(|l| !l.starts_with("› Applied edit")));
     }
 }

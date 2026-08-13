@@ -62,6 +62,23 @@ const LOCAL_MARKERS: &[&str] = &[
     "localhost:", "127.0.0.1:", "huggingface/",
 ];
 
+/// True for sonnet-4-5/6/7 and opus-4-5/6/7 ids with any prefix or date
+/// suffix — the families whose standard window is 200K.  4-8 and later
+/// minors don't match, and the `[1m]`/`-1m` markers are checked before
+/// this rule ever runs.
+fn is_sonnet_opus_4x_standard(lower: &str) -> bool {
+    for fam in ["sonnet-4-", "opus-4-"] {
+        if let Some(i) = lower.find(fam) {
+            let rest = &lower.as_bytes()[i + fam.len()..];
+            if matches!(rest.first(), Some(b'5' | b'6' | b'7'))
+                && !matches!(rest.get(1), Some(b'0'..=b'9')) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Returns true if the model string identifies a local (no-API-cost)
 /// runtime.  Used to short-circuit cost() to $0 unambiguously.
 pub fn is_local_model(model: &str) -> bool {
@@ -91,17 +108,34 @@ impl PriceTable {
                 max_input_tokens: Some(ctx),
             });
         };
-        // Anthropic — Claude 4 family ships with 200 K context, with a
-        // 1 M variant on Sonnet 4 (model id ends in `-1m`).
-        put(&mut m, "claude-sonnet-4-5", 3.00, 15.00, 200_000);
-        put(&mut m, "claude-sonnet-4-6", 3.00, 15.00, 200_000);
-        put(&mut m, "claude-sonnet-4-7", 3.00, 15.00, 200_000);
-        put(&mut m, "claude-opus-4-1",  15.00, 75.00, 200_000);
-        put(&mut m, "claude-opus-4-7",  15.00, 75.00, 200_000);
-        put(&mut m, "claude-haiku-4-5",  0.80,  4.00, 200_000);
-        put(&mut m, "claude-3-5-sonnet", 3.00, 15.00, 200_000);
-        put(&mut m, "claude-3-5-haiku",  0.80,  4.00, 200_000);
-        put(&mut m, "claude-3-opus",    15.00, 75.00, 200_000);
+        // Anthropic — current Claude families.  Prices are USD per
+        // million tokens (input / output); the prompt-cache read/write
+        // multipliers (0.1× read, 1.25× 5-min write, 2× 1-hour write)
+        // are applied in `cost_with_cache()`.  Context windows: the
+        // 5-line (fable/mythos/sonnet/opus) and opus-4-8 ship 1M;
+        // sonnet/opus 4.5–4.7 default to 200K — their opt-in 1M SKUs
+        // carry an explicit `[1m]`/`-1m` marker in the model id, which
+        // `context_limit()` resolves before the table lookup — and
+        // Haiku 4.5 plus the older 3.x SKUs are 200K.  These curated
+        // values win over the LiteLLM snapshot so the current default
+        // models (fable-5, opus-4-8) are never left unpriced or
+        // mispriced by a stale registry.
+        put(&mut m, "claude-fable-5",    10.00, 50.00, 1_000_000);
+        put(&mut m, "claude-mythos-5",   10.00, 50.00, 1_000_000);
+        put(&mut m, "claude-opus-5",      5.00, 25.00, 1_000_000);
+        put(&mut m, "claude-opus-4-8",    5.00, 25.00, 1_000_000);
+        put(&mut m, "claude-opus-4-7",    5.00, 25.00,   200_000);
+        put(&mut m, "claude-opus-4-6",    5.00, 25.00,   200_000);
+        put(&mut m, "claude-opus-4-5",    5.00, 25.00,   200_000);
+        put(&mut m, "claude-opus-4-1",   15.00, 75.00,   200_000);
+        put(&mut m, "claude-sonnet-5",    3.00, 15.00, 1_000_000);
+        put(&mut m, "claude-sonnet-4-7",  3.00, 15.00,   200_000);
+        put(&mut m, "claude-sonnet-4-6",  3.00, 15.00,   200_000);
+        put(&mut m, "claude-sonnet-4-5",  3.00, 15.00,   200_000);
+        put(&mut m, "claude-haiku-4-5",   1.00,  5.00,   200_000);
+        put(&mut m, "claude-3-5-sonnet",  3.00, 15.00,   200_000);
+        put(&mut m, "claude-3-5-haiku",   0.80,  4.00,   200_000);
+        put(&mut m, "claude-3-opus",     15.00, 75.00,   200_000);
         // OpenAI
         put(&mut m, "gpt-5",          1.25, 10.00, 256_000);
         put(&mut m, "gpt-5-mini",     0.25,  2.00, 256_000);
@@ -132,11 +166,23 @@ impl PriceTable {
         // limit when an observed prompt exceeds it (see
         // collector::enrich_context).
         let lower = model.to_ascii_lowercase();
-        if lower.contains("-1m") || lower.contains("1m-context") || lower.contains("-1000k") {
+        // `[1m]` is the marker Claude Code itself uses (`sonnet[1m]`).
+        if lower.contains("-1m") || lower.contains("[1m]")
+            || lower.contains("1m-context") || lower.contains("-1000k") {
             return 1_000_000;
         }
         if lower.contains("-2m") {
             return 2_000_000;
+        }
+        // The sonnet/opus 4.5–4.7 line defaults to 200K — the 1M window
+        // is an opt-in SKU caught by the marker check above.  Some
+        // LiteLLM snapshots list the 1M window for dated revisions of
+        // these ids (exact-match hits that bypass the curated overlay),
+        // which would understate context fill ~5×, so the family rule
+        // wins over the registry here.  A genuine 1M session still
+        // self-corrects via the collector's upward calibration.
+        if lower.contains("claude") && is_sonnet_opus_4x_standard(&lower) {
+            return 200_000;
         }
         self.lookup(model)
             .and_then(|p| p.max_input_tokens)
@@ -189,6 +235,7 @@ impl PriceTable {
     /// rate).  Kept for callers that don't track cache splits — but
     /// agent enrichers should prefer `cost_with_cache` so cache hits
     /// don't get billed at full price.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cost(&self, model: &str, in_tok: u64, out_tok: u64) -> f64 {
         self.cost_with_cache(model, in_tok, out_tok, 0, 0)
     }
@@ -304,6 +351,62 @@ mod tests {
         assert_eq!(cost_basis(&t, "ollama/llama3"),     CostBasis::Local);
         assert_eq!(cost_basis(&t, "totally-made-up"),   CostBasis::Unknown);
         assert_eq!(cost_basis(&t, ""),                  CostBasis::Unknown);
+    }
+
+    #[test]
+    fn current_flagship_models_are_priced() {
+        // Regression: the stale curated overlay left the current default
+        // models (fable-5, opus-4-8) unpriced/mispriced — fable-5 fell
+        // through to $0 and opus-4-8 suffix-walked to a 15/75 entry.
+        let t = PriceTable::builtin();
+        let f = t.lookup("claude-fable-5").expect("fable-5 must be priced");
+        assert_eq!((f.input_per_mtok, f.output_per_mtok), (10.0, 50.0));
+        let o = t.lookup("claude-opus-4-8").expect("opus-4-8 must be priced");
+        assert_eq!((o.input_per_mtok, o.output_per_mtok), (5.0, 25.0));
+        // Date-suffixed variants resolve via the suffix walk.
+        assert!(t.lookup("claude-opus-4-8-20260101").is_some());
+        assert!(t.cost("claude-fable-5", 1_000_000, 0) > 0.0);
+        assert_eq!(t.context_limit("claude-opus-4-8"), 1_000_000);
+        // haiku-4-5 corrected to 1.00/5.00 (was 0.80/4.00).
+        let h = t.lookup("claude-haiku-4-5").unwrap();
+        assert_eq!((h.input_per_mtok, h.output_per_mtok), (1.0, 5.0));
+    }
+
+    #[test]
+    fn opus_5_priced_with_1m_window() {
+        // Regression: claude-opus-5 was absent from both tables — the
+        // suffix walk degraded to nothing, so real sessions priced $0
+        // with a 200K fallback window.
+        let t = PriceTable::builtin();
+        let p = t.lookup("claude-opus-5").expect("opus-5 must be priced");
+        assert_eq!((p.input_per_mtok, p.output_per_mtok), (5.0, 25.0));
+        assert_eq!(t.context_limit("claude-opus-5"), 1_000_000);
+        assert!(t.lookup("claude-opus-5-20260901").is_some());
+        assert!(t.cost("claude-opus-5", 1_000_000, 0) > 0.0);
+    }
+
+    #[test]
+    fn sonnet_opus_4x_windows_are_200k_unless_1m_flagged() {
+        // The 4.5–4.7 sonnet/opus SKUs are 200K models; 1M is the opt-in
+        // variant with an explicit marker in the id.  An overstated limit
+        // can never be corrected at runtime (calibration only promotes
+        // upward), so these must not default to 1M.
+        let t = PriceTable::builtin();
+        for m in ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-sonnet-4-7",
+                  "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7"] {
+            assert_eq!(t.context_limit(m), 200_000, "{m} is a 200K model");
+        }
+        // Dated revisions resolve to 200K even when the LiteLLM snapshot
+        // carries the 1M beta window for the exact id.
+        assert_eq!(t.context_limit("claude-opus-4-7-20260416"), 200_000);
+        assert_eq!(t.context_limit("claude-opus-4-6-20260205"), 200_000);
+        // Explicit 1M markers win — both spellings.
+        assert_eq!(t.context_limit("claude-sonnet-4-5[1m]"), 1_000_000);
+        assert_eq!(t.context_limit("claude-sonnet-4-7-1m"), 1_000_000);
+        // The genuinely-1M SKUs keep their window.
+        assert_eq!(t.context_limit("claude-opus-4-8"), 1_000_000);
+        assert_eq!(t.context_limit("claude-fable-5"), 1_000_000);
+        assert_eq!(t.context_limit("claude-opus-4-1"), 200_000);
     }
 
     #[test]

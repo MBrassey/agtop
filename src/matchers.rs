@@ -1,5 +1,9 @@
 // Curated list of known AI coding-agent CLIs. Each entry maps a label
-// (canonical "name" column) to a regex matched against the full command line.
+// (canonical "name" column) to a regex. Bare-name matchers run against the
+// command *head* (argv[0], plus an interpreter's script/module target) so a
+// bystander that merely mentions an agent in its arguments (`grep -r
+// claude .`, `journalctl -u codex`) is never classified as one; matchers
+// flagged `wide` (scoped npm package paths) still see the full command line.
 // Order matters: first match wins.
 
 use regex::Regex;
@@ -7,6 +11,10 @@ use regex::Regex;
 pub struct Matcher {
     pub label: &'static str,
     pub re: Regex,
+    /// Match against the full command line instead of the command head —
+    /// needed for package-path matchers (`.../@openai/codex/cli.js`)
+    /// where an interpreter is argv[0] and the path may fall anywhere.
+    pub wide: bool,
 }
 
 pub struct UserMatcher {
@@ -27,6 +35,12 @@ pub fn builtin() -> Vec<Matcher> {
     let m = |label: &'static str, body: &str| Matcher {
         label,
         re: Regex::new(body).expect("builtin regex"),
+        wide: false,
+    };
+    let w = |label: &'static str, body: &str| Matcher {
+        label,
+        re: Regex::new(body).expect("builtin regex"),
+        wide: true,
     };
     let p = |s: &str| format!("{P}{s}");
     vec![
@@ -34,18 +48,26 @@ pub fn builtin() -> Vec<Matcher> {
         // Scoped npm package paths: forward slash on Linux/macOS, but
         // backslash on Windows (`...\node_modules\@anthropic-ai\claude-code\cli.js`).
         // Same for the other scoped agents below.
-        m("claude-code",  r"@anthropic-ai[/\\]claude-code"),
+        w("claude-code",  r"@anthropic-ai[/\\]claude-code"),
         m("codex",        &p(&format!(r"codex{E}"))),
-        m("openai-codex", r"@openai[/\\]codex"),
+        w("openai-codex", r"@openai[/\\]codex"),
         m("aider",        &p(r"aider(\s|$|\.)")),
         m("cursor-agent", &p(&format!(r"cursor-agent{E}"))),
         m("gemini",       &p(&format!(r"gemini(-cli)?{E}"))),
+        // Gemini CLI's primary distribution is `npm i -g @google/gemini-cli`.
+        // On Windows the cmdline is the resolved package path
+        // (`...\node_modules\@google\gemini-cli\dist\index.js`), where
+        // "gemini-cli" is followed by `\` so the bare matcher's trailing
+        // word-boundary fails — the agent was invisible.  Match the scoped
+        // path like the other npm-only agents.
+        w("gemini-cli",   r"@google[/\\]gemini-cli"),
         m("goose",        &p(&format!(r"goose{E}"))),
         m("continue",     &p(&format!(r"continue(-cli|-agent)?{E}"))),
         m("opencode",     &p(&format!(r"opencode{E}"))),
         m("copilot",      r"gh[\s-]copilot|github-copilot-cli"),
         m("cody",         &p(&format!(r"cody{E}"))),
-        m("amp",          r"(^|[\s/\\])amp(\.(exe|cmd|ps1|bat))?(\s|$)|@sourcegraph[/\\]amp"),
+        m("amp",          &p(&format!(r"amp{E}"))),
+        w("amp",          r"@sourcegraph[/\\]amp"),
         m("crush",        &p(&format!(r"crush{E}"))),
         m("mods",         &p(&format!(r"mods{E}"))),
         m("sgpt",         &p(&format!(r"sgpt{E}"))),
@@ -54,6 +76,48 @@ pub fn builtin() -> Vec<Matcher> {
         m("fabric",       &p(&format!(r"fabric{E}"))),
         m("block-goose",  &p(&format!(r"goose-server{E}"))),
     ]
+}
+
+/// The classification-relevant head of a command line: argv[0]; plus the
+/// script/module target when argv[0] is an interpreter (`node .../codex`,
+/// `python -m aider`); plus the first subcommand for launchers whose
+/// agent-ness depends on it (`gh copilot`, `ollama run`).  Bare-name
+/// matchers run against this instead of the whole cmdline, so agent names
+/// appearing only in a process's *arguments* never classify it.
+fn match_head(cmdline: &str) -> String {
+    let mut toks = cmdline.split_whitespace();
+    let argv0 = match toks.next() { Some(t) => t, None => return String::new() };
+    let mut base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0).to_ascii_lowercase();
+    for ext in [".exe", ".cmd", ".ps1", ".bat"] {
+        if let Some(s) = base.strip_suffix(ext) {
+            base = s.to_string();
+            break;
+        }
+    }
+    let mut head = argv0.to_string();
+    let is_interp = base.starts_with("python")
+        || matches!(base.as_str(),
+            "node" | "nodejs" | "bun" | "deno" | "ruby" | "perl"
+            | "sh" | "bash" | "zsh" | "dash" | "fish");
+    if is_interp {
+        // First non-flag argument is the script path; `-m mod` (python)
+        // and `-c cmd` (shells) name the target in the next token.
+        let mut take_next = false;
+        for t in toks {
+            if take_next || !t.starts_with('-') {
+                head.push(' ');
+                head.push_str(t);
+                break;
+            }
+            if t == "-m" || t == "-c" { take_next = true; }
+        }
+    } else if base == "gh" || base == "ollama" {
+        if let Some(t) = toks.find(|t| !t.starts_with('-')) {
+            head.push(' ');
+            head.push_str(t);
+        }
+    }
+    head
 }
 
 pub fn parse_user_matchers(extra: &[String]) -> Vec<UserMatcher> {
@@ -102,11 +166,15 @@ pub fn classify<'a>(
     } else {
         cmdline
     };
+    let head = match_head(trimmed);
     for m in builtins {
-        if m.re.is_match(trimmed) {
+        let hay = if m.wide { trimmed } else { head.as_str() };
+        if m.re.is_match(hay) {
             return Some(m.label);
         }
     }
+    // User matchers keep the documented contract: regex over the full
+    // command line.
     for m in user {
         if m.re.is_match(trimmed) {
             return Some(m.label.as_str());
@@ -171,6 +239,44 @@ mod tests {
                 r"node C:\Users\jake\AppData\Roaming\npm\node_modules\@sourcegraph\amp\bin\amp.js",
                 &b, &u),
             Some("amp"));
+        // Gemini CLI is npm-only; on Windows the resolved package path is
+        // what shows up and the bare `gemini-cli\` boundary fails without
+        // the scoped matcher.
+        assert_eq!(
+            classify(
+                r"node.exe C:\Users\jake\AppData\Roaming\npm\node_modules\@google\gemini-cli\dist\index.js",
+                &b, &u),
+            Some("gemini-cli"));
+    }
+
+    // Agent names in a process's *arguments* must not classify it — a
+    // `grep claude` run inside a project directory used to become a Busy
+    // "claude" row paired to that project's freshest session JSONL.
+    #[test]
+    fn bystanders_mentioning_agents_are_not_agents() {
+        let b = builtin();
+        let u: Vec<UserMatcher> = vec![];
+        assert_eq!(classify("grep -r claude .", &b, &u), None);
+        assert_eq!(classify("less claude", &b, &u), None);
+        assert_eq!(classify("journalctl -u codex", &b, &u), None);
+        assert_eq!(classify("vim /home/x/notes/claude-todo.md", &b, &u), None);
+        assert_eq!(classify("/usr/bin/vi /home/x/src/goose apply", &b, &u), None);
+        assert_eq!(classify(r"C:\Windows\notepad.exe C:\Users\x\claude.txt", &b, &u), None);
+        assert_eq!(classify("tail -f /home/x/.codex/sessions/rollout.jsonl", &b, &u), None);
+        assert_eq!(classify("man aider", &b, &u), None);
+    }
+
+    // ...while interpreter wrappers and subcommand launchers stay detected.
+    #[test]
+    fn wrappers_and_launchers_still_detected() {
+        let b = builtin();
+        let u: Vec<UserMatcher> = vec![];
+        assert_eq!(classify("sh -c claude --resume", &b, &u), Some("claude"));
+        assert_eq!(classify("python3 -m aider.main --model gpt-4", &b, &u), Some("aider"));
+        assert_eq!(classify("node /usr/local/lib/claude/claude --chat", &b, &u), Some("claude"));
+        assert_eq!(classify("gh copilot suggest", &b, &u), Some("copilot"));
+        assert_eq!(classify("ollama run llama3", &b, &u), Some("ollama"));
+        assert_eq!(classify("ollama list", &b, &u), None);
     }
 
     #[test]

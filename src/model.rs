@@ -3,12 +3,14 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Busy,
     Spawning,
     Active,
+    // Default keeps `Agent: Default` derivable (UI test fixtures).
+    #[default]
     Idle,
     Waiting,
     Completed,
@@ -50,7 +52,7 @@ impl Status {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct Agent {
     pub pid: u32,
     pub label: String,
@@ -105,6 +107,17 @@ pub struct Agent {
     /// Maximum input window in tokens for this agent's model, looked
     /// up via the bundled price table (LiteLLM-derived).  0 if unknown.
     pub context_limit: u64,
+    /// Extrapolated seconds until this agent's context window hits 95%
+    /// (auto-compaction), from the per-pid context-growth trend.  `None`
+    /// when there isn't enough history or the trend is flat/negative.
+    /// Computed in the collector so the render side needs no live handle
+    /// to it.
+    #[serde(default)]
+    pub time_to_compaction_secs: Option<u64>,
+    /// Context-window growth rate in tokens/minute, same source ring as
+    /// `time_to_compaction_secs`.  `None` when history is insufficient.
+    #[serde(default)]
+    pub ctx_growth_per_min: Option<u64>,
     /// Names of Claude Code agent skills loaded for this session.
     /// Populated by scanning `~/.claude/skills/<name>/SKILL.md` plus
     /// `<cwd>/.claude/skills/<name>/SKILL.md`.  Empty for non-Claude

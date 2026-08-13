@@ -20,23 +20,111 @@ use std::path::PathBuf;
 /// target PID has open with write access (O_WRONLY / O_RDWR on POSIX,
 /// FILE_GENERIC_WRITE on Windows).
 ///
-/// On Windows the call runs in a watchdog thread with a 2s deadline:
-/// `GetFinalPathNameByHandleW` can stall on remote/SMB handles even
-/// after the FILE_TYPE_DISK pre-filter, and a stuck collector tick
-/// would freeze the entire TUI.  Belt-and-suspenders.
+/// On Windows the call runs on a single long-lived watchdog thread
+/// with a 2s deadline: `GetFinalPathNameByHandleW` can stall on
+/// remote/SMB handles even after the FILE_TYPE_DISK pre-filter, and a
+/// stuck collector tick would freeze the entire TUI.  A persistently
+/// stalled handle keeps getting re-enumerated every tick, so the
+/// watchdog must not spawn a fresh thread per call — while the worker
+/// is still wedged on an earlier sweep, subsequent calls skip
+/// immediately instead of stacking abandoned threads without bound.
 #[cfg(windows)]
 pub fn read(pid: u32, limit: usize) -> Vec<PathBuf> {
-    use std::sync::mpsc;
-    use std::time::Duration;
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(impl_::read(pid, limit));
-    });
-    rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default()
+    use std::sync::OnceLock;
+    static DOG: OnceLock<watchdog::Watchdog> = OnceLock::new();
+    DOG.get_or_init(watchdog::Watchdog::spawn)
+        .run(std::time::Duration::from_secs(2), move || impl_::read(pid, limit))
 }
 #[cfg(not(windows))]
 pub fn read(pid: u32, limit: usize) -> Vec<PathBuf> {
     impl_::read(pid, limit)
+}
+
+/// Single-worker deadline runner.  One dedicated thread executes jobs
+/// serially; a job that overruns its deadline is abandoned (the caller
+/// gets an empty result) but the thread is NOT replaced — further
+/// requests are refused until the worker comes back, bounding thread
+/// use at one regardless of how long a handle stays wedged.  Late
+/// results from abandoned jobs are discarded by sequence number.
+///
+/// Compiled on all targets so the scheduling logic is covered by tests
+/// on any host; only the Windows `read` wrapper routes through it.
+#[cfg(any(windows, test))]
+pub(crate) mod watchdog {
+    use std::path::PathBuf;
+    use std::sync::mpsc::{channel, sync_channel, Receiver, SyncSender};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    type Job = Box<dyn FnOnce() -> Vec<PathBuf> + Send + 'static>;
+
+    pub struct Watchdog {
+        inner: Mutex<Inner>,
+    }
+    struct Inner {
+        req_tx: SyncSender<(u64, Job)>,
+        res_rx: Receiver<(u64, Vec<PathBuf>)>,
+        seq: u64,
+    }
+
+    impl Watchdog {
+        pub fn spawn() -> Self {
+            // Rendezvous request channel: try_send succeeds only while
+            // the worker is parked in recv — i.e. not wedged in a job.
+            let (req_tx, req_rx) = sync_channel::<(u64, Job)>(0);
+            let (res_tx, res_rx) = channel::<(u64, Vec<PathBuf>)>();
+            std::thread::Builder::new()
+                .name("agtop-fd-watchdog".into())
+                .spawn(move || {
+                    while let Ok((seq, job)) = req_rx.recv() {
+                        let out = job();
+                        if res_tx.send((seq, out)).is_err() { break; }
+                    }
+                })
+                .expect("spawn agtop-fd-watchdog thread");
+            Watchdog { inner: Mutex::new(Inner { req_tx, res_rx, seq: 0 }) }
+        }
+
+        pub fn run(
+            &self,
+            timeout: Duration,
+            job: impl FnOnce() -> Vec<PathBuf> + Send + 'static,
+        ) -> Vec<PathBuf> {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            inner.seq += 1;
+            let seq = inner.seq;
+            // Rendezvous try_send only lands while the worker is parked in
+            // recv.  An idle worker parks within microseconds (retry over a
+            // ~20ms window covers the just-spawned race); a worker wedged
+            // inside a job keeps the channel Full past the window, and the
+            // call is refused — skip this tick rather than queueing behind
+            // a dead handle.
+            let send_deadline = Instant::now() + Duration::from_millis(20);
+            let mut pending: (u64, Job) = (seq, Box::new(job));
+            loop {
+                use std::sync::mpsc::TrySendError;
+                match inner.req_tx.try_send(pending) {
+                    Ok(()) => break,
+                    Err(TrySendError::Full(p)) => {
+                        if Instant::now() >= send_deadline { return Vec::new(); }
+                        pending = p;
+                        std::thread::yield_now();
+                    }
+                    Err(TrySendError::Disconnected(_)) => return Vec::new(),
+                }
+            }
+            let deadline = Instant::now() + timeout;
+            loop {
+                let now = Instant::now();
+                if now >= deadline { return Vec::new(); }
+                match inner.res_rx.recv_timeout(deadline - now) {
+                    Ok((s, v)) if s == seq => return v,
+                    Ok(_) => continue, // stale result from an abandoned call
+                    Err(_) => return Vec::new(),
+                }
+            }
+        }
+    }
 }
 
 // ── Linux ──────────────────────────────────────────────────────────────────
@@ -198,8 +286,18 @@ mod impl_ {
     };
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileType, GetFinalPathNameByHandleW,
-        FILE_GENERIC_WRITE, FILE_NAME_NORMALIZED, FILE_TYPE_DISK,
+        FILE_NAME_NORMALIZED, FILE_TYPE_DISK,
     };
+
+    // The actual data-write access bits (ABI-fixed).  FILE_GENERIC_WRITE
+    // (0x120116) is the WRONG mask to test for "is this handle open for
+    // writing": it also contains SYNCHRONIZE (0x100000) and READ_CONTROL
+    // (0x20000), which every File handle — including read-only handles and
+    // directory (FILE_LIST_DIRECTORY) handles — carries, so `& FILE_GENERIC_WRITE`
+    // matched essentially everything and the "writing files" panel showed
+    // read-only handles.  The reading side documents this exact fix.
+    const FILE_WRITE_DATA:  u32 = 0x0002;
+    const FILE_APPEND_DATA: u32 = 0x0004;
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE,
     };
@@ -301,10 +399,12 @@ mod impl_ {
             if out.len() >= limit { break; }
             let entry = unsafe { *entries.add(i) };
             if entry.unique_process_id != target_pid { continue; }
-            // FILE_GENERIC_WRITE = STANDARD_RIGHTS_WRITE | FILE_WRITE_DATA |
-            // FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | SYNCHRONIZE = 0x120116.
-            // Match any handle whose grant overlaps the write-data bit.
-            if entry.granted_access & FILE_GENERIC_WRITE == 0 { continue; }
+            // Match only handles actually granted data-write or append
+            // access — not the composite FILE_GENERIC_WRITE, which shares
+            // SYNCHRONIZE/READ_CONTROL with every read-only handle.
+            if entry.granted_access & (FILE_WRITE_DATA | FILE_APPEND_DATA) == 0 {
+                continue;
+            }
 
             // Step 3: duplicate into our process so we can resolve a path.
             let mut dup: HANDLE = std::ptr::null_mut();
@@ -496,6 +596,47 @@ mod impl_ {
 mod impl_ {
     use super::*;
     pub fn read(_pid: u32, _limit: usize) -> Vec<PathBuf> { Vec::new() }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use super::watchdog::Watchdog;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    fn paths(n: usize) -> Vec<PathBuf> {
+        (0..n).map(|i| PathBuf::from(format!("/f{i}"))).collect()
+    }
+
+    #[test]
+    fn fast_job_returns_result() {
+        let dog = Watchdog::spawn();
+        assert_eq!(dog.run(Duration::from_secs(2), || paths(3)), paths(3));
+    }
+
+    #[test]
+    fn wedged_worker_is_skipped_not_stacked() {
+        let dog = Watchdog::spawn();
+        // Wedge the worker well past this test's lifetime budget.
+        let t0 = Instant::now();
+        let out = dog.run(Duration::from_millis(100), || {
+            std::thread::sleep(Duration::from_millis(600));
+            paths(1)
+        });
+        assert!(out.is_empty(), "overrun job must yield empty");
+        assert!(t0.elapsed() < Duration::from_millis(500),
+            "caller must be released at the deadline");
+        // While the worker is still inside the sleeping job, further
+        // requests are refused immediately — no second thread, no queue.
+        let t1 = Instant::now();
+        assert!(dog.run(Duration::from_secs(2), || paths(2)).is_empty());
+        assert!(t1.elapsed() < Duration::from_millis(200),
+            "busy worker must refuse instantly, not block");
+        // Once the worker finishes the abandoned job, service resumes and
+        // the stale result is discarded rather than returned to a new call.
+        std::thread::sleep(Duration::from_millis(700));
+        assert_eq!(dog.run(Duration::from_secs(2), || paths(5)), paths(5));
+    }
 }
 
 #[cfg(test)]

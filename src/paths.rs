@@ -29,12 +29,56 @@
 // home is always probed first.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Refresh cadence for the cross-mount probes below.  Every vendor
+/// module calls `home_roots()` once per tick, and the WSL↔Windows
+/// probes stat a drvfs / 9p / UNC mount where a single stat costs
+/// 1-10 ms — but the set of user profiles changes essentially never,
+/// so a coarse TTL removes the per-tick cost without a manual
+/// invalidation path.
+const MOUNT_PROBE_TTL: Duration = Duration::from_secs(30);
 
 pub fn home_roots() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     if let Some(h) = dirs::home_dir() {
         out.push(h);
     }
+    // Cheap parts (own home, env var) are recomputed every call; only
+    // the slow cross-mount enumerations are cached.
+    for h in cross_mount_homes() { out.push(h); }
+    if let Ok(s) = std::env::var("AGTOP_EXTRA_HOMES") {
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        for tok in s.split(sep) {
+            let t = tok.trim();
+            if t.is_empty() { continue; }
+            out.push(PathBuf::from(t));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    out
+}
+
+/// TTL-cached union of the alternate-mount home prefixes: `/mnt/c/Users/*`
+/// when running inside WSL, `\\wsl$\<distro>\home\*` when running on
+/// Windows.  Empty everywhere else.
+fn cross_mount_homes() -> Vec<PathBuf> {
+    static CACHE: Mutex<Option<(Instant, Vec<PathBuf>)>> = Mutex::new(None);
+    let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, homes)) = guard.as_ref() {
+        if at.elapsed() < MOUNT_PROBE_TTL {
+            return homes.clone();
+        }
+    }
+    let homes = probe_cross_mount_homes();
+    *guard = Some((Instant::now(), homes.clone()));
+    homes
+}
+
+fn probe_cross_mount_homes() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
     if is_wsl() {
         if let Ok(rd) = std::fs::read_dir("/mnt/c/Users") {
             for ent in rd.flatten() {
@@ -57,16 +101,6 @@ pub fn home_roots() -> Vec<PathBuf> {
     {
         for h in wsl_homes_from_windows() { out.push(h); }
     }
-    if let Ok(s) = std::env::var("AGTOP_EXTRA_HOMES") {
-        let sep = if cfg!(windows) { ';' } else { ':' };
-        for tok in s.split(sep) {
-            let t = tok.trim();
-            if t.is_empty() { continue; }
-            out.push(PathBuf::from(t));
-        }
-    }
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|p| seen.insert(p.clone()));
     out
 }
 
@@ -138,15 +172,20 @@ fn list_wsl_distros() -> Vec<String> {
 
 #[cfg(target_os = "linux")]
 fn is_wsl() -> bool {
-    if let Ok(s) = std::fs::read_to_string("/proc/version") {
-        let l = s.to_ascii_lowercase();
-        if l.contains("microsoft") || l.contains("wsl") { return true; }
-    }
-    if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
-        let l = s.to_ascii_lowercase();
-        if l.contains("microsoft") || l.contains("wsl") { return true; }
-    }
-    false
+    // The kernel identity can't change under a running process —
+    // memoize so per-tick callers don't re-read /proc/version forever.
+    static IS_WSL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *IS_WSL.get_or_init(|| {
+        if let Ok(s) = std::fs::read_to_string("/proc/version") {
+            let l = s.to_ascii_lowercase();
+            if l.contains("microsoft") || l.contains("wsl") { return true; }
+        }
+        if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+            let l = s.to_ascii_lowercase();
+            if l.contains("microsoft") || l.contains("wsl") { return true; }
+        }
+        false
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -172,6 +211,9 @@ mod tests {
         let val = format!("/tmp/fake-home-a{sep}/tmp/fake-home-b");
         // Use a temp scope guard so we always restore.
         let prev = std::env::var("AGTOP_EXTRA_HOMES").ok();
+        // Prime the cross-mount cache first: the env-var portion must
+        // be re-read every call, not frozen into the TTL cache.
+        let _ = home_roots();
         std::env::set_var("AGTOP_EXTRA_HOMES", &val);
         let r = home_roots();
         assert!(r.iter().any(|p| p == &PathBuf::from("/tmp/fake-home-a")));
@@ -180,5 +222,12 @@ mod tests {
             Some(v) => std::env::set_var("AGTOP_EXTRA_HOMES", v),
             None => std::env::remove_var("AGTOP_EXTRA_HOMES"),
         }
+    }
+
+    #[test]
+    fn cross_mount_probe_is_stable_within_ttl() {
+        let a = cross_mount_homes();
+        let b = cross_mount_homes();
+        assert_eq!(a, b);
     }
 }

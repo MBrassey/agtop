@@ -497,7 +497,7 @@ impl GameState {
         // Lookahead scales with field width — short canvas means we
         // can only see a few columns of obstacles, so don't waste
         // cycles checking the empty far-right.
-        let lookahead = (self.field_w - SHIP_X).max(4).min(20);
+        let lookahead = (self.field_w - SHIP_X).clamp(4, 20);
         let mut best_row = self.ship_y;
         let mut best_cost = i32::MAX;
         let mut total_threats_seen = 0;
@@ -637,10 +637,10 @@ impl GameState {
 
         // Static-looking starfield — deterministic by row index so it
         // doesn't shimmer.
-        for y in 0..play_h {
+        for (y, row) in grid.iter_mut().enumerate().take(play_h) {
             let mut x = ((y as u32).wrapping_mul(2654435761) as usize) % 17;
             while x < w {
-                grid[y][x] = Cell { ch: '·', color: theme::fg_dim(), bold: false };
+                row[x] = Cell { ch: '·', color: theme::fg_dim(), bold: false };
                 x += 19;
             }
         }
@@ -748,6 +748,7 @@ impl Cell {
     fn blank() -> Self { Self { ch: ' ', color: Color::Reset, bold: false } }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn put(grid: &mut [Vec<Cell>], x: i32, y: i32, ch: char, color: Color, bold: bool, w: usize, h: usize) {
     if x < 0 || y < 0 { return; }
     let (xu, yu) = (x as usize, y as usize);

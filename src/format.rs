@@ -11,7 +11,10 @@ pub fn bytes(n: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if v >= 100.0 {
+    // Classify against the *rounded* value: 99.96 formats as "100.0M"
+    // under `{:.1}` (6 chars), overflowing the 5-wide MEM column.  The
+    // 99.95 cut sends it to the no-decimal branch ("100M", 4 chars).
+    if v >= 99.95 {
         format!("{:.0}{}", v, units[i])
     } else {
         format!("{:.1}{}", v, units[i])
@@ -41,16 +44,29 @@ pub fn dur(sec: u64) -> String {
     }
     let d = sec / 86400;
     let h = (sec % 86400) / 3600;
-    format!("{}d{}h", d, h)
+    // Past 99 days, "{d}d{h}h" (e.g. "3650d23h", 8 chars) overflows the
+    // 6-wide uptime column; drop the hours so the widest value ("3650d",
+    // 5 chars, at the 10-year cap) still fits.
+    if d >= 100 {
+        format!("{}d", d)
+    } else {
+        format!("{}d{}h", d, h)
+    }
 }
 
 /// SI-suffixed integer formatter for token counts and similar.
 /// 1234 → "1.2k", 1_234_567 → "1.2M".
 pub fn si(n: u64) -> String {
+    // Thresholds are set on the *rounded* boundary so e.g. 999_999 doesn't
+    // format as "1000.0k" (7 chars) and overflow the 6-wide token column —
+    // it rolls up to "1.0M" instead.  Same for the k→M→B steps.
     if n < 1_000 { return n.to_string(); }
-    if n < 1_000_000 { return format!("{:.1}k", n as f64 / 1_000.0); }
-    if n < 1_000_000_000 { return format!("{:.1}M", n as f64 / 1_000_000.0); }
-    format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    if n < 999_950 { return format!("{:.1}k", n as f64 / 1_000.0); }
+    if n < 999_950_000 { return format!("{:.1}M", n as f64 / 1_000_000.0); }
+    if n < 999_950_000_000 { return format!("{:.1}B", n as f64 / 1_000_000_000.0); }
+    // Trillion tier keeps the width ≤6 for any realistic token aggregate
+    // (a session or fleet never approaches 10^15 tokens).
+    format!("{:.1}T", n as f64 / 1_000_000_000_000.0)
 }
 
 /// 8-cell unicode sparkline ▁▂▃▄▅▆▇█ for an arbitrary slice of values.
@@ -128,6 +144,17 @@ pub fn sanitize_control(s: &str) -> String {
             c if (c as u32) < 0x20 || c == '\x7f' => { /* drop */ }
             // C1 controls 0x80..=0x9f are dropped.
             c if (c as u32) >= 0x80 && (c as u32) <= 0x9f => { /* drop */ }
+            // Unicode bidi/format controls (Cf): zero-width space/joiners,
+            // the LRE/RLE/PDF/LRO/RLO overrides, the LRI/RLI/FSI/PDI
+            // isolates, and the BOM/ZWNBSP.  A monitoring tool must not let
+            // an attacker-controlled cmdline or path visually reorder text —
+            // U+202E (RTL override) can hide `--dangerously-skip-permissions`
+            // from the "GOD" flag or make `edualc` render as `claude`.
+            // ratatui's own control-char filter is C0/C1/DEL only, so this
+            // is the sole defence for both the TUI and the --once printer.
+            c if matches!(c as u32,
+                0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0xFEFF)
+                => { /* drop */ }
             c => out.push(c),
         }
     }
@@ -254,5 +281,35 @@ mod tests {
         assert_eq!(bytes(1024), "1.0K");
         assert_eq!(bytes(1024 * 1024), "1.0M");
         assert_eq!(bytes(1024 * 1024 * 1024), "1.0G");
+    }
+
+    #[test]
+    fn formatters_never_exceed_column_widths() {
+        // MEM column is {:>5}; a value rounding into [99.95,100) must not
+        // render as the 6-char "100.0M".
+        let almost_100m = (100.0 * 1024.0 * 1024.0 - 1.0) as u64;
+        assert!(bytes(almost_100m).chars().count() <= 5, "{}", bytes(almost_100m));
+        // TOK column is {:>6}; 999_999 must roll up rather than "1000.0k".
+        assert!(si(999_999).chars().count() <= 6, "{}", si(999_999));
+        assert_eq!(si(999_999), "1.0M");
+        // Realistic upper bounds (a fleet aggregate stays well under 10^14).
+        assert!(si(999_999_999_999).chars().count() <= 6, "{}", si(999_999_999_999));
+        assert!(si(99_999_999_999_999).chars().count() <= 6, "{}", si(99_999_999_999_999));
+        // uptime column is {:>6}; a multi-year process must not blow it out.
+        assert!(dur(3650 * 86_400 - 1).chars().count() <= 6, "{}", dur(3650 * 86_400 - 1));
+        assert!(dur(200 * 86_400).chars().count() <= 6, "{}", dur(200 * 86_400));
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_and_format_controls() {
+        // U+202E (RTL override) used to smuggle a reversed/hidden flag past
+        // the display must be dropped, along with zero-width chars and BOM.
+        let sneaky = "claude \u{202e}snoissimrep-piks-ylsuoregnad--\u{202c} x";
+        let clean = sanitize_control(sneaky);
+        assert!(!clean.contains('\u{202e}'));
+        assert!(!clean.contains('\u{202c}'));
+        assert_eq!(sanitize_control("a\u{200b}b\u{feff}c"), "abc");
+        // Ordinary text and legitimate non-ASCII survive.
+        assert_eq!(sanitize_control("café ☕ 日本語"), "café ☕ 日本語");
     }
 }
