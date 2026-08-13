@@ -50,10 +50,13 @@ pub(super) fn draw_confirm_kill(f: &mut Frame, area: Rect, snap: &Snapshot, pid:
         lines.push(Line::from(header));
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
-            "  Sending SIGTERM gives the agent a chance to clean up.",
+            "  SIGTERM gives the agent a chance to clean up; SIGKILL",
             Style::default().fg(theme::fg_dim()))));
         lines.push(Line::from(Span::styled(
-            "  Hit `y` to confirm, `n` or `Esc` to cancel.",
+            "  is for wedged agents that ignore it (no cleanup).",
+            Style::default().fg(theme::fg_dim()))));
+        lines.push(Line::from(Span::styled(
+            "  `y` SIGTERM · `9` SIGKILL · `n`/Esc cancel.",
             Style::default().fg(theme::fg()))));
     } else {
         lines.push(Line::raw(""));
@@ -222,7 +225,7 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
         // Anthropic prompt-cache reads are billed at 0.1× input rate;
         // the savings are 0.9× the input rate × cache_read tokens.
         if let Some(model) = a.model.as_deref() {
-            if let Some(p) = app.collector.pricing().lookup(model) {
+            if let Some(p) = app.pricing.lookup(model) {
                 let saved = (a.tokens_cache_read as f64 / 1_000_000.0)
                     * p.input_per_mtok * 0.90;
                 if saved >= 0.01 {
@@ -261,8 +264,8 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
         // Time-to-compaction extrapolation (only when we have enough
         // history and the trend is positive).  Shows next to the bar
         // for the visual at-a-glance read.
-        if let Some(secs) = app.collector.time_to_compaction_secs(a.pid, a.context_limit) {
-            let rate = app.collector.context_growth_per_min(a.pid).unwrap_or(0);
+        if let Some(secs) = a.time_to_compaction_secs {
+            let rate = a.ctx_growth_per_min.unwrap_or(0);
             spans.push(dim(format!("  · ≈{} to compaction (+{}/min)",
                 dur(secs), si(rate))));
         }
@@ -347,6 +350,27 @@ pub(super) fn draw_detail(f: &mut Frame, area: Rect, app: &mut App) {
         Style::default().fg(theme::fg()))]));
     lines.push(Line::from(vec![lab("cmd"),  Span::styled(shorten(&a.cmdline, (w as usize).saturating_sub(12)),
         Style::default().fg(theme::fg_dim()))]));
+    // Disk IO — lifetime totals plus per-tick rates.  Both totals
+    // zero (sysinfo-gap platforms, or a process that has done no IO)
+    // suppresses the row entirely — same no-misleading-zeros rule as
+    // the header chips.
+    if a.read_bytes > 0 || a.write_bytes > 0 {
+        let mut spans = vec![lab("io"),
+            val(bytes(a.read_bytes), theme::fg()), dim(" read · ".into()),
+            val(bytes(a.write_bytes), theme::fg()), dim(" write".into())];
+        if a.read_rate_bps > 0 || a.write_rate_bps > 0 {
+            spans.push(dim(format!("  · {}/s r · {}/s w",
+                bytes(a.read_rate_bps), bytes(a.write_rate_bps))));
+        }
+        lines.push(Line::from(spans));
+    }
+    // GPU — only NVIDIA attribution exists today, so any non-zero
+    // reading is meaningful; zeros mean "no GPU in play" and skip.
+    if a.gpu_pct > 0.0 || a.gpu_mem_bytes > 0 {
+        lines.push(Line::from(vec![lab("gpu"),
+            val(pct(a.gpu_pct), theme::cpu_color(a.gpu_pct)),
+            dim(format!(" · {} vram", bytes(a.gpu_mem_bytes)))]));
+    }
     if let Some(tool) = &a.current_tool {
         lines.push(Line::from(vec![lab("tool"),
             val(tool.clone(), theme::c_spawn())]));
@@ -660,7 +684,7 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &mut App) {
     // Help grows with the help text — capped to ~85% of viewport so
     // we always have room for the surrounding chrome.  Scroll handles
     // anything that overflows on small terminals.
-    let r = centered_rect(78, 32, area);
+    let r = centered_rect(78, 34, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -689,10 +713,12 @@ pub(super) fn draw_help(f: &mut Frame, area: Rect, app: &mut App) {
         line(vec![key("  p           "), dim("pause / resume refresh")]),
         line(vec![key("  Enter, Space"), dim("open / close detail popup")]),
         line(vec![key("  r           "), dim("refresh now")]),
-        line(vec![key("  s           "), dim("cycle sort (smart / cpu / mem / tokens / uptime / agent)")]),
+        line(vec![key("  s           "), dim("cycle sort (smart / cpu / mem / tokens / cost / uptime / agent)")]),
+        line(vec![key("  S (capital) "), dim("reverse sort direction (▼ ↔ ▲)")]),
+        line(vec![key("  x           "), dim("toggle token metric (cumulative ↔ fresh)")]),
         line(vec![key("  g           "), dim("toggle project grouping")]),
         line(vec![key("  t           "), dim("toggle tree mode (indented children under each agent)")]),
-        line(vec![key("  K (capital) "), dim("SIGTERM the selected agent (confirm y / n)")]),
+        line(vec![key("  K (capital) "), dim("kill the selected agent (y SIGTERM · 9 SIGKILL · n cancel)")]),
         line(vec![dim("              lowercase k stays bound to ↑ (vim convention)")]),
         line(vec![key("  C (capital) "), dim("toggle compact rows (hides PID / uptime / chips)")]),
         line(vec![key("  1 – 7       "), dim("toggle individual columns (PID / CPU / MEM / UP / SUB / TOK / ▍)")]),

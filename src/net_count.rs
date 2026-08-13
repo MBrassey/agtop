@@ -112,44 +112,56 @@ pub fn established(pid: u32) -> u32 {
 #[cfg(windows)]
 pub fn established(pid: u32) -> u32 {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
-        TCP_TABLE_OWNER_PID_CONNECTIONS,
+        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
+        MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_CONNECTIONS,
     };
-    use windows_sys::Win32::Networking::WinSock::AF_INET;
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
     const MIB_TCP_STATE_ESTAB: u32 = 5;
 
-    let mut buf_size: u32 = 0;
-    // Probe size.
-    unsafe {
-        GetExtendedTcpTable(
-            std::ptr::null_mut(), &mut buf_size, 0, AF_INET as u32,
-            TCP_TABLE_OWNER_PID_CONNECTIONS, 0,
-        );
+    // Query one address family's owner-pid TCP table and count this pid's
+    // ESTABLISHED rows.  `$table`/`$row` are the family-specific MIB types
+    // (v4 and v6 have identical `dwNumEntries` / `dwOwningPid` / `dwState`
+    // field names, differing only in the address fields we don't read).
+    macro_rules! count_family {
+        ($af:expr, $table:ty, $row:ty) => {{
+            let mut buf_size: u32 = 0;
+            unsafe {
+                GetExtendedTcpTable(std::ptr::null_mut(), &mut buf_size, 0,
+                    $af as u32, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
+            }
+            if buf_size == 0 || buf_size > 16 * 1024 * 1024 {
+                0u32
+            } else {
+                let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
+                let rc = unsafe {
+                    GetExtendedTcpTable(buf.as_mut_ptr() as *mut _, &mut buf_size, 0,
+                        $af as u32, TCP_TABLE_OWNER_PID_CONNECTIONS, 0)
+                };
+                if rc != 0 {
+                    0u32
+                } else {
+                    let table = unsafe { &*(buf.as_ptr() as *const $table) };
+                    let n = table.dwNumEntries as usize;
+                    let rows: *const $row = &table.table as *const _;
+                    let mut c = 0u32;
+                    for i in 0..n {
+                        let row: &$row = unsafe { &*rows.add(i) };
+                        if row.dwOwningPid == pid && row.dwState == MIB_TCP_STATE_ESTAB {
+                            c += 1;
+                        }
+                    }
+                    c
+                }
+            }
+        }};
     }
-    if buf_size == 0 || buf_size > 16 * 1024 * 1024 { return 0; }
 
-    let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
-    let rc = unsafe {
-        GetExtendedTcpTable(
-            buf.as_mut_ptr() as *mut _, &mut buf_size, 0, AF_INET as u32,
-            TCP_TABLE_OWNER_PID_CONNECTIONS, 0,
-        )
-    };
-    if rc != 0 { return 0; }
-
-    let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
-    let n = table.dwNumEntries as usize;
-    let rows: *const MIB_TCPROW_OWNER_PID = &table.table as *const _;
-
-    let mut count = 0u32;
-    for i in 0..n {
-        let row: &MIB_TCPROW_OWNER_PID = unsafe { &*rows.add(i) };
-        if row.dwOwningPid == pid && row.dwState == MIB_TCP_STATE_ESTAB {
-            count += 1;
-        }
-    }
-    count
+    // Count both IPv4 and IPv6 — an agent talking to a dual-stack API over
+    // IPv6 previously showed 0 established connections.
+    let v4 = count_family!(AF_INET, MIB_TCPTABLE_OWNER_PID, MIB_TCPROW_OWNER_PID);
+    let v6 = count_family!(AF_INET6, MIB_TCP6TABLE_OWNER_PID, MIB_TCP6ROW_OWNER_PID);
+    v4.saturating_add(v6)
 }
 
 // ── FreeBSD / DragonFly: libprocstat sockets + sockstat decode ────────────

@@ -14,7 +14,7 @@ use crate::model::Status;
 use ratatui::style::{Color, Modifier, Style};
 use std::sync::OnceLock;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Theme {
     // Structural
     pub border:        Color,
@@ -40,7 +40,23 @@ pub struct Theme {
     pub c_gauge_used:  Color,
     pub c_gauge_agent: Color,
     pub c_gauge_free:  Color,
+    // Accents that used to be hardcoded at call sites — themed so the
+    // light and no-color palettes stay legible.
+    pub c_danger:      Color,
+    pub c_cpu_hi:      Color,
+    pub c_cpu_mid:     Color,
+    pub c_cpu_lo:      Color,
+    /// Six identity hues for agent labels; named agents map to fixed
+    /// slots, unknown labels hash into them.
+    pub agent_palette: [Color; 6],
 }
+
+/// Shared identity palette for the dark themes — matches the
+/// pre-themed hardcoded agent colors exactly.
+const AGENT_PALETTE_DARK: [Color; 6] = [
+    Color::Rgb(165, 215, 210), Color::Rgb(200, 170, 210), Color::Rgb(225, 195, 140),
+    Color::Rgb(220, 160, 155), Color::Rgb(160, 200, 150), Color::Rgb(160, 180, 215),
+];
 
 // ── Themes ────────────────────────────────────────────────────────────────
 const DEFAULT_DARK: Theme = Theme {
@@ -64,6 +80,11 @@ const DEFAULT_DARK: Theme = Theme {
     c_gauge_used:  Color::Rgb(160, 200, 150),
     c_gauge_agent: Color::Rgb(225, 195, 140),
     c_gauge_free:  Color::Rgb( 60,  65,  75),
+    c_danger:      Color::Rgb(240, 175,  95),
+    c_cpu_hi:      Color::Rgb(220, 160, 155),
+    c_cpu_mid:     Color::Rgb(235, 180, 110),
+    c_cpu_lo:      Color::Rgb(160, 200, 150),
+    agent_palette: AGENT_PALETTE_DARK,
 };
 
 const DRACULA: Theme = Theme {
@@ -87,6 +108,11 @@ const DRACULA: Theme = Theme {
     c_gauge_used:  Color::Rgb( 80, 250, 123),
     c_gauge_agent: Color::Rgb(255, 184, 108),
     c_gauge_free:  Color::Rgb( 50,  53,  72),
+    c_danger:      Color::Rgb(240, 175,  95),
+    c_cpu_hi:      Color::Rgb(220, 160, 155),
+    c_cpu_mid:     Color::Rgb(235, 180, 110),
+    c_cpu_lo:      Color::Rgb(160, 200, 150),
+    agent_palette: AGENT_PALETTE_DARK,
 };
 
 const NORD: Theme = Theme {
@@ -110,6 +136,11 @@ const NORD: Theme = Theme {
     c_gauge_used:  Color::Rgb(163, 190, 140),
     c_gauge_agent: Color::Rgb(235, 203, 139),
     c_gauge_free:  Color::Rgb( 59,  66,  82),
+    c_danger:      Color::Rgb(240, 175,  95),
+    c_cpu_hi:      Color::Rgb(220, 160, 155),
+    c_cpu_mid:     Color::Rgb(235, 180, 110),
+    c_cpu_lo:      Color::Rgb(160, 200, 150),
+    agent_palette: AGENT_PALETTE_DARK,
 };
 
 const GRUVBOX: Theme = Theme {
@@ -133,6 +164,11 @@ const GRUVBOX: Theme = Theme {
     c_gauge_used:  Color::Rgb(184, 187,  38),
     c_gauge_agent: Color::Rgb(254, 128,  25),
     c_gauge_free:  Color::Rgb( 60,  56,  54),
+    c_danger:      Color::Rgb(240, 175,  95),
+    c_cpu_hi:      Color::Rgb(220, 160, 155),
+    c_cpu_mid:     Color::Rgb(235, 180, 110),
+    c_cpu_lo:      Color::Rgb(160, 200, 150),
+    agent_palette: AGENT_PALETTE_DARK,
 };
 
 const MONOCHROME: Theme = Theme {
@@ -156,23 +192,106 @@ const MONOCHROME: Theme = Theme {
     c_gauge_used:  Color::Rgb(220, 220, 220),
     c_gauge_agent: Color::Rgb(180, 180, 180),
     c_gauge_free:  Color::Rgb( 50,  50,  50),
+    // Monochrome keeps its promise now that these route through the
+    // theme — pre-theming they leaked the dark-default hues.
+    c_danger:      Color::Rgb(200, 200, 200),
+    c_cpu_hi:      Color::Rgb(245, 245, 245),
+    c_cpu_mid:     Color::Rgb(210, 210, 210),
+    c_cpu_lo:      Color::Rgb(170, 170, 170),
+    agent_palette: [
+        Color::Rgb(235, 235, 235), Color::Rgb(215, 215, 215), Color::Rgb(195, 195, 195),
+        Color::Rgb(175, 175, 175), Color::Rgb(205, 205, 205), Color::Rgb(225, 225, 225),
+    ],
+};
+
+/// Light-background palette: dark-ink foregrounds, pale tints, and
+/// status / chart accents darkened for contrast on a white ground.
+const LIGHT: Theme = Theme {
+    border:        Color::Rgb( 90, 110, 130),
+    border_dim:    Color::Rgb(175, 185, 195),
+    fg:            Color::Rgb( 40,  44,  52),
+    fg_dim:        Color::Rgb(115, 122, 132),
+    hl_bg:         Color::Rgb(195, 215, 240),
+    group_tint_a:  Color::Reset,
+    group_tint_b:  Color::Rgb(238, 240, 243),
+    c_busy:        Color::Rgb( 25, 125,  65),
+    c_spawn:       Color::Rgb( 20, 120, 110),
+    c_active:      Color::Rgb(120, 125,  25),
+    c_idle:        Color::Rgb(105, 105, 105),
+    c_wait:        Color::Rgb(175, 105,  25),
+    c_done:        Color::Rgb(120,  80, 150),
+    c_stale:       Color::Rgb(160, 158, 160),
+    c_chart_cpu:   Color::Rgb(155, 115,  30),
+    c_chart_mem:   Color::Rgb(120,  80, 150),
+    c_chart_tok:   Color::Rgb( 40,  95, 140),
+    c_gauge_used:  Color::Rgb( 75, 135,  65),
+    c_gauge_agent: Color::Rgb(155, 115,  30),
+    c_gauge_free:  Color::Rgb(210, 215, 222),
+    c_danger:      Color::Rgb(175, 110,  20),
+    c_cpu_hi:      Color::Rgb(180,  55,  50),
+    c_cpu_mid:     Color::Rgb(160, 105,  20),
+    c_cpu_lo:      Color::Rgb( 55, 120,  45),
+    agent_palette: [
+        Color::Rgb( 25, 110, 105), Color::Rgb(110,  70, 130), Color::Rgb(145, 100,  20),
+        Color::Rgb(150,  60,  55), Color::Rgb( 55, 110,  45), Color::Rgb( 45,  80, 140),
+    ],
+};
+
+/// NO_COLOR / --no-color palette — only `Reset` and the two ANSI
+/// greys, so nothing richer than the terminal's own defaults is ever
+/// emitted (no-color.org).  Weight (BOLD / DIM) still carries the
+/// status semantics.
+const NOCOLOR: Theme = Theme {
+    border:        Color::Reset,
+    border_dim:    Color::DarkGray,
+    fg:            Color::Reset,
+    fg_dim:        Color::DarkGray,
+    hl_bg:         Color::DarkGray,
+    group_tint_a:  Color::Reset,
+    group_tint_b:  Color::Reset,
+    c_busy:        Color::Reset,
+    c_spawn:       Color::Reset,
+    c_active:      Color::Reset,
+    c_idle:        Color::Gray,
+    c_wait:        Color::Gray,
+    c_done:        Color::Gray,
+    c_stale:       Color::DarkGray,
+    c_chart_cpu:   Color::Gray,
+    c_chart_mem:   Color::Gray,
+    c_chart_tok:   Color::Gray,
+    c_gauge_used:  Color::Gray,
+    c_gauge_agent: Color::Reset,
+    c_gauge_free:  Color::DarkGray,
+    c_danger:      Color::Reset,
+    c_cpu_hi:      Color::Reset,
+    c_cpu_mid:     Color::Gray,
+    c_cpu_lo:      Color::DarkGray,
+    agent_palette: [Color::Reset; 6],
 };
 
 static THEME: OnceLock<Theme> = OnceLock::new();
 
-/// Install the active theme.  Idempotent — first writer wins
-/// (prevents the late `--prices` parser from clobbering an
-/// already-installed theme mid-run).  Unknown names fall back to
+/// Resolve a theme name to its palette.  Unknown names fall back to
 /// the default-dark palette.
-pub fn set_theme(name: &str) {
-    let t = match name.to_ascii_lowercase().as_str() {
+fn theme_by_name(name: &str) -> Theme {
+    match name.to_ascii_lowercase().as_str() {
         "dracula"            => DRACULA,
         "nord"               => NORD,
         "gruvbox"            => GRUVBOX,
         "mono" | "monochrome"=> MONOCHROME,
+        "light"              => LIGHT,
+        // Not offered via --theme; installed by the NO_COLOR /
+        // --no-color path in cli::run.
+        "no-color"           => NOCOLOR,
         _                    => DEFAULT_DARK,
-    };
-    let _ = THEME.set(t);
+    }
+}
+
+/// Install the active theme.  Idempotent — first writer wins
+/// (prevents the late `--prices` parser from clobbering an
+/// already-installed theme mid-run).
+pub fn set_theme(name: &str) {
+    let _ = THEME.set(theme_by_name(name));
 }
 
 #[inline]
@@ -201,6 +320,7 @@ fn t() -> &'static Theme {
 #[inline] pub fn c_gauge_used() -> Color { t().c_gauge_used }
 #[inline] pub fn c_gauge_agent()-> Color { t().c_gauge_agent }
 #[inline] pub fn c_gauge_free() -> Color { t().c_gauge_free }
+#[inline] pub fn c_danger()     -> Color { t().c_danger }
 
 /// Pick the alternating tint for the group at index `i` (0-based).
 pub fn group_tint(i: usize) -> Color {
@@ -230,41 +350,89 @@ pub fn status_style(s: Status) -> Style {
     }
 }
 
+/// Identity color for an agent label.  Named agents map to fixed
+/// slots in the theme's agent palette (so identity hues follow the
+/// palette and stay legible on light / no-color grounds); unknown
+/// labels hash into the same six slots.
 pub fn agent_color(label: &str) -> Color {
+    let p = &t().agent_palette;
     match label {
-        "claude" | "claude-code"   => Color::Rgb(160, 180, 215),
-        "codex"  | "openai-codex"  => Color::Rgb(160, 200, 150),
-        "aider"                    => Color::Rgb(220, 160, 155),
-        "cursor-agent"             => Color::Rgb(200, 170, 210),
-        "gemini"                   => Color::Rgb(165, 215, 210),
-        "goose" | "block-goose"    => Color::Rgb(225, 195, 140),
-        "continue"                 => Color::Rgb(225, 222, 215),
-        "opencode"                 => Color::Rgb(200, 170, 210),
-        "copilot"                  => Color::Rgb(165, 215, 210),
-        "cody"                     => Color::Rgb(200, 170, 210),
-        "amp"                      => Color::Rgb(225, 195, 140),
-        "crush"                    => Color::Rgb(220, 160, 155),
-        "mods"                     => Color::Rgb(160, 200, 150),
-        "sgpt"                     => Color::Rgb(160, 180, 215),
-        "llm"                      => Color::Rgb(165, 215, 210),
-        "ollama"                   => Color::Rgb(225, 195, 140),
-        "fabric"                   => Color::Rgb(225, 222, 215),
+        "claude" | "claude-code"   => p[5],
+        "codex"  | "openai-codex"  => p[4],
+        "aider"                    => p[3],
+        "cursor-agent"             => p[1],
+        "gemini"                   => p[0],
+        "goose" | "block-goose"    => p[2],
+        "continue"                 => fg(),
+        "opencode"                 => p[1],
+        "copilot"                  => p[0],
+        "cody"                     => p[1],
+        "amp"                      => p[2],
+        "crush"                    => p[3],
+        "mods"                     => p[4],
+        "sgpt"                     => p[5],
+        "llm"                      => p[0],
+        "ollama"                   => p[2],
+        "fabric"                   => fg(),
         _ => {
-            let palette = [
-                Color::Rgb(165, 215, 210), Color::Rgb(200, 170, 210), Color::Rgb(225, 195, 140),
-                Color::Rgb(220, 160, 155), Color::Rgb(160, 200, 150), Color::Rgb(160, 180, 215),
-            ];
             let mut h: u32 = 0;
             for b in label.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u32); }
-            palette[(h as usize) % palette.len()]
+            p[(h as usize) % p.len()]
         }
     }
 }
 
 pub fn cpu_color(v: f64) -> Color {
     if !v.is_finite() || v < 0.0 { return fg_dim(); }
-    if v >= 50.0      { Color::Rgb(220, 160, 155) }
-    else if v >= 10.0 { Color::Rgb(235, 180, 110) }
-    else if v >=  1.0 { Color::Rgb(160, 200, 150) }
+    if v >= 50.0      { t().c_cpu_hi }
+    else if v >= 10.0 { t().c_cpu_mid }
+    else if v >=  1.0 { t().c_cpu_lo }
     else              { fg_dim() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_by_name_selects_and_falls_back() {
+        assert_eq!(theme_by_name("light"), LIGHT);
+        assert_eq!(theme_by_name("LIGHT"), LIGHT);
+        assert_eq!(theme_by_name("dracula"), DRACULA);
+        assert_eq!(theme_by_name("mono"), MONOCHROME);
+        assert_eq!(theme_by_name("monochrome"), MONOCHROME);
+        assert_eq!(theme_by_name("no-color"), NOCOLOR);
+        assert_eq!(theme_by_name("default"), DEFAULT_DARK);
+        assert_eq!(theme_by_name("bogus"), DEFAULT_DARK);
+    }
+
+    #[test]
+    fn nocolor_palette_never_emits_truecolor() {
+        let t = NOCOLOR;
+        let all = [
+            t.border, t.border_dim, t.fg, t.fg_dim, t.hl_bg,
+            t.group_tint_a, t.group_tint_b,
+            t.c_busy, t.c_spawn, t.c_active, t.c_idle, t.c_wait,
+            t.c_done, t.c_stale,
+            t.c_chart_cpu, t.c_chart_mem, t.c_chart_tok,
+            t.c_gauge_used, t.c_gauge_agent, t.c_gauge_free,
+            t.c_danger, t.c_cpu_hi, t.c_cpu_mid, t.c_cpu_lo,
+        ];
+        for c in all.iter().chain(t.agent_palette.iter()) {
+            assert!(
+                matches!(c, Color::Reset | Color::Gray | Color::DarkGray),
+                "no-color palette leaked {:?}", c
+            );
+        }
+    }
+
+    #[test]
+    fn light_palette_uses_dark_ink_foreground() {
+        // Sanity guard against a dark fg regressing to a light one —
+        // the whole point of the palette is legibility on white.
+        match LIGHT.fg {
+            Color::Rgb(r, g, b) => assert!(r < 100 && g < 100 && b < 100),
+            other => panic!("light fg should be truecolor ink, got {:?}", other),
+        }
+    }
 }

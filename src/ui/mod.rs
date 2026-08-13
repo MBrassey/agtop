@@ -20,8 +20,9 @@ use crate::theme;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent,
-            KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
+    event::{self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
+            EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+            MouseButton, MouseEvent, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -33,7 +34,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, stdout};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod popup;
 mod panels;
@@ -52,10 +53,10 @@ pub(super) const COL_SUB:    u32 = 1 << 4;  // 5  — subagent chip
 pub(super) const COL_TOK:    u32 = 1 << 5;  // 6  — tokens chip
 pub(super) const COL_DANGER: u32 = 1 << 6;  // 7  — dangerous left-edge marker
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub(super) enum Sort { Smart, Cpu, Mem, Uptime, Tokens, Agent }
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(super) enum Sort { Smart, Cpu, Mem, Uptime, Tokens, Cost, Agent }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(super) enum TokenMode { Cumulative, Fresh }
 
 impl TokenMode {
@@ -76,9 +77,11 @@ impl TokenMode {
             }
         }
     }
-    #[allow(dead_code)]
     pub(super) fn label(self) -> &'static str {
         match self { TokenMode::Cumulative => "cumulative", TokenMode::Fresh => "fresh" }
+    }
+    pub(super) fn toggled(self) -> Self {
+        match self { TokenMode::Cumulative => TokenMode::Fresh, TokenMode::Fresh => TokenMode::Cumulative }
     }
 }
 
@@ -88,7 +91,8 @@ impl Sort {
             Sort::Smart  => Sort::Cpu,
             Sort::Cpu    => Sort::Mem,
             Sort::Mem    => Sort::Tokens,
-            Sort::Tokens => Sort::Uptime,
+            Sort::Tokens => Sort::Cost,
+            Sort::Cost   => Sort::Uptime,
             Sort::Uptime => Sort::Agent,
             Sort::Agent  => Sort::Smart,
         }
@@ -99,20 +103,36 @@ impl Sort {
             Sort::Cpu    => "cpu",
             Sort::Mem    => "mem",
             Sort::Tokens => "tokens",
+            Sort::Cost   => "cost",
             Sort::Uptime => "uptime",
             Sort::Agent  => "agent",
         }
     }
+    /// Direction glyph for the header / footer sort indicator.
+    /// `desc = true` is the natural orientation — numeric keys read
+    /// high→low, agent reads A→Z; `S` flips whatever is active.
+    pub(super) fn arrow(self, desc: bool) -> &'static str {
+        let up = (self == Sort::Agent) == desc;
+        if up { "▲" } else { "▼" }
+    }
 }
 
 pub(super) struct App {
-    pub(super) collector: Collector,
+    /// Latest snapshot, delivered by the collector thread over a channel.
     pub(super) snap: Snapshot,
-    pub(super) last_tick: Instant,
+    /// Clone of the (immutable) price table — the collector now lives on its
+    /// own thread, so the UI keeps its own copy for the cache-savings stat
+    /// instead of reaching into the collector.
+    pub(super) pricing: crate::pricing::PriceTable,
+    /// Control channel to the collector thread (refresh-now / pause / quit).
+    pub(super) ctrl_tx: std::sync::mpsc::Sender<CollectorCmd>,
     pub(super) interval: Duration,
     pub(super) paused: bool,
     pub(super) grouped: bool,
     pub(super) sort: Sort,
+    /// Sort direction — `true` is the natural per-key orientation
+    /// (numeric high→low, agent A→Z); `S` flips it.
+    pub(super) sort_desc: bool,
     pub(super) filter: String,
     pub(super) typing_filter: bool,
     pub(super) show_help: bool,
@@ -199,21 +219,151 @@ pub(super) struct App {
     pub(super) quit: bool,
 }
 
+/// Best-effort restore of the terminal to a sane state: leave the mouse
+/// reporting modes, show the cursor (ratatui hides it on every draw and the
+/// alt-screen restore does NOT re-show it), leave bracketed paste and the
+/// alternate screen, and drop raw mode.  Safe to call more than once.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    // Bracketed paste goes as its own best-effort command: on legacy
+    // Windows consoles (no VT) crossterm reports it Unsupported, and
+    // inside the chain below that error would short-circuit cursor::Show
+    // and LeaveAlternateScreen — stranding the user on the alt buffer.
+    let _ = execute!(stdout(), DisableBracketedPaste);
+    let _ = execute!(
+        stdout(),
+        DisableMouseCapture,
+        crossterm::cursor::Show,
+        LeaveAlternateScreen,
+    );
+}
+
+/// RAII guard for terminal state.  Whatever ends `run` — an error `?` during
+/// init, an early return from the loop, a normal quit, or an unwind — `Drop`
+/// restores the terminal exactly once, so there is no path that can leave the
+/// user stuck in raw mode / the alt screen with a hidden cursor.
+struct TerminalGuard;
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        enable_raw_mode()?;
+        // If entering the alt screen fails, undo the full partial init
+        // (raw mode AND whatever commands in the chain already took
+        // effect, e.g. the alt screen itself) before bailing.
+        if let Err(e) = execute!(stdout(), EnterAlternateScreen, EnableMouseCapture) {
+            restore_terminal();
+            return Err(e.into());
+        }
+        // Best-effort: legacy Windows consoles without VT support report
+        // bracketed paste as Unsupported — that must degrade (pastes
+        // arrive as key events) rather than abort startup.
+        let _ = execute!(stdout(), EnableBracketedPaste);
+        Ok(TerminalGuard)
+    }
+}
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+/// Control messages from the UI thread to the collector thread.
+pub(super) enum CollectorCmd {
+    /// Produce a snapshot immediately (the `r` key).
+    RefreshNow,
+    /// Stop / resume producing snapshots (the `p` key).
+    SetPaused(bool),
+    /// Exit the collector loop.
+    Quit,
+}
+
+/// Spawn the collector on a dedicated thread.  It owns the `Collector` and
+/// free-runs at `interval`, sending each `Snapshot` over `snap_tx`; the UI
+/// thread reads the latest without ever blocking on collection.  This is what
+/// keeps a slow or wedged snapshot (nvidia-smi on a hung GPU, wsl.exe on a
+/// stuck LxssManager, a stalled network read, a Windows handle-table sweep)
+/// from freezing input and rendering — the UI just keeps showing the last good
+/// frame until a fresh one arrives.  Same on Linux, macOS, and Windows:
+/// std threads + mpsc, no platform-specific machinery.
+fn spawn_collector(
+    mut collector: Collector,
+    interval: Duration,
+    snap_tx: std::sync::mpsc::Sender<Snapshot>,
+    ctrl_rx: std::sync::mpsc::Receiver<CollectorCmd>,
+) -> std::thread::JoinHandle<()> {
+    use std::sync::mpsc::RecvTimeoutError;
+    std::thread::Builder::new()
+        .name("agtop-collector".into())
+        .spawn(move || {
+            let mut paused = false;
+            // Emit an initial snapshot right away so the UI has a first frame.
+            let mut produce = true;
+            loop {
+                if produce {
+                    let snap = collector.snapshot();
+                    if snap_tx.send(snap).is_err() {
+                        break; // UI gone
+                    }
+                    produce = false;
+                }
+                // When paused, only a control message can wake us; otherwise
+                // wake on the tick interval to produce the next snapshot.
+                let recv = if paused {
+                    collector_recv_blocking(&ctrl_rx)
+                } else {
+                    ctrl_rx.recv_timeout(interval)
+                };
+                match recv {
+                    Ok(CollectorCmd::Quit) => break,
+                    Ok(CollectorCmd::RefreshNow) => produce = true,
+                    Ok(CollectorCmd::SetPaused(p)) => {
+                        paused = p;
+                        if !paused {
+                            produce = true; // resume the cadence immediately
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => produce = true, // normal tick
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })
+        .expect("spawn agtop-collector thread")
+}
+
+/// Block on the control channel, mapping a closed channel to the same
+/// `Disconnected` variant `recv_timeout` uses so the caller can match one type.
+fn collector_recv_blocking(
+    rx: &std::sync::mpsc::Receiver<CollectorCmd>,
+) -> Result<CollectorCmd, std::sync::mpsc::RecvTimeoutError> {
+    rx.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)
+}
+
 pub fn run(collector: Collector, args: Args) -> Result<()> {
-    // Install a panic hook that restores terminal state before unwinding so
-    // a crash in draw / event handling doesn't leave the user in raw mode
-    // on the alternate screen.
+    // Unix: restore the terminal on SIGTERM / SIGHUP / SIGINT (delivered at
+    // logout, on `kill`, or when a wedged agtop is killed externally) before
+    // the process dies with default disposition — otherwise the shell is left
+    // in raw mode spewing escapes.  Must run before raw mode is enabled so the
+    // saved termios is the cooked one.
+    #[cfg(unix)]
+    signal_restore::install();
+
+    // Install a panic hook that restores terminal state *before* the panic
+    // message prints, so a crash doesn't dump a backtrace into raw mode / the
+    // alt screen with a hidden cursor.  The RAII guard below covers the
+    // non-panic exit paths.  Restore ONLY for a panic on this (UI) thread:
+    // a background thread's panic (collector, reader/watchdog helpers) must
+    // not drop the live UI into cooked mode mid-render — the UI notices a
+    // dead collector via the closed snapshot channel and reports it instead.
+    let ui_thread = std::thread::current().id();
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = disable_raw_mode();
-        let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        if std::thread::current().id() == ui_thread {
+            restore_terminal();
+        }
         prev(info);
     }));
 
-    enable_raw_mode()?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(out);
+    let _guard = TerminalGuard::enter()?;
+    let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let interval = Duration::from_millis((args.interval.max(0.1) * 1000.0) as u64);
@@ -221,20 +371,29 @@ pub fn run(collector: Collector, args: Args) -> Result<()> {
         "cpu" => Sort::Cpu,
         "mem" => Sort::Mem,
         "tokens" => Sort::Tokens,
+        "cost" => Sort::Cost,
         "uptime" => Sort::Uptime,
         "agent" => Sort::Agent,
         _ => Sort::Smart,
     };
 
+    // Take a copy of the price table, then hand the collector to its own
+    // thread.  From here the UI never touches the collector directly.
+    let pricing = collector.pricing().clone();
+    let (snap_tx, snap_rx) = std::sync::mpsc::channel::<Snapshot>();
+    let (ctrl_tx, ctrl_rx) = std::sync::mpsc::channel::<CollectorCmd>();
+    let _collector_thread = spawn_collector(collector, interval, snap_tx, ctrl_rx);
+
     let pre_pid = args.pid;
     let mut app = App {
-        collector,
         snap: Snapshot::default(),
-        last_tick: Instant::now() - interval,
+        pricing,
+        ctrl_tx,
         interval,
         paused: false,
         grouped: true,
         sort: initial_sort,
+        sort_desc: args.sort_desc,
         filter: args.filter.unwrap_or_default(),
         typing_filter: false,
         show_help: false,
@@ -255,7 +414,7 @@ pub fn run(collector: Collector, args: Args) -> Result<()> {
         sessions_scroll: 0,
         sessions_rect: Rect::default(),
         agents_total_rows: 0,
-        compact_rows: false,
+        compact_rows: args.compact,
         cols: COL_PID | COL_CPU | COL_MEM | COL_UPTIME | COL_SUB | COL_TOK | COL_DANGER,
         tokens_mode: match args.tokens.as_str() {
             "fresh" => TokenMode::Fresh,
@@ -265,46 +424,182 @@ pub fn run(collector: Collector, args: Args) -> Result<()> {
         quit: false,
     };
 
-    let res = main_loop(&mut terminal, &mut app);
+    let res = main_loop(&mut terminal, &mut app, &snap_rx);
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-    terminal.show_cursor()?;
+    // Tell the collector to stop, but do NOT join — if it's mid-snapshot in a
+    // wedged external call we must not block the UI's exit / terminal restore
+    // on it.  The `run_capped` timeouts bound any single call, and the thread
+    // exits on its own once it sees the control channel closed; if the process
+    // exits first, the detached thread dies with it.
+    let _ = app.ctrl_tx.send(CollectorCmd::Quit);
 
+    // `_guard` restores the terminal on drop (including on the `?` paths and a
+    // panic), so there is no manual teardown here — a teardown that chained
+    // `?` could skip a step and leave the terminal half-restored.
     res
+}
+
+/// SIGTERM/SIGHUP/SIGINT terminal restore (Unix).  A signal that kills the
+/// process with default disposition never runs Rust destructors, so without
+/// this the terminal would be left in raw mode + alt screen.  The handler
+/// restores the saved (cooked) termios and writes the alt-screen/cursor/mouse
+/// reset escapes with a single async-signal-safe `write`, then re-raises the
+/// signal with default disposition so the exit status reflects it.
+#[cfg(unix)]
+mod signal_restore {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    // Saved cooked-mode termios, captured before raw mode is enabled.  Only
+    // written once (in `install`, before any signal can fire) and only read in
+    // the handler, so the single-threaded-init access is race-free in practice.
+    static mut SAVED: Option<libc::termios> = None;
+
+    // Leave any-motion/drag/button/SGR mouse modes, leave bracketed paste,
+    // show the cursor, then leave the alternate screen.
+    const RESET: &[u8] =
+        b"\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l";
+
+    extern "C" fn handle(sig: libc::c_int) {
+        unsafe {
+            if let Some(t) = SAVED {
+                libc::tcsetattr(libc::STDOUT_FILENO, libc::TCSANOW, &t);
+            }
+            let _ = libc::write(
+                libc::STDOUT_FILENO,
+                RESET.as_ptr() as *const libc::c_void,
+                RESET.len(),
+            );
+            // Restore default disposition and re-raise so we actually die with
+            // the signal's semantics rather than looping.
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+
+    pub fn install() {
+        if INSTALLED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        unsafe {
+            let mut t: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDOUT_FILENO, &mut t) == 0 {
+                SAVED = Some(t);
+            }
+            let h = handle as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT] {
+                libc::signal(sig, h);
+            }
+        }
+    }
 }
 
 fn main_loop<B: ratatui::backend::Backend + io::Write>(
     terminal: &mut Terminal<B>,
     app: &mut App,
+    snap_rx: &std::sync::mpsc::Receiver<Snapshot>,
 ) -> Result<()> {
+    // Only redraw when something actually changed — a fresh snapshot, a
+    // handled input event, a resize, or an animating game.  Previously the
+    // widget tree was rebuilt ~10×/s regardless, and any event (including a
+    // stream of mouse-motion reports) forced an extra full redraw, so idly
+    // hovering the cursor pegged a core.
+    let mut dirty = true;
+    // Set once the snapshot channel disconnects — a collector thread that
+    // panicked or exited.  Without this the UI would free-run on stale data
+    // forever with no indication anything died.
+    let mut collector_dead = false;
     while !app.quit {
-        // Refresh snapshot if interval elapsed.
-        if !app.paused && app.last_tick.elapsed() >= app.interval {
-            app.snap = app.collector.snapshot();
-            app.last_tick = Instant::now();
+        // Drain any snapshots the collector thread produced since the last
+        // iteration and keep only the newest.  Collection happens on that
+        // thread now, so nothing here can block on a slow/wedged snapshot —
+        // the UI just keeps showing the last good frame until a new one lands.
+        loop {
+            use std::sync::mpsc::TryRecvError;
+            match snap_rx.try_recv() {
+                Ok(snap) => { app.snap = snap; dirty = true; }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !collector_dead {
+                        collector_dead = true;
+                        app.snap.note = Some(
+                            "collector thread died — data frozen, press q to quit".into());
+                        dirty = true;
+                    }
+                    break;
+                }
+            }
         }
 
-        // Easter-egg game tick (no-op when inactive).  Driven off the
-        // 100ms event-poll cadence below; reads the latest snapshot
-        // for spawn rate / scroll speed / energy refill mappings.
+        // Easter-egg game tick (no-op when inactive).  When active it
+        // animates every frame, so keep redrawing.
         if let Some(g) = app.game.as_mut() {
             g.tick(&app.snap);
+            dirty = true;
         }
 
-        terminal.draw(|f| draw(f, app)).map_err(|e| anyhow::anyhow!("ratatui draw failed: {e}"))?;
+        if dirty {
+            terminal.draw(|f| draw(f, app))
+                .map_err(|e| anyhow::anyhow!("ratatui draw failed: {e}"))?;
+            dirty = false;
+        }
 
-        // Poll for input with a short timeout so we don't burn CPU.
-        let timeout = Duration::from_millis(100);
-        if event::poll(timeout)? {
-            match event::read()? {
-                Event::Key(key) => handle_key(app, key),
-                Event::Mouse(m) => handle_mouse(app, m),
-                _ => {}
+        // Wake to (a) service input and (b) pick up newly-arrived snapshots.
+        // A game frame needs ~20fps; otherwise a modest cadence bounds how
+        // long a fresh snapshot waits before it's displayed (imperceptible)
+        // while keeping idle CPU near zero.
+        let poll_to = if app.game.is_some() {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(200)
+        };
+
+        if event::poll(poll_to)? {
+            // Drain everything already queued before redrawing — a paste or
+            // a mouse-motion burst is handled in one batch, one redraw.
+            loop {
+                match event::read()? {
+                    Event::Key(key) => { handle_key(app, key); dirty = true; }
+                    Event::Mouse(m) => {
+                        // Motion events change nothing on their own; don't
+                        // mark the frame dirty for them.
+                        if !matches!(m.kind, MouseEventKind::Moved) {
+                            dirty = true;
+                        }
+                        handle_mouse(app, m);
+                    }
+                    Event::Paste(text) => { handle_paste(app, &text); dirty = true; }
+                    Event::Resize(_, _) => { dirty = true; }
+                    _ => {}
+                }
+                if app.quit { break; }
+                if !event::poll(Duration::ZERO)? { break; }
             }
         }
     }
     Ok(())
+}
+
+/// Handle a bracketed-paste event.  Routes the pasted text into whichever
+/// prompt is open (the agents filter or the popup filter), capped, so a large
+/// paste arrives as one event instead of one key event per character (which
+/// used to trigger a full redraw per character — a multi-second freeze).
+fn handle_paste(app: &mut App, text: &str) {
+    const FILTER_MAX: usize = 256;
+    let sink = if app.typing_filter {
+        Some(&mut app.filter)
+    } else if (app.show_detail || app.show_help) && app.popup_filter_typing {
+        Some(&mut app.popup_filter)
+    } else {
+        None
+    };
+    if let Some(buf) = sink {
+        for c in text.chars() {
+            if c.is_control() { continue; }
+            if buf.len() >= FILTER_MAX { break; }
+            buf.push(c);
+        }
+    }
 }
 
 fn handle_key(app: &mut App, key: KeyEvent) {
@@ -384,28 +679,16 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 if let Some(pid) = app.confirm_kill.take() {
-                    // Re-validate the pid still maps to a known
-                    // agent in the *current* snapshot before signal
-                    // delivery.  Defends against pid recycling
-                    // between popup-open and key-press: if the
-                    // original process exited and the kernel
-                    // reassigned that pid to an unrelated process,
-                    // we'd otherwise SIGTERM the wrong target.
-                    let agent = app.snap.agents.iter().find(|a| a.pid == pid);
-                    if let Some(a) = agent {
-                        if let Some(distro) = a.host.strip_prefix("wsl:") {
-                            // WSL-hosted: SIGTERM has to be delivered
-                            // *inside* the guest, so we shell out via
-                            // wsl.exe.  Linux PID is the lower 24 bits
-                            // of the namespaced u32.
-                            #[cfg(windows)]
-                            send_sigterm_wsl(distro, a.display_pid());
-                            #[cfg(not(windows))]
-                            { let _ = distro; }
-                        } else {
-                            send_sigterm(pid);
-                        }
-                    }
+                    deliver_kill(app, pid, false);
+                }
+            }
+            // `9` escalates to SIGKILL (kill -9) for agents that
+            // ignore SIGTERM — wedged in an FFI call, or a stuck
+            // child holding the process group.  Same identity
+            // re-checks as `y`; the target gets no cleanup chance.
+            KeyCode::Char('9') => {
+                if let Some(pid) = app.confirm_kill.take() {
+                    deliver_kill(app, pid, true);
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -549,7 +832,11 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // Both Enter AND Space open the detail popup (and Space also
         // closes it when open — see the popup-gated branch above).
         // Pause keeps `p` only.
-        KeyCode::Enter | KeyCode::Char(' ') => {
+        KeyCode::Enter | KeyCode::Char(' ') if app.selected_pid.is_some() => {
+            // Only open the detail popup when an agent is actually selected —
+            // otherwise `draw_detail` bails early and the invisible modal
+            // silently swallows keys (j/k stop moving, the first `q` only
+            // "closes" the nothing).
             app.show_detail = true;
             app.detail_scroll = app.selected_pid
                 .and_then(|p| app.detail_scroll_by_pid.get(&p).copied())
@@ -564,12 +851,24 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             // explicitly presses G / End or wheels to bottom.
             app.detail_tail = false;
         }
-        KeyCode::Char('p') => app.paused = !app.paused,
+        KeyCode::Char('p') => {
+            app.paused = !app.paused;
+            let _ = app.ctrl_tx.send(CollectorCmd::SetPaused(app.paused));
+        }
         KeyCode::Char('r') => {
-            app.snap = app.collector.snapshot();
-            app.last_tick = Instant::now();
+            // Ask the collector thread for a fresh snapshot; it arrives on the
+            // channel and is picked up by main_loop's drain.
+            let _ = app.ctrl_tx.send(CollectorCmd::RefreshNow);
         }
         KeyCode::Char('s') => app.sort = app.sort.cycle(),
+        // Capital S reverses the sort direction — same key family as
+        // the lowercase cycle so the pair is discoverable.
+        KeyCode::Char('S') => app.sort_desc = !app.sort_desc,
+        // x flips the token metric live (cumulative ↔ fresh) — same
+        // semantics as the --tokens startup flag.  Every consumer
+        // reads app.tokens_mode, so the header chip, table chip,
+        // and token sort all follow on the next frame.
+        KeyCode::Char('x') => app.tokens_mode = app.tokens_mode.toggled(),
         KeyCode::Char('g') => app.grouped = !app.grouped,
         KeyCode::Char('t') => app.tree_mode = !app.tree_mode,
         // Capital C toggles compact rows; lowercase c is reserved
@@ -591,6 +890,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         // upward navigation (vim convention).
         KeyCode::Char('K') => {
             if let Some(pid) = app.selected_pid {
+                // While paused the snapshot can be arbitrarily stale;
+                // ask for a fresh one so the confirm popup (and the
+                // re-validation on `y`) run against current data.  The
+                // collector honours RefreshNow even when paused.
+                if app.paused {
+                    let _ = app.ctrl_tx.send(CollectorCmd::RefreshNow);
+                }
                 app.confirm_kill = Some(pid);
             }
         }
@@ -640,6 +946,62 @@ fn copy_via_osc52(payload: &str) {
     let _ = so.flush();
 }
 
+/// Shared delivery path for the kill-confirm dialog (`y` = SIGTERM,
+/// `9` = SIGKILL).  Both escalation levels run the same two-layer
+/// identity re-check, so a recycled pid is refused rather than
+/// signaled regardless of which key confirmed.
+fn deliver_kill(app: &App, pid: u32, hard: bool) {
+    // Re-validate the pid still maps to a known agent in the
+    // *current* snapshot before signal delivery.  Defends against
+    // pid recycling between popup-open and key-press: if the
+    // original process exited and the kernel reassigned that pid
+    // to an unrelated process, we'd otherwise signal the wrong
+    // target.
+    let agent = app.snap.agents.iter().find(|a| a.pid == pid);
+    if let Some(a) = agent {
+        if let Some(distro) = a.host.strip_prefix("wsl:") {
+            // WSL-hosted: the signal has to be delivered *inside*
+            // the guest, so we shell out via wsl.exe.  Linux PID
+            // is the lower 24 bits of the namespaced u32.
+            #[cfg(windows)]
+            send_signal_wsl(distro, a.display_pid(), &a.exe, hard);
+            #[cfg(not(windows))]
+            { let _ = distro; }
+        } else if pid_identity_matches(a, app.snap.now) {
+            // Second layer: the snapshot row can itself be stale
+            // (paused UI, recycled pid) — confirm the live
+            // process's start time still matches what the snapshot
+            // recorded before signaling.
+            if hard { send_sigkill(pid); } else { send_sigterm(pid); }
+        }
+    }
+}
+
+/// Verify the live process behind `pid` is still the one the snapshot
+/// described, by comparing start times: the snapshot's `uptime_sec`
+/// pins when the recorded process began, and /proc/<pid>/stat gives
+/// the current occupant's start.  A recycled pid started later, so a
+/// mismatch (beyond rounding slack) means "different process — don't
+/// signal".  Fail-open only when /proc bookkeeping is unavailable
+/// (unreadable boot time); fail-closed when the pid has vanished.
+#[cfg(target_os = "linux")]
+fn pid_identity_matches(a: &crate::model::Agent, snap_now_ms: u64) -> bool {
+    let boot = crate::proc_::read_boot_time();
+    if boot == 0 || snap_now_ms == 0 { return true; } // can't verify
+    let stat = match crate::proc_::read_stat(a.pid) {
+        Some(s) => s,
+        None => return false, // process already gone
+    };
+    let started_now  = boot.saturating_add(stat.starttime / crate::proc_::CLK_TCK);
+    let started_snap = (snap_now_ms / 1000).saturating_sub(a.uptime_sec);
+    // ±2 s absorbs the second-granularity rounding on both sides.
+    started_now.abs_diff(started_snap) <= 2
+}
+/// Non-Linux: no /proc start-time oracle; the snapshot-presence check
+/// in the caller is the only guard available.
+#[cfg(not(target_os = "linux"))]
+fn pid_identity_matches(_a: &crate::model::Agent, _snap_now_ms: u64) -> bool { true }
+
 /// Send SIGTERM to a pid.  Best-effort: returns silently on EPERM
 /// (process not ours), ESRCH (process gone), and any other error
 /// — the user sees the row disappear (or not) on the next tick.
@@ -669,19 +1031,63 @@ fn send_sigterm(pid: u32) {
 #[cfg(not(any(unix, windows)))]
 fn send_sigterm(_pid: u32) { /* no-op on truly exotic targets */ }
 
-/// Deliver SIGTERM to a PID *inside* a WSL2 distro.  Windows-only —
-/// we can't reach into the guest kernel from the Win32 process API,
-/// so we shell out via `wsl.exe -d <distro> -u root -- kill -TERM <pid>`.
-/// The `-u root` is necessary because non-root users can't signal
-/// processes owned by other users (the WSL default login user may
-/// not own the target).  Failure is silent: the row either
-/// disappears on the next tick or it doesn't.
+/// Hard-kill escalation.  SIGKILL can't be caught or ignored, so a
+/// target wedged in an FFI call or blocked on a dead child dies
+/// anyway.  Same best-effort semantics as `send_sigterm`.
+#[cfg(unix)]
+fn send_sigkill(pid: u32) {
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL); }
+}
+/// Windows has no soft/hard distinction — TerminateProcess is
+/// already the unconditional kill, so escalation aliases it.
 #[cfg(windows)]
-fn send_sigterm_wsl(distro: &str, linux_pid: u32) {
-    let _ = std::process::Command::new("wsl.exe")
-        .args(["-d", distro, "-u", "root", "--exec",
-               "/bin/kill", "-TERM", &linux_pid.to_string()])
-        .output();
+fn send_sigkill(pid: u32) { send_sigterm(pid); }
+#[cfg(not(any(unix, windows)))]
+fn send_sigkill(_pid: u32) { /* no-op on truly exotic targets */ }
+
+/// Deliver SIGTERM (or SIGKILL when `hard`) to a PID *inside* a WSL2
+/// distro.  Windows-only —
+/// we can't reach into the guest kernel from the Win32 process API,
+/// so we shell out via wsl.exe.  Runs on a detached thread with a
+/// deadline: wsl.exe against a stuck LxssManager can block for
+/// minutes, and this is called from the key handler on the UI thread.
+///
+/// The guest-side script re-checks the target's identity (its
+/// /proc/<pid>/exe against the exe the snapshot recorded) before
+/// signaling, so a pid recycled inside the guest is refused rather
+/// than killed.  Delivery is tried as the distro's default user
+/// first; `-u root` only as a fallback on a permission failure —
+/// never after an identity mismatch.  Failure is silent: the row
+/// either disappears on the next tick or it doesn't.
+#[cfg(windows)]
+fn send_signal_wsl(distro: &str, linux_pid: u32, expected_exe: &str, hard: bool) {
+    let distro = distro.to_string();
+    let exe = expected_exe.to_string();
+    std::thread::spawn(move || {
+        // Exit 0 always; the verdict rides on stdout so run_capped's
+        // "success only" contract still surfaces it: M = identity
+        // mismatch, K = killed, E = kill failed (likely EPERM).
+        const SCRIPT: &str = r#"pid="$1"; want="$2"; sig="$3"
+have=$(readlink "/proc/$pid/exe" 2>/dev/null)
+if [ -n "$want" ] && [ -n "$have" ] && [ "$have" != "$want" ]; then echo M; exit 0; fi
+if kill "-$sig" "$pid" 2>/dev/null; then echo K; else echo E; fi"#;
+        let pid_s = linux_pid.to_string();
+        let sig = if hard { "KILL" } else { "TERM" };
+        let run = |as_root: bool| -> Option<Vec<u8>> {
+            let mut cmd = std::process::Command::new("wsl.exe");
+            cmd.arg("-d").arg(&distro);
+            if as_root { cmd.args(["-u", "root"]); }
+            cmd.args(["--exec", "/bin/sh", "-c", SCRIPT, "sh", &pid_s, &exe, sig]);
+            crate::collector::run_capped(cmd, std::time::Duration::from_millis(5000))
+        };
+        if let Some(out) = run(false) {
+            if out.starts_with(b"E") {
+                // Default user lacked permission (agent owned by another
+                // guest user); root retry re-runs the identity check too.
+                let _ = run(true);
+            }
+        }
+    });
 }
 
 fn handle_mouse(app: &mut App, m: MouseEvent) {
@@ -754,12 +1160,53 @@ fn move_sel(app: &mut App, delta: i32) {
     app.selected_pid = Some(app.visible_pid_order[next as usize]);
 }
 
+/// Width below which the right chart column is dropped so the agents
+/// table gets the full terminal width (a stock 80×24 otherwise clips
+/// the row before the DOING cell renders).
+pub(super) const NARROW_W: u16 = 100;
+/// Width below which agent rows are forced compact — the fixed
+/// columns alone would consume nearly the whole row before DOING.
+pub(super) const COMPACT_W: u16 = 80;
+
+/// Body layout tiers, decided fresh every frame from terminal size.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(super) enum BodyLayout {
+    /// Below the render floor — a resize hint replaces the UI.
+    Tiny,
+    /// 60–99 cols: right chart column dropped, agents full-width,
+    /// projects/activity keep the bottom strip.
+    Stacked,
+    /// Two-column layout with the right chart stack.
+    Full,
+}
+
+pub(super) fn body_layout(width: u16, height: u16) -> BodyLayout {
+    if height < 16 || width < 60 { BodyLayout::Tiny }
+    else if width < NARROW_W     { BodyLayout::Stacked }
+    else                         { BodyLayout::Full }
+}
+
+/// Modal overlay stack — identical across every body layout, so the
+/// draw paths share it.
+fn draw_popups(f: &mut Frame, area: Rect, app: &mut App) {
+    if let Some(pid) = app.confirm_kill {
+        popup::draw_confirm_kill(f, area, &app.snap, pid);
+    } else if app.show_help {
+        popup::draw_help(f, area, app);
+    } else if app.show_detail {
+        popup::draw_detail(f, area, app);
+    } else if app.typing_filter {
+        popup::draw_filter_input(f, area, &app.filter);
+    }
+}
+
 fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    let layout = body_layout(area.width, area.height);
     // Tiny-terminal guard: below the layout's minimum we can't render the
     // panel stack without truncation. Show a single instructional line
     // instead of a broken half-rendered TUI.
-    if area.height < 16 || area.width < 60 {
+    if layout == BodyLayout::Tiny {
         let p = Paragraph::new(format!(
             "  agtop needs at least 60×16 (have {}×{}).\n  Resize the terminal or use `agtop --once`.",
             area.width, area.height
@@ -794,15 +1241,35 @@ fn draw(f: &mut Frame, app: &mut App) {
             g.draw(f, chunks[1]);
         }
         panels::draw_footer(f, chunks[2], app);
-        if let Some(pid) = app.confirm_kill {
-            popup::draw_confirm_kill(f, area, &app.snap, pid);
-        } else if app.show_help {
-            popup::draw_help(f, area, app);
-        } else if app.show_detail {
-            popup::draw_detail(f, area, app);
-        } else if app.typing_filter {
-            popup::draw_filter_input(f, area, &app.filter);
+        draw_popups(f, area, app);
+        return;
+    }
+
+    // Narrow terminal: no room for the right chart column, so the
+    // agents table takes the full width (DOING survives on a stock
+    // 80×24) and projects/activity keep the bottom strip.  Charts
+    // come back the moment the terminal is widened — pure per-frame
+    // width decision, no state.
+    if layout == BodyLayout::Stacked {
+        let left = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(8), Constraint::Length(10)])
+            .split(chunks[1]);
+        // Sessions panel isn't drawn this frame — wipe its cached
+        // rect so wheel events don't scroll a phantom panel.
+        app.sessions_rect = Rect::default();
+        agents::draw_agents(f, left[0], app);
+        if app.game.is_some() {
+            // No right-column slot to borrow in this layout — the
+            // dodger takes the bottom strip instead.
+            if let Some(g) = app.game.as_mut() {
+                g.draw(f, left[1]);
+            }
+        } else {
+            panels::draw_left_bottom(f, left[1], &app.snap);
         }
+        panels::draw_footer(f, chunks[2], app);
+        draw_popups(f, area, app);
         return;
     }
 
@@ -867,15 +1334,7 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     panels::draw_footer(f, chunks[2], app);
 
-    if let Some(pid) = app.confirm_kill {
-        popup::draw_confirm_kill(f, area, &app.snap, pid);
-    } else if app.show_help {
-        popup::draw_help(f, area, app);
-    } else if app.show_detail {
-        popup::draw_detail(f, area, app);
-    } else if app.typing_filter {
-        popup::draw_filter_input(f, area, &app.filter);
-    }
+    draw_popups(f, area, app);
 }
 
 /// SIGTERM-confirmation popup.  Shows the target row in full so the
@@ -900,6 +1359,74 @@ pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         y: area.y + (area.height.saturating_sub(h)) / 2,
         width: w,
         height: h,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Agent;
+
+    #[test]
+    fn sort_cycle_visits_every_key_once() {
+        let mut s = Sort::Smart;
+        let mut seen = vec![s];
+        loop {
+            s = s.cycle();
+            if s == Sort::Smart { break; }
+            assert!(!seen.contains(&s), "cycle revisited {:?}", s);
+            seen.push(s);
+        }
+        // All seven keys, cost included, before wrapping to smart.
+        assert_eq!(seen.len(), 7);
+        assert!(seen.contains(&Sort::Cost));
+    }
+
+    #[test]
+    fn sort_arrow_flips_with_direction() {
+        assert_eq!(Sort::Cpu.arrow(true), "▼");
+        assert_eq!(Sort::Cpu.arrow(false), "▲");
+        // Agent's natural direction is ascending (A→Z).
+        assert_eq!(Sort::Agent.arrow(true), "▲");
+        assert_eq!(Sort::Agent.arrow(false), "▼");
+    }
+
+    #[test]
+    fn tokens_mode_value_math() {
+        let a = Agent {
+            tokens_total: 100,
+            tokens_input: 80,
+            tokens_output: 15,
+            tokens_cache_read: 60,
+            ..Agent::default()
+        };
+        assert_eq!(TokenMode::Cumulative.value(&a), 100);
+        assert_eq!(TokenMode::Fresh.value(&a), 80 - 60 + 15);
+        assert_eq!(TokenMode::Cumulative.toggled(), TokenMode::Fresh);
+        assert_eq!(TokenMode::Fresh.toggled(), TokenMode::Cumulative);
+    }
+
+    #[test]
+    fn tokens_mode_fresh_saturates() {
+        // cache_read can exceed the input bucket on a malformed
+        // transcript — must clamp to output, not wrap.
+        let a = Agent {
+            tokens_input: 10,
+            tokens_cache_read: 50,
+            tokens_output: 5,
+            ..Agent::default()
+        };
+        assert_eq!(TokenMode::Fresh.value(&a), 5);
+    }
+
+    #[test]
+    fn body_layout_breakpoints() {
+        assert_eq!(body_layout(59, 40), BodyLayout::Tiny);
+        assert_eq!(body_layout(200, 15), BodyLayout::Tiny);
+        assert_eq!(body_layout(60, 16), BodyLayout::Stacked);
+        assert_eq!(body_layout(NARROW_W - 1, 24), BodyLayout::Stacked);
+        assert_eq!(body_layout(NARROW_W, 24), BodyLayout::Full);
+        assert_eq!(body_layout(220, 60), BodyLayout::Full);
     }
 }
 

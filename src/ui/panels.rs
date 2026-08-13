@@ -4,7 +4,7 @@
 //! sessions).  These read snapshot data; only the sessions panel
 //! mutates state (its scroll offset).
 
-use super::{App, Sort};
+use super::App;
 use crate::format::{bytes, pct, project_basename, shorten, si};
 use crate::pricing::format_cost;
 use crate::model::{ActivityKind, Agent, Snapshot, Status};
@@ -59,14 +59,11 @@ pub(super) fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App)
     chip("done",      a.completed.to_string(), theme::c_done());
     chip("subagents", a.subagents.to_string(), theme::c_spawn());
     chip("projects",  a.project_count.to_string(), theme::fg());
-    // ▼ marker on the sort label — the sort always reads
-    // descending-by-key (highest cpu/mem/tokens/uptime first; agent
-    // is alphabetical ascending).  Visual cue saves users from having
-    // to re-cycle `s` to confirm what's active.
-    let sort_arrow = match app.sort {
-        Sort::Agent => "▲",
-        _ => "▼",
-    };
+    // ▼/▲ marker on the sort label — direction follows the key's
+    // natural orientation (numeric high→low, agent A→Z) flipped by
+    // `S`.  Visual cue saves users from having to re-cycle `s` to
+    // confirm what's active.
+    let sort_arrow = app.sort.arrow(app.sort_desc);
     spans.push(Span::styled(
         format!(" sort:{}{}  group:{}  ",
             app.sort.label(), sort_arrow,
@@ -79,7 +76,7 @@ pub(super) fn draw_header(f: &mut Frame, area: Rect, snap: &Snapshot, app: &App)
     let total_saved: f64 = snap.agents.iter()
         .filter_map(|a| {
             let model = a.model.as_deref()?;
-            let p = app.collector.pricing().lookup(model)?;
+            let p = app.pricing.lookup(model)?;
             if a.tokens_cache_read == 0 { return None; }
             Some((a.tokens_cache_read as f64 / 1_000_000.0)
                 * p.input_per_mtok * 0.90)
@@ -285,7 +282,7 @@ pub(super) fn draw_cpu_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
 
     let bar_width = (split[1].width as usize).saturating_sub(34).max(8);
     let mut items: Vec<ListItem> = Vec::new();
-    let take = (split[1].height as usize).saturating_sub(0);
+    let take = overflow_take(agents.len(), split[1].height as usize);
     for a in agents.iter().take(take) {
         let frac = (a.cpu / bar_basis).max(0.0);
         let filled = (frac * bar_width as f64).round() as usize;
@@ -308,11 +305,30 @@ pub(super) fn draw_cpu_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
             Style::default().fg(cpu_col).add_modifier(Modifier::BOLD)));
         items.push(ListItem::new(Line::from(spans)));
     }
+    if agents.len() > take {
+        items.push(overflow_item(agents.len() - take, "cpu"));
+    }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
             "  (no agents)", Style::default().fg(theme::fg_dim())))));
     }
     f.render_widget(List::new(items), split[1]);
+}
+
+/// Rows to show in a fixed-height list: everything when it fits,
+/// otherwise one less than the viewport so the final row can carry
+/// the `… +N more` overflow indicator.
+pub(super) fn overflow_take(total: usize, viewport: usize) -> usize {
+    if total <= viewport { total } else { viewport.saturating_sub(1) }
+}
+
+/// The trailing `… +N more` row for a truncated right-column list —
+/// the panels used to clip silently, hiding half a large fleet with
+/// nothing indicating the rest existed.
+fn overflow_item(hidden: usize, sorted_by: &str) -> ListItem<'static> {
+    ListItem::new(Line::from(Span::styled(
+        format!("  … +{} more (sorted by {})", hidden, sorted_by),
+        Style::default().fg(theme::fg_dim()))))
 }
 
 // Memory panel: top-N agents by RSS as horizontal bars, plus a system memory
@@ -341,13 +357,13 @@ pub(super) fn draw_memory_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
 
     // Sort agents by RSS desc.
     let mut agents: Vec<&Agent> = snap.agents.iter().collect();
-    agents.sort_by(|a, b| b.rss.cmp(&a.rss));
+    agents.sort_by_key(|a| std::cmp::Reverse(a.rss));
 
     let max_rss = agents.iter().map(|a| a.rss).max().unwrap_or(1).max(1);
     let bar_width = (split[0].width as usize).saturating_sub(34).max(8);
 
     let mut items: Vec<ListItem> = Vec::new();
-    let take = (split[0].height as usize).saturating_sub(0);
+    let take = overflow_take(agents.len(), split[0].height as usize);
     for a in agents.iter().take(take) {
         let frac = a.rss as f64 / max_rss as f64;
         let filled = (frac * bar_width as f64).round() as usize;
@@ -368,6 +384,9 @@ pub(super) fn draw_memory_panel(f: &mut Frame, area: Rect, snap: &Snapshot) {
         spans.push(Span::styled(format!("{:>7}", bytes(a.rss)),
             Style::default().fg(theme::c_chart_mem())));
         items.push(ListItem::new(Line::from(spans)));
+    }
+    if agents.len() > take {
+        items.push(overflow_item(agents.len() - take, "mem"));
     }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
@@ -460,11 +479,11 @@ pub(super) fn draw_tokens_panel(f: &mut Frame, area: Rect, snap: &Snapshot, inte
 
     // Per-agent tokens bars (only agents with tokens > 0).
     let mut agents: Vec<&Agent> = snap.agents.iter().filter(|a| a.tokens_total > 0).collect();
-    agents.sort_by(|a, b| b.tokens_total.cmp(&a.tokens_total));
+    agents.sort_by_key(|a| std::cmp::Reverse(a.tokens_total));
     let max = agents.first().map(|a| a.tokens_total).unwrap_or(1).max(1);
     let bar_width = (split[1].width as usize).saturating_sub(34).max(8);
     let mut items: Vec<ListItem> = Vec::new();
-    let take = (split[1].height as usize).saturating_sub(0);
+    let take = overflow_take(agents.len(), split[1].height as usize);
     for a in agents.iter().take(take) {
         let frac = a.tokens_total as f64 / max as f64;
         let filled = ((frac * bar_width as f64).round() as usize).min(bar_width);
@@ -484,6 +503,9 @@ pub(super) fn draw_tokens_panel(f: &mut Frame, area: Rect, snap: &Snapshot, inte
         spans.push(Span::styled(format!("{:>6}", si(a.tokens_total)),
             Style::default().fg(theme::c_chart_tok()).add_modifier(Modifier::BOLD)));
         items.push(ListItem::new(Line::from(spans)));
+    }
+    if agents.len() > take {
+        items.push(overflow_item(agents.len() - take, "tokens"));
     }
     if items.is_empty() {
         items.push(ListItem::new(Line::from(Span::styled(
@@ -650,9 +672,10 @@ fn status_key(s: Status) -> &'static str {
 
 pub(super) fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let s = format!(
-        "  q quit · ? help · s sort({}{}) · g group({}) · t tree({}) · C compact({}) · / filter · K kill · p {} · ↑↓ select · Enter detail",
+        "  q quit · ? help · s sort({}{}) · S rev · x tok({}) · g group({}) · t tree({}) · C compact({}) · / filter · K kill · p {} · ↑↓ select · Enter detail",
         app.sort.label(),
-        match app.sort { Sort::Agent => "▲", _ => "▼" },
+        app.sort.arrow(app.sort_desc),
+        app.tokens_mode.label(),
         if app.grouped {"on"} else {"off"},
         if app.tree_mode {"on"} else {"off"},
         if app.compact_rows {"on"} else {"off"},
@@ -660,6 +683,21 @@ pub(super) fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     );
     let p = Paragraph::new(Span::styled(s, Style::default().fg(theme::fg_dim())));
     f.render_widget(p, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::overflow_take;
+
+    #[test]
+    fn overflow_take_reserves_indicator_row() {
+        assert_eq!(overflow_take(3, 6), 3);   // fits — show all
+        assert_eq!(overflow_take(6, 6), 6);   // exact fit — no indicator
+        assert_eq!(overflow_take(7, 6), 5);   // overflow — leave a row for `… +2 more`
+        assert_eq!(overflow_take(12, 6), 5);
+        assert_eq!(overflow_take(10, 0), 0);  // zero-height viewport must not underflow
+        assert_eq!(overflow_take(0, 6), 0);
+    }
 }
 
 

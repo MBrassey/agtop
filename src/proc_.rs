@@ -6,7 +6,52 @@ use std::fs;
 use std::path::PathBuf;
 
 pub const CLK_TCK: u64 = 100; // glibc default on Linux. sysconf would need libc.
+/// Fallback page size.  Correct for x86_64 and the WSL guests the
+/// Windows build parses (`wsl_backend`), but *wrong* for 16 KiB (Asahi)
+/// and 64 KiB (aarch64 RHEL/Rocky) kernels — use [`page_size()`] for the
+/// native-Linux RSS computation, which queries the real value.
 pub const PAGE_SIZE: u64 = 4096;
+
+/// Kernel page size in bytes, queried once from `sysconf(_SC_PAGESIZE)`.
+/// Hardcoding 4 KiB understated RSS 4× on 16 KiB-page kernels and 16× on
+/// 64 KiB-page aarch64 kernels (both shipped via AUR/PPA).  Falls back to
+/// [`PAGE_SIZE`] where sysconf is unavailable.
+#[cfg(unix)]
+pub fn page_size() -> u64 {
+    use std::sync::OnceLock;
+    static PS: OnceLock<u64> = OnceLock::new();
+    // SAFETY: sysconf(_SC_PAGESIZE) takes no pointers and never fails
+    // destructively; it returns -1 on error, which we reject below.
+    *PS.get_or_init(|| {
+        let v = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if v > 0 { v as u64 } else { PAGE_SIZE }
+    })
+}
+#[cfg(not(unix))]
+pub fn page_size() -> u64 { PAGE_SIZE }
+
+/// Number of online CPUs, counted from the per-CPU `cpuN` lines in
+/// `/proc/stat`.  This is the correct divisor for turning a process's
+/// share of the aggregate `cpu` line into a per-core percentage —
+/// unlike [`num_cpus`] (`available_parallelism`), it is not deflated by
+/// scheduler affinity or a cgroup CPU quota, which would otherwise make
+/// every agent's CPU% read many times too low under `taskset` or in a
+/// constrained container.  Returns 0 when `/proc/stat` is unreadable so
+/// the caller can fall back.
+pub fn online_cpu_count() -> usize {
+    let text = match fs::read_to_string("/proc/stat") {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    text.lines()
+        .filter(|l| {
+            l.strip_prefix("cpu")
+                .and_then(|r| r.chars().next())
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+        })
+        .count()
+}
 
 pub fn is_linux() -> bool {
     cfg!(target_os = "linux") && std::path::Path::new("/proc").exists()
@@ -328,7 +373,13 @@ pub fn read_system_cpu_total() -> u64 {
         Some(l) => l,
         None => return 0,
     };
-    line.split_whitespace().skip(1).filter_map(|s| s.parse::<u64>().ok()).sum()
+    // Fields after "cpu": user nice system idle iowait irq softirq steal
+    // guest guest_nice.  The kernel already folds `guest` into `user` and
+    // `guest_nice` into `nice`, so summing all ten double-counts guest
+    // time — inflating total_delta and deflating every agent's CPU% on a
+    // host running KVM guests.  `top` sums the first 8 (user..steal); do
+    // the same.
+    line.split_whitespace().skip(1).take(8).filter_map(|s| s.parse::<u64>().ok()).sum()
 }
 
 pub fn num_cpus() -> usize {

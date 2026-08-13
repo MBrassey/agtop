@@ -19,6 +19,13 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+/// Both JSON files live in `~/.claude/`, a directory writable by the
+/// monitored agents themselves — same adversary model as the session
+/// files, so they get the same hardened reader (O_NONBLOCK open,
+/// regular-file check, bounded read) instead of a raw
+/// `read_to_string` that a FIFO could block forever.
+const PLUGIN_JSON_CAP: u64 = 1024 * 1024;
+
 /// Return the sorted list of plugin display names (the part before `@`
 /// in `name@marketplace`) that are both installed and enabled in the
 /// user's Claude Code settings.  Empty if either file is missing /
@@ -28,14 +35,10 @@ pub fn enabled_plugins() -> Vec<String> {
     let settings_path: PathBuf = home.join(".claude").join("settings.json");
     let installed_path: PathBuf = home.join(".claude").join("plugins").join("installed_plugins.json");
 
-    let enabled: BTreeSet<String> = match std::fs::read_to_string(&settings_path) {
-        Ok(s) => parse_enabled(&s),
-        Err(_) => BTreeSet::new(),
-    };
-    let installed: BTreeSet<String> = match std::fs::read_to_string(&installed_path) {
-        Ok(s) => parse_installed(&s),
-        Err(_) => BTreeSet::new(),
-    };
+    let enabled: BTreeSet<String> =
+        parse_enabled(&crate::readfile::whole_capped(&settings_path, PLUGIN_JSON_CAP));
+    let installed: BTreeSet<String> =
+        parse_installed(&crate::readfile::whole_capped(&installed_path, PLUGIN_JSON_CAP));
 
     // Intersect: only surface plugins that are both installed and
     // enabled.  Strip the `@<marketplace>` suffix for display.

@@ -52,7 +52,7 @@ def main() -> int:
     cargo_crates_lines = []
     distinfo_lines     = []
 
-    for name, version in crates:
+    for i, (name, version) in enumerate(crates):
         url = CRATE_URL.format(name=name, version=version)
         print(f"  fetching {name}-{version}", file=sys.stderr)
         try:
@@ -62,18 +62,18 @@ def main() -> int:
             return 2
         sha = hashlib.sha256(blob).hexdigest()
         size = len(blob)
-        cargo_crates_lines.append(f"\t{name}-{version} \\")
+        # Byte-identical to Mk/Scripts/cargo-crates.awk (`make cargo-crates`):
+        # first crate on the CARGO_CRATES= line, continuations double-tabbed,
+        # no trailing backslash on the last line.
+        lead = "CARGO_CRATES=\t" if i == 0 else "\t\t"
+        tail = "" if i == len(crates) - 1 else " \\"
+        cargo_crates_lines.append(f"{lead}{name}-{version}{tail}")
         distinfo_lines.append(
             f"SHA256 (rust/crates/{name}-{version}.crate) = {sha}\n"
-            f"SIZE   (rust/crates/{name}-{version}.crate) = {size}"
+            f"SIZE (rust/crates/{name}-{version}.crate) = {size}"
         )
 
-    # Trim the trailing backslash from the last CARGO_CRATES line.
-    if cargo_crates_lines:
-        cargo_crates_lines[-1] = cargo_crates_lines[-1].rstrip(" \\")
-
-    print("# ── CARGO_CRATES (paste into Makefile) ──────────────────────────────")
-    print("CARGO_CRATES=\t\\")
+    print("# ── Makefile.crates (goes in misc/agtop/Makefile.crates; cargo.mk .sincludes it) ──")
     print("\n".join(cargo_crates_lines))
     print()
     print("# ── distinfo (paste into distinfo, in addition to the source tarball) ──")

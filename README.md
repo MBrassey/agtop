@@ -112,7 +112,9 @@ agtop                       full TUI
 agtop --once                one-shot snapshot, like `top -b -n 1`
 agtop -1 --top 10           top 10 agents and exit
 agtop --json                machine-readable JSON
+agtop --json -n 60 -i 1     NDJSON: 60 snapshots, one JSON object per line
 agtop --watch               one summary line per tick (no TUI, pipes cleanly)
+agtop --watch --json        NDJSON summary object per tick, forever
 agtop --filter aider        only agents matching label / cmdline / cwd
 agtop --sort tokens         sort by token consumption
 agtop --prices prices.toml  override the bundled model price table
@@ -126,21 +128,24 @@ Run `agtop --help` for the full flag list.
 | Flag                            | Default | Purpose |
 | ------------------------------- | ------- | ------- |
 | `-1`, `--once`                  |         | Print a one-shot snapshot and exit (no TUI) |
-| `-j`, `--json`                  |         | Machine-readable JSON snapshot; implies `--once` |
+| `-j`, `--json`                  |         | Machine-readable JSON snapshot; implies `--once`. With `-n N` (N>1) or `--watch`, streams NDJSON: one compact JSON object per line |
 | `-i`, `--interval <SECONDS>`    | `1.5`   | TUI / iteration refresh interval |
-| `-n`, `--iterations <COUNT>`    | `1`     | With `--once`, print N snapshots delimited by `---` |
+| `-n`, `--iterations <COUNT>`    | `1`     | With `--once`, print N snapshots delimited by `---` (with `--json`, N compact NDJSON lines) |
 | `-f`, `--filter <SUBSTR>`       |         | Only agents matching label / cmdline / cwd / project / pid |
-| `-s`, `--sort <KEY>`            | `smart` | One of `smart` / `cpu` / `mem` / `tokens` / `uptime` / `agent` |
+| `-s`, `--sort <KEY>`            | `smart` | One of `smart` / `cpu` / `mem` / `tokens` / `cost` / `uptime` / `agent` |
 | `-m`, `--match <LABEL=REGEX>`   |         | Add a custom agent matcher (repeatable) |
-| `--no-color`                    |         | Disable ANSI colors in `--once` / `--json` |
-| `--theme <NAME>`                | `default` | TUI palette: `default` / `dracula` / `nord` / `gruvbox` / `monochrome` |
+| `--no-color`                    |         | Disable ANSI colors — colorless TUI palette, plain `--once` / `--json` output |
+| `--theme <NAME>`                | `default` | TUI palette: `default` / `light` / `dracula` / `nord` / `gruvbox` / `monochrome` |
 | `--top <N>`                     | `0`     | With `--once`, only show top N agents (0 = all) |
 | `--list-builtins`               |         | Print built-in matcher list and exit |
 | `--prices <PATH>`               |         | TOML file overriding / extending the bundled price table |
-| `--watch`                       |         | One summary line per tick to stdout (no TUI, pipes cleanly) |
+| `--tokens <MODE>`               | `cumulative` | Token metric: `cumulative` (every turn summed, incl. cache reuse) or `fresh` (non-cache input + output only). The TUI flips it live with `x` |
+| `--watch`                       |         | One summary line per tick to stdout (no TUI, pipes cleanly). Add `--json` for one NDJSON summary object per tick |
 | `--threshold-cpu <PERCENT>`     |         | In `--watch`, exit 3 if aggregate CPU% exceeds N |
 | `--threshold-tokens-rate <T>`   |         | In `--watch`, exit 4 if average tokens/min exceeds N |
 | `--pid <PID>`                   |         | Open the TUI focused on a specific PID with the detail popup already showing — useful as a wrapper from other tooling: `agtop --pid $(pgrep claude)`. Falls back to the regular list view if the PID isn't a known agent. |
+| `--config <PATH>`               |         | Read defaults from PATH instead of the standard config file location |
+| `--no-config`                   |         | Skip loading the config file entirely |
 | `-V`, `--version`               |         | Print version and exit |
 | `-h`, `--help`                  |         | Print help and exit |
 
@@ -150,7 +155,33 @@ Run `agtop --help` for the full flag list.
 | --------------- | ------ |
 | `AGTOP_MATCH`   | Semicolon-separated `label=regex` matchers (additive to built-ins). Equivalent to repeating `-m`. |
 | `AGTOP_PRICES`  | Path to a TOML price-table override file (equivalent to `--prices`). |
-| `NO_COLOR`      | When set, disables ANSI colors in `--once` / `--json` (honors the [no-color.org](https://no-color.org) convention). |
+| `NO_COLOR`      | When set to a non-empty value, disables ANSI colors everywhere — the TUI drops to a colorless palette and `--once` / `--json` print plain (honors the [no-color.org](https://no-color.org) convention; an explicit `--theme` wins). |
+
+### Config file
+
+agtop reads defaults from `~/.config/agtop/config.toml`
+(`$XDG_CONFIG_HOME` respected; `%APPDATA%\agtop\config.toml` on
+Windows). Flat `key = value` TOML mirroring the flags — precedence is
+strictly built-in defaults < config file < CLI flags, so a flag you
+actually type always wins, even when it matches the built-in default.
+
+```toml
+# ~/.config/agtop/config.toml
+interval  = 1.0        # refresh interval, seconds
+sort      = "tokens"   # smart / cpu / mem / tokens / cost / uptime / agent
+sort_desc = true       # false = ascending (the TUI flips it live with S)
+tokens    = "fresh"    # cumulative / fresh (the TUI flips it live with x)
+theme     = "dracula"  # default / light / dracula / nord / gruvbox / monochrome
+no_color  = false
+compact   = false      # start with single-line agent rows (TUI toggle: C)
+match     = ["mybot=python.*bot\\.py"]   # additive, like repeating -m
+```
+
+Unknown keys and bad values warn on stderr and are ignored; a
+malformed file warns and falls back to built-in defaults — a broken
+config never blocks startup. `--config PATH` reads a different file,
+`--no-config` skips loading. The `match` list is additive to the
+built-ins and to `-m` / `$AGTOP_MATCH`, never a replacement.
 
 ---
 
@@ -234,7 +265,9 @@ exposed in `--json` as `agents[].dangerous: bool`.
 | `?`, `h`           | Toggle help overlay |
 | `p`                | Pause / resume refresh |
 | `r`                | Refresh now |
-| `s`                | Cycle sort: smart → cpu → mem → tokens → uptime → agent (▼ / ▲ indicator) |
+| `s`                | Cycle sort: smart → cpu → mem → tokens → cost → uptime → agent (▼ / ▲ indicator) |
+| `S` (capital)      | Reverse the sort direction (flips the ▼ / ▲ indicator) |
+| `x`                | Toggle the token metric live: cumulative ↔ fresh (footer shows the active mode) |
 | `g`                | Toggle project grouping (sticky group header pins to row 0 when scrolled past) |
 | `t`                | Toggle tree mode (indented child processes under each agent) |
 | `C` (capital)      | Toggle compact rows (hides PID / uptime / chips, gives `DOING` the rest of the row) |
@@ -244,13 +277,19 @@ exposed in `--json` as `agents[].dangerous: bool`.
 | `PgUp` / `PgDn`    | Move by 10 |
 | `Home` / `End`     | First / last agent |
 | `Enter`, `Space`   | Open / close detail popup |
-| `K` (capital)      | SIGTERM the selected agent (confirm `y` / `n`) |
+| `K` (capital)      | Open the kill dialog for the selected agent (`y` SIGTERM · `9` SIGKILL for wedged agents · `n` / `Esc` cancel) |
 | `Esc`              | Close popup, clear filter |
 | Mouse              | Click row to select; double-click opens detail; wheel scrolls (over the sessions panel the wheel scrolls that panel instead) |
 
 The agents table auto-scrolls to keep the selected row visible and
 renders a themed scrollbar on the right edge whenever the row count
 exceeds the viewport.
+
+The layout adapts to the terminal width: below 100 columns the right
+chart column is dropped and the agents table takes the full width
+(the Agents panel title notes it); below 80 columns rows collapse to compact form
+automatically (the `C` toggle still applies on wider terminals);
+below 60×16 a resize hint replaces the UI.
 
 ### Detail popup (`Enter` / `Space`)
 
@@ -290,6 +329,20 @@ from the session transcript — assistant prose (`›`), tool calls
 `agtop --json` writes one snake_case JSON object to stdout. Schema is
 stable across releases; new fields are additive. Suitable for `jq`,
 dashboards, or alerting.
+
+Two streaming variants emit NDJSON — one compact JSON object per
+line, flushed per tick, so `jq` consumes a valid stream and a
+downstream `head` ends it cleanly:
+
+```sh
+agtop --json -n 60 -i 1      # 60 full snapshots, one per line, then exit
+agtop --watch --json         # per-tick summary objects, forever:
+                             # {ts, active, busy, cpu, mem_bytes,
+                             #  tokens_total, tok_per_min, cost_usd}
+```
+
+The `--watch` thresholds (`--threshold-cpu`, `--threshold-tokens-rate`)
+still apply in `--watch --json` mode, with the same exit codes.
 
 <details><summary>Show full JSON sample (~50 lines)</summary>
 
@@ -579,7 +632,7 @@ tools       Bash 47 · Edit 23 · Read 12 · Grep 8 · Write 5
 bin         /usr/bin/claude
 cwd         /home/matt/code/zk-rollup-prover
 cmd         claude --dangerously-skip-permissions
-read        482M    write 12M
+io          482M read · 12M write  · 1.2M/s r · 80k/s w
 writing     /home/matt/code/zk-rollup-prover/circuits/main.rs
 
   ─ Live preview ─────────────────────────────────────
@@ -910,9 +963,11 @@ sum is what counts against the model's context limit. Cached tokens
 have a discounted price but still occupy context, so they're
 included.
 
-**Is there a config file?** No. Persistent settings live in shell
-aliases, `AGTOP_MATCH` / `AGTOP_PRICES` env vars, or a `--prices`
-TOML.
+**Is there a config file?** Yes — `~/.config/agtop/config.toml`
+(`%APPDATA%\agtop\config.toml` on Windows) supplies defaults for
+`interval`, `sort`, `sort_desc`, `tokens`, `theme`, `no_color`,
+`compact`, and extra `match` entries. CLI flags always win. See
+[Config file](#config-file).
 
 **Where are man pages / shell completions?** Not yet shipped.
 

@@ -30,26 +30,51 @@ pub(super) fn filter_match(a: &Agent, f: &str) -> bool {
         || a.pid.to_string() == f
 }
 
+/// Order `agents` by the active sort key — descending for the
+/// numeric keys, A→Z for `agent`, collector order for `smart`.
+/// Direction reversal (`S`) is applied by the caller so the grouped
+/// project ordering can share the same flip.
+pub(super) fn sort_agents(agents: &mut [&Agent], sort: Sort, tokens_mode: TokenMode) {
+    match sort {
+        Sort::Smart => {} // already sorted by collector
+        Sort::Cpu     => agents.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)),
+        Sort::Mem     => agents.sort_by_key(|a| std::cmp::Reverse(a.rss)),
+        Sort::Tokens  => agents.sort_by_key(|a| std::cmp::Reverse(tokens_mode.value(a))),
+        Sort::Cost    => agents.sort_by(|a, b| b.cost_usd.partial_cmp(&a.cost_usd).unwrap_or(std::cmp::Ordering::Equal)),
+        Sort::Uptime  => agents.sort_by_key(|a| std::cmp::Reverse(a.uptime_sec)),
+        Sort::Agent   => agents.sort_by(|a, b| a.label.cmp(&b.label)),
+    }
+}
+
 pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
     let snap = &app.snap;
     let mut agents: Vec<&Agent> = snap.agents.iter().filter(|a| filter_match(a, &app.filter)).collect();
-    match app.sort {
-        Sort::Smart => {} // already sorted by collector
-        Sort::Cpu     => agents.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)),
-        Sort::Mem     => agents.sort_by(|a, b| b.rss.cmp(&a.rss)),
-        Sort::Tokens  => {
-            let m = app.tokens_mode;
-            agents.sort_by_key(|a| std::cmp::Reverse(m.value(a)));
-        }
-        Sort::Uptime  => agents.sort_by(|a, b| b.uptime_sec.cmp(&a.uptime_sec)),
-        Sort::Agent   => agents.sort_by(|a, b| a.label.cmp(&b.label)),
+    sort_agents(&mut agents, app.sort, app.tokens_mode);
+    if !app.sort_desc {
+        agents.reverse();
     }
+    // Terminal (not panel) width drives forced compaction: only
+    // genuinely narrow terminals — where the fixed columns would eat
+    // the whole row before DOING — collapse, and the user's C toggle
+    // is respected, not clobbered.
+    let compact = app.compact_rows || f.area().width < super::COMPACT_W;
 
+    let mut title_spans = vec![
+        Span::styled(" Agents ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)),
+    ];
+    // Stacked-layout breadcrumb — the right chart column is dropped
+    // below NARROW_W (see draw's layout tiers); the panel title is
+    // the one place guaranteed visible at that width, unlike the
+    // header whose chip run already overflows 80 cols.
+    if f.area().width < super::NARROW_W {
+        title_spans.push(Span::styled("▸ charts hidden — need ≥100 cols ",
+            Style::default().fg(theme::fg_dim())));
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(theme::border()))
-        .title(Span::styled(" Agents ", Style::default().fg(theme::fg()).add_modifier(Modifier::BOLD)))
+        .title(Line::from(title_spans))
         .title_alignment(Alignment::Left);
 
     let inner = block.inner(area);
@@ -103,6 +128,11 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
                     let t2: u64 = l2.iter().map(|a| m.value(a)).sum();
                     t2.cmp(&t1).then(p1.cmp(p2))
                 }
+                Sort::Cost => {
+                    let c1: f64 = l1.iter().map(|a| a.cost_usd).sum();
+                    let c2: f64 = l2.iter().map(|a| a.cost_usd).sum();
+                    c2.partial_cmp(&c1).unwrap_or(Ordering::Equal).then(p1.cmp(p2))
+                }
                 Sort::Uptime => {
                     let u1: u64 = l1.iter().map(|a| a.uptime_sec).max().unwrap_or(0);
                     let u2: u64 = l2.iter().map(|a| a.uptime_sec).max().unwrap_or(0);
@@ -111,6 +141,11 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
                 Sort::Agent => p1.cmp(p2),
             }
         });
+        // Direction flip mirrors the per-agent reversal above so the
+        // project blocks and the rows inside them read the same way.
+        if !app.sort_desc {
+            by_proj.reverse();
+        }
 
         for (proj, list) in by_proj {
             let total_cpu: f64 = list.iter().map(|a| a.cpu).sum();
@@ -155,7 +190,7 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             for a in list {
                 pid_order.push(a.pid);
                 agent_row_indices.push(rows.len());
-                rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint, app.compact_rows, app.cols, app.tokens_mode));
+                rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint, compact, app.cols, app.tokens_mode));
             // (second call site — non-grouped path)
                 if app.tree_mode {
                     push_child_rows(&mut rows, a, tint);
@@ -174,7 +209,7 @@ pub(super) fn draw_agents(f: &mut Frame, area: Rect, app: &mut App) {
             let tint = Some(theme::group_tint(group_index));
             pid_order.push(a.pid);
             agent_row_indices.push(rows.len());
-            rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint, app.compact_rows, app.cols, app.tokens_mode));
+            rows.push(agent_row(a, app.selected_pid == Some(a.pid), tint, compact, app.cols, app.tokens_mode));
             if app.tree_mode {
                 push_child_rows(&mut rows, a, tint);
             }
@@ -359,7 +394,7 @@ pub(super) fn agent_row<'a>(a: &'a Agent, selected: bool, group_bg: Option<ratat
     // glyph alone carries the "this row is flagged" semantic.
     if show(COL_DANGER) && a.dangerous {
         spans.push(Span::styled("▍",
-            Style::default().fg(ratatui::style::Color::Rgb(240, 175, 95))
+            Style::default().fg(theme::c_danger())
                 .add_modifier(Modifier::BOLD)));
     } else {
         spans.push(Span::raw(" "));
@@ -484,3 +519,57 @@ fn describe_doing_span(a: &Agent) -> Span<'static> {
                  Style::default().fg(theme::fg_dim()))
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(label: &str, cpu: f64, cost: f64, tokens_total: u64, cache_read: u64) -> Agent {
+        Agent {
+            label: label.into(),
+            cpu,
+            cost_usd: cost,
+            tokens_total,
+            tokens_input: tokens_total,
+            tokens_cache_read: cache_read,
+            ..Agent::default()
+        }
+    }
+
+    #[test]
+    fn cost_sort_orders_by_dollars_not_tokens() {
+        // A cheap-model session can carry far more tokens than an
+        // expensive-model one and still cost less — cost sort must
+        // rank by dollars.
+        let cheap = agent("bulk", 0.0, 0.40, 5_000_000, 0);
+        let dear  = agent("dear", 0.0, 3.10,   500_000, 0);
+        let mut v: Vec<&Agent> = vec![&cheap, &dear];
+        sort_agents(&mut v, Sort::Cost, TokenMode::Cumulative);
+        assert_eq!(v[0].label, "dear");
+        assert_eq!(v[1].label, "bulk");
+    }
+
+    #[test]
+    fn tokens_sort_follows_active_token_mode() {
+        let cached = agent("cached", 0.0, 0.0, 9_000_000, 8_900_000);
+        let fresh  = agent("fresh",  0.0, 0.0, 1_000_000, 0);
+        let mut v: Vec<&Agent> = vec![&fresh, &cached];
+        sort_agents(&mut v, Sort::Tokens, TokenMode::Cumulative);
+        assert_eq!(v[0].label, "cached"); // 9M cumulative wins
+        let mut v: Vec<&Agent> = vec![&cached, &fresh];
+        sort_agents(&mut v, Sort::Tokens, TokenMode::Fresh);
+        assert_eq!(v[0].label, "fresh"); // 1M fresh beats 100k fresh
+    }
+
+    #[test]
+    fn cpu_sort_descends_and_agent_sort_ascends() {
+        let lo = agent("zeta", 2.0, 0.0, 0, 0);
+        let hi = agent("alpha", 80.0, 0.0, 0, 0);
+        let mut v: Vec<&Agent> = vec![&lo, &hi];
+        sort_agents(&mut v, Sort::Cpu, TokenMode::Cumulative);
+        assert_eq!(v[0].label, "alpha"); // highest cpu first
+        sort_agents(&mut v, Sort::Agent, TokenMode::Cumulative);
+        assert_eq!(v[0].label, "alpha"); // A→Z
+        assert_eq!(v[1].label, "zeta");
+    }
+}

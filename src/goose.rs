@@ -15,14 +15,16 @@ use crate::sessions::{LiveAgentRef, SessionsResult};
 
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 const RECENT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 const BUSY_WINDOW_MS:   u64 = 30 * 1000;
 const ACTIVE_WINDOW_MS: u64 = 5 * 60 * 1000;
 const TAIL_BYTES:       u64 = 256 * 1024;
+/// Cap on a single whole-file read of a `.json` goose session.
+const MAX_WHOLE: u64 = 16 * 1024 * 1024;
 
 fn candidate_roots() -> Vec<PathBuf> {
     let mut v = Vec::new();
@@ -42,30 +44,7 @@ fn candidate_roots() -> Vec<PathBuf> {
     v
 }
 
-/// Tail-read cap (real callers use 64 KiB).  Hard-clamped to keep `take as
-/// i64` and `take as usize` safe on 32-bit + against pathological inputs.
-const MAX_TAIL: u64 = 64 * 1024 * 1024;
-
-fn read_tail(path: &Path, bytes: u64) -> String {
-    let mut f = match File::open(path) { Ok(f) => f, Err(_) => return String::new() };
-    let len = match f.metadata() { Ok(m) => m.len(), Err(_) => return String::new() };
-    if len == 0 { return String::new(); }
-    let take = bytes.min(len).min(MAX_TAIL);
-    if f.seek(SeekFrom::End(-(take as i64))).is_err() { return String::new(); }
-    let mut buf = String::with_capacity(take as usize);
-    let _ = f.take(take).read_to_string(&mut buf);
-    buf
-}
-
-fn read_whole(path: &Path) -> String {
-    let mut buf = String::new();
-    if let Ok(mut f) = File::open(path) {
-        let _ = f.read_to_string(&mut buf);
-    }
-    buf
-}
-
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct AnalysisOut {
     last_user: Option<String>,
     last_assistant: Option<String>,
@@ -95,12 +74,16 @@ fn analyse_jsonl(text: &str) -> AnalysisOut {
         let line = line.trim();
         if line.is_empty() { continue; }
         let r: Value = match serde_json::from_str(line) { Ok(v) => v, Err(_) => continue };
-        if let Some(c) = r.get("cwd").and_then(|v| v.as_str()) { out.cwd = Some(c.into()); }
-        if let Some(c) = r.get("workspace").and_then(|v| v.as_str()) { out.cwd = Some(c.into()); }
+        // cwd is untrusted file content bound for the project column —
+        // sanitize at the parse boundary.
+        if let Some(c) = r.get("cwd").and_then(|v| v.as_str()) { out.cwd = Some(sanitize_control(c)); }
+        if let Some(c) = r.get("workspace").and_then(|v| v.as_str()) { out.cwd = Some(sanitize_control(c)); }
         if let Some(m) = r.get("model").and_then(|v| v.as_str()) { out.model = Some(m.into()); }
         if let Some(u) = r.get("usage") {
-            out.tokens_input  += u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            out.tokens_output += u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            out.tokens_input  = out.tokens_input.saturating_add(
+                u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0));
+            out.tokens_output = out.tokens_output.saturating_add(
+                u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0));
         }
         let kind = r.get("type").and_then(|v| v.as_str())
             .or_else(|| r.get("role").and_then(|v| v.as_str()))
@@ -160,8 +143,9 @@ fn analyse_json(text: &str) -> AnalysisOut {
     let mut out = AnalysisOut::default();
     let v: Value = match serde_json::from_str(text) { Ok(v) => v, Err(_) => return out };
     if let Some(m) = v.get("metadata") {
-        if let Some(c) = m.get("cwd").and_then(|x| x.as_str()) { out.cwd = Some(c.into()); }
-        if let Some(c) = m.get("working_dir").and_then(|x| x.as_str()) { out.cwd = Some(c.into()); }
+        // Same parse-boundary sanitization as the JSONL shape.
+        if let Some(c) = m.get("cwd").and_then(|x| x.as_str()) { out.cwd = Some(sanitize_control(c)); }
+        if let Some(c) = m.get("working_dir").and_then(|x| x.as_str()) { out.cwd = Some(sanitize_control(c)); }
         if let Some(c) = m.get("model").and_then(|x| x.as_str()) { out.model = Some(c.into()); }
     }
     if let Some(arr) = v.get("messages").and_then(|x| x.as_array()) {
@@ -174,10 +158,36 @@ fn analyse_json(text: &str) -> AnalysisOut {
                 out.last_assistant = Some(content.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect());
             }
             if let Some(u) = m.get("usage") {
-                out.tokens_input  += u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-                out.tokens_output += u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                out.tokens_input  = out.tokens_input.saturating_add(
+                    u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0));
+                out.tokens_output = out.tokens_output.saturating_add(
+                    u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0));
             }
         }
+    }
+    out
+}
+
+/// (mtime, size)-keyed parse cache — a whole-file `.json` session (up to
+/// 16 MB) used to be slurped + parsed every tick even while unchanged;
+/// same guard applied to the `.jsonl` tail parse for consistency.
+type ParseCache = Mutex<HashMap<PathBuf, (u64, u64, AnalysisOut)>>;
+static PARSE_CACHE: OnceLock<ParseCache> = OnceLock::new();
+
+fn analyse_cached(p: &Path, is_jsonl: bool, mtime: u64, size: u64) -> AnalysisOut {
+    let cache = PARSE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some((m, s, out)) = map.get(p) {
+            if *m == mtime && *s == size { return out.clone(); }
+        }
+    }
+    let out = if is_jsonl {
+        analyse_jsonl(&crate::readfile::tail(p, TAIL_BYTES))
+    } else {
+        analyse_json(&crate::readfile::whole_capped(p, MAX_WHOLE))
+    };
+    if let Ok(mut map) = cache.lock() {
+        map.insert(p.to_path_buf(), (mtime, size, out.clone()));
     }
     out
 }
@@ -196,42 +206,65 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
     let roots: Vec<PathBuf> = candidate_roots().into_iter().filter(|p| p.exists()).collect();
     if roots.is_empty() { return SessionsResult::empty(); }
 
-    let mut cwd_to_pid: HashMap<String, u32> = HashMap::new();
+    // cwd -> live goose pids, newest-pid-first (lowest uptime).  A Vec
+    // because parallel sessions can share a cwd — a single-pid map
+    // non-deterministically dropped all-but-one of them.
+    let mut cwd_to_pids: HashMap<String, Vec<(u32, u64)>> = HashMap::new();
     for a in live_agents {
         if a.label == "goose" || a.label == "block-goose" {
-            cwd_to_pid.insert(a.cwd.into(), a.pid);
+            cwd_to_pids.entry(a.cwd.into()).or_default().push((a.pid, a.uptime_sec));
         }
+    }
+    for v in cwd_to_pids.values_mut() {
+        v.sort_by_key(|(_pid, uptime)| *uptime);
     }
 
     let mut sessions: Vec<Session> = Vec::new();
     let mut recent_tasks: Vec<RecentTask> = Vec::new();
     let mut by_pid: HashMap<u32, Session> = HashMap::new();
 
+    // Enumerate first, then process newest-first so the freshest session
+    // file pairs with the newest live pid in its cwd.
+    let mut entries: Vec<(PathBuf, bool, u64, u64)> = Vec::new();  // (path, is_jsonl, mtime, size)
     for root in roots {
         let rd = match fs::read_dir(&root) { Ok(d) => d, Err(_) => continue };
         for ent in rd.flatten() {
             let p = ent.path();
             let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
             if ext != "jsonl" && ext != "json" { continue; }
+            let is_jsonl = ext == "jsonl";
             let md = match fs::metadata(&p) { Ok(m) => m, Err(_) => continue };
             let mtime = md.modified().ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as u64).unwrap_or(0);
-            let size = md.len();
             let age_ms = now_ms.saturating_sub(mtime);
-            if age_ms > RECENT_WINDOW_MS && live_agents.is_empty() { continue; }
+            // Gate on Goose's own live set, not every vendor's — otherwise
+            // any running agent forced a full re-read of all historical
+            // Goose sessions each tick.
+            if age_ms > RECENT_WINDOW_MS && cwd_to_pids.is_empty() { continue; }
+            entries.push((p, is_jsonl, mtime, md.len()));
+        }
+    }
+    entries.sort_by_key(|x| std::cmp::Reverse(x.2));
+    // Next unpaired pid per cwd, in newest-first order.
+    let mut next_pid_idx: HashMap<String, usize> = HashMap::new();
 
-            let info = if ext == "jsonl" {
-                analyse_jsonl(&read_tail(&p, TAIL_BYTES))
-            } else {
-                analyse_json(&read_whole(&p))
-            };
+    for (p, is_jsonl, mtime, size) in entries {
+            let age_ms = now_ms.saturating_sub(mtime);
+            let info = analyse_cached(&p, is_jsonl, mtime, size);
 
             let cwd = info.cwd.clone().unwrap_or_default();
             let proj_short = if !cwd.is_empty() { project_basename(&cwd) } else { String::new() };
-            let live_pid = if !cwd.is_empty() { cwd_to_pid.get(&cwd).copied() } else { None };
+            let live_pid = if !cwd.is_empty() {
+                cwd_to_pids.get(&cwd).and_then(|v| {
+                    let i = next_pid_idx.entry(cwd.clone()).or_insert(0);
+                    let pid = v.get(*i).map(|(pid, _)| *pid);
+                    if pid.is_some() { *i += 1; }
+                    pid
+                })
+            } else { None };
             let status = classify(live_pid.is_some(), age_ms, info.finished, info.in_flight > 0);
-            let id = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let id = p.file_stem().map(|s| sanitize_control(&s.to_string_lossy())).unwrap_or_default();
             let last_task = info.last_assistant.clone().or(info.last_user.clone());
 
             let sess = Session {
@@ -255,7 +288,7 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 is_most_recent: true,
                 tokens_input: info.tokens_input,
                 tokens_output: info.tokens_output,
-                tokens_total: info.tokens_input + info.tokens_output,
+                tokens_total: info.tokens_input.saturating_add(info.tokens_output),
                 tokens_cache_read: 0,
                 tokens_cache_write: 0,
                 cost_usd: 0.0,
@@ -271,16 +304,15 @@ pub fn summarise(live_agents: &[LiveAgentRef], now_ms: u64) -> SessionsResult {
                 if age_ms < RECENT_WINDOW_MS {
                     recent_tasks.push(RecentTask {
                         project: cwd.clone(), project_short: proj_short.clone(),
-                        task: t.clone(), mtime_ms: mtime, status,
+                        task: sanitize_control(t), mtime_ms: mtime, status,
                     });
                 }
             }
             sessions.push(sess);
-        }
     }
 
-    sessions.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
-    recent_tasks.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    sessions.sort_by_key(|x| std::cmp::Reverse(x.mtime_ms));
+    recent_tasks.sort_by_key(|x| std::cmp::Reverse(x.mtime_ms));
     if recent_tasks.len() > 20 { recent_tasks.truncate(20); }
     let waiting   = sessions.iter().filter(|s| s.status == Status::Waiting).count() as u32;
     let completed = sessions.iter().filter(|s| s.status == Status::Completed).count() as u32;

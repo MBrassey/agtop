@@ -2,10 +2,10 @@
 # After agtop vX.Y.Z is published as a GitHub Release, this script:
 #   1. Downloads MBrassey-agtop-v${VER}_GH0.tar.gz
 #   2. Computes its sha256 + byte size
-#   3. Patches sysutils/agtop/distinfo (replaces placeholders)
+#   3. Patches misc/agtop/distinfo (replaces placeholders)
 #   4. Forks freebsd/freebsd-ports if no fork exists
 #   5. Shallow-clones the fork into a worktree
-#   6. Drops the prepared port files into sysutils/agtop/
+#   6. Drops the prepared port files into misc/agtop/
 #   7. Commits, pushes, opens the PR
 #
 # Idempotent on re-run: if the fork already exists / branch exists,
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 VER="${1:-2.3.1}"
-PORT_SRC="$HOME/code/agtop-freebsd-port/sysutils/agtop"
+PORT_SRC="$HOME/code/agtop-freebsd-port/misc/agtop"
 WORK="$HOME/code/freebsd-ports-fork"
 TARBALL_NAME="MBrassey-agtop-v${VER}_GH0.tar.gz"
 TARBALL_URL="https://github.com/MBrassey/agtop/archive/v${VER}.tar.gz"
@@ -59,16 +59,17 @@ git fetch --depth=1 origin main
 git checkout -B "agtop-${VER}" origin/main
 
 echo "== Step 5: drop port files in =="
-mkdir -p sysutils/agtop
-cp "$PORT_SRC/Makefile"   sysutils/agtop/Makefile
-cp "$PORT_SRC/distinfo"   sysutils/agtop/distinfo
-cp "$PORT_SRC/pkg-descr"  sysutils/agtop/pkg-descr
+mkdir -p misc/agtop
+cp "$PORT_SRC/Makefile"         misc/agtop/Makefile
+cp "$PORT_SRC/Makefile.crates"  misc/agtop/Makefile.crates
+cp "$PORT_SRC/distinfo"         misc/agtop/distinfo
+cp "$PORT_SRC/pkg-descr"        misc/agtop/pkg-descr
 
 echo "== Step 6: commit =="
 git config user.name  "mbrassey"
 git config user.email "matt@brassey.io"
-git add sysutils/agtop/Makefile sysutils/agtop/distinfo sysutils/agtop/pkg-descr
-git commit -m "sysutils/agtop: new port — process monitor for AI coding agents
+git add misc/agtop/Makefile misc/agtop/Makefile.crates misc/agtop/distinfo misc/agtop/pkg-descr
+git commit -m "misc/agtop: new port — process monitor for AI coding agents
 
 agtop is a top-style ratatui TUI that walks /proc (sysinfo on
 non-Linux) plus the on-disk session transcripts of Claude Code,
@@ -89,9 +90,9 @@ git push -u origin "agtop-${VER}" --force
 echo "== Step 8: open PR =="
 gh pr create --repo freebsd/freebsd-ports \
   --base main --head "MBrassey:agtop-${VER}" \
-  --title "sysutils/agtop: new port — process monitor for AI coding agents" \
+  --title "misc/agtop: new port — process monitor for AI coding agents" \
   --body "$(cat <<'BODY'
-### New port: sysutils/agtop
+### New port: misc/agtop
 
 agtop is a top-style ratatui TUI for monitoring AI coding agents
 (Claude Code, OpenAI Codex, Block Goose, Aider, Google Gemini).

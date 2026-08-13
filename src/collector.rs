@@ -19,16 +19,26 @@ use crate::sysbackend::SysBackend;
 fn read_gpu_usage() -> std::collections::HashMap<u32, (f64, u64)> {
     use std::collections::HashMap;
     use std::process::Command;
+    use std::time::Duration;
     let mut out: HashMap<u32, (f64, u64)> = HashMap::new();
+    // Skip the fork entirely on the overwhelmingly common non-NVIDIA host
+    // — probing PATH once (see `nvidia_smi_present`) avoids a doomed
+    // spawn every tick forever.
+    if !nvidia_smi_present() { return out; }
     // Per-process: pid + used_memory (MiB).  --query-compute-apps
     // doesn't include per-process utilisation; we attribute the
     // host-wide gpu utilisation pct to every process on it weighted
     // by VRAM share — close enough for "is this agent burning GPU".
-    let apps = Command::new("nvidia-smi")
-        .args(["--query-compute-apps=pid,used_gpu_memory",
-               "--format=csv,noheader,nounits"])
-        .output();
-    let apps = match apps { Ok(o) if o.status.success() => o.stdout, _ => return out };
+    // Capped at 1.5 s so a wedged GPU driver (Xid errors, a powered-down
+    // GPU) can't hang the synchronous collector tick — and with it the
+    // whole TUI — indefinitely.
+    let mut apps_cmd = Command::new("nvidia-smi");
+    apps_cmd.args(["--query-compute-apps=pid,used_gpu_memory",
+                   "--format=csv,noheader,nounits"]);
+    let apps = match run_capped(apps_cmd, Duration::from_millis(1500)) {
+        Some(b) => b,
+        None => return out,
+    };
     let mut total_mem: u64 = 0;
     let mut entries: Vec<(u32, u64)> = Vec::new();
     for line in std::str::from_utf8(&apps).unwrap_or("").lines() {
@@ -47,10 +57,9 @@ fn read_gpu_usage() -> std::collections::HashMap<u32, (f64, u64)> {
     if entries.is_empty() { return out; }
 
     // Host-wide utilisation (sum across all GPUs).
-    let util = Command::new("nvidia-smi")
-        .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
-        .output();
-    let util_total = util.ok().and_then(|o| if o.status.success() { Some(o.stdout) } else { None })
+    let mut util_cmd = Command::new("nvidia-smi");
+    util_cmd.args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]);
+    let util_total = run_capped(util_cmd, Duration::from_millis(1500))
         .map(|b| {
             std::str::from_utf8(&b).unwrap_or("").lines()
                 .filter_map(|l| l.trim().parse::<f64>().ok()).sum::<f64>()
@@ -61,6 +70,108 @@ fn read_gpu_usage() -> std::collections::HashMap<u32, (f64, u64)> {
         out.insert(pid, (util_total * share, mem_bytes));
     }
     out
+}
+
+/// True if an `nvidia-smi` binary is on PATH.  Resolved once per process
+/// — a non-NVIDIA host would otherwise pay a failed fork+exec every tick.
+fn nvidia_smi_present() -> bool {
+    use std::sync::OnceLock;
+    static PRESENT: OnceLock<bool> = OnceLock::new();
+    *PRESENT.get_or_init(|| {
+        std::env::var_os("PATH").map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let p = dir.join("nvidia-smi");
+                p.is_file() || p.with_extension("exe").is_file()
+            })
+        }).unwrap_or(false)
+    })
+}
+
+/// Run `cmd` capturing stdout, but never block longer than `timeout`
+/// (plus a small residual grace) — if the child overruns it is killed
+/// and `None` is returned.  A worker thread drains stdout so a chatty
+/// child can't deadlock on a full pipe while the deadline is polled.
+/// stdin is nulled so a child can never steal keystrokes from the
+/// raw-mode TUI.  Returns `Some(stdout)` only on a clean zero-exit.
+pub(crate) fn run_capped(cmd: std::process::Command, timeout: std::time::Duration)
+    -> Option<Vec<u8>>
+{
+    run_capped_max(cmd, timeout, usize::MAX)
+}
+
+/// `run_capped` with a stdout size cap: the reader stops accepting
+/// bytes past `max_bytes`, and an overrun returns `None` (the child
+/// then blocks on the full pipe and is killed at the deadline).  Use
+/// for shellouts whose output size is attacker-influenced.
+pub(crate) fn run_capped_max(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn().ok()?;
+    let stdout = child.stdout.take();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(out) = stdout {
+            // Read one byte past the cap so an overrun is detectable.
+            let take = (max_bytes as u64).saturating_add(1);
+            let _ = out.take(take).read_to_end(&mut buf);
+        }
+        let _ = tx.send(buf);
+    });
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();   // closes the pipe → reader hits EOF
+                    reap_bounded(child);
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => { reap_bounded(child); break None; }
+        }
+    };
+    // Residual wait for the pipe to reach EOF, bounded: a descendant of
+    // the (possibly killed) child that inherited the stdout write end
+    // would otherwise hold the pipe open forever and `recv()` with it.
+    let residual = timeout
+        .saturating_sub(start.elapsed())
+        .max(Duration::from_millis(50));
+    let buf = match rx.recv_timeout(residual) {
+        Ok(b) => { let _ = reader.join(); b }
+        // Pipe still open past the deadline — abandon the reader thread
+        // (it exits on its own at EOF) rather than blocking the tick.
+        Err(_) => return None,
+    };
+    match status {
+        Some(s) if s.success() && buf.len() <= max_bytes => Some(buf),
+        _ => None,
+    }
+}
+
+/// Reap a killed/failed child without ever blocking indefinitely: a
+/// process stuck in uninterruptible sleep (wedged driver ioctl) leaves
+/// even SIGKILL pending, and a plain `wait()` would stall the collector
+/// with it.  Poll briefly, then hand the zombie to a detached reaper.
+fn reap_bounded(mut child: std::process::Child) {
+    for _ in 0..20 {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
+    }
+    std::thread::spawn(move || { let _ = child.wait(); });
 }
 
 /// Patterns in a process cmdline that indicate elevated / "god mode" agent
@@ -168,9 +279,19 @@ pub struct Collector {
     history_mem:          VecDeque<f64>,
     history_tokens_rate:  VecDeque<f64>,
     prev_tokens_total:    u64,
+    /// Last GPU-usage table (pid → util%, vram) and a tick counter so we
+    /// only re-query nvidia-smi every few ticks instead of every one —
+    /// the query costs 30-60 ms and the numbers move slowly.
+    gpu_cache: HashMap<u32, (f64, u64)>,
+    gpu_tick: u32,
     pricing: PriceTable,
     sys: Option<SysBackend>,
 }
+
+/// Re-query GPU usage every Nth tick.  The nvidia-smi round-trip is the
+/// single most expensive thing in the collector loop; VRAM/utilisation
+/// changes slowly enough that a ~4-tick cadence is imperceptible.
+const GPU_REFRESH_EVERY: u32 = 4;
 
 const PER_AGENT_HISTORY: usize = 24;
 
@@ -185,9 +306,26 @@ struct PrevCpu {
 
 impl Collector {
     pub fn new(user: Vec<UserMatcher>, pricing: PriceTable) -> Self {
+        // Hand the (possibly --prices-merged) table to the claude parser,
+        // which prices per-model at parse time and needs more than the
+        // last-seen model the collector sees.
+        claude::install_price_table(pricing.clone());
         let use_sysinfo = !proc_::is_linux();
         let sys = if use_sysinfo { Some(SysBackend::new()) } else { None };
-        let num_cpus = sys.as_ref().map(|s| s.num_cpus()).unwrap_or_else(proc_::num_cpus);
+        // On Linux, normalise CPU% against the number of *online* CPUs
+        // (the scope of /proc/stat's aggregate `cpu` line) rather than
+        // `available_parallelism`, which honours scheduler affinity and
+        // cgroup quota — under `taskset -c 0` or a 2-CPU container on a
+        // 32-core host that would deflate every agent's CPU% by the
+        // affinity/quota ratio.  `sys_cpus` uses the same value so the
+        // header and the per-agent math stay consistent.
+        let num_cpus = match sys.as_ref() {
+            Some(s) => s.num_cpus(),
+            None => {
+                let online = proc_::online_cpu_count();
+                if online > 0 { online } else { proc_::num_cpus() }
+            }
+        };
         Self {
             builtins: builtin(),
             user,
@@ -211,6 +349,8 @@ impl Collector {
             history_mem:          VecDeque::with_capacity(HISTORY),
             history_tokens_rate:  VecDeque::with_capacity(HISTORY),
             prev_tokens_total:    0,
+            gpu_cache: HashMap::new(),
+            gpu_tick: 0,
             pricing,
             sys,
         }
@@ -270,6 +410,10 @@ impl Collector {
         let mut agents: Vec<Agent> = Vec::new();
         let mut agg_cpu = 0.0f64;
         let mut agg_mem = 0u64;
+        // /proc/<pid>/net/tcp{,6} is a netns-wide table, identical for
+        // every pid sharing the namespace (the common case: all of them)
+        // — parse it once per namespace per tick, not once per agent.
+        let mut net_by_ns: HashMap<String, u32> = HashMap::new();
 
         for pid in proc_::list_pids() {
             let stat = match proc_::read_stat(pid) { Some(s) => s, None => continue };
@@ -313,7 +457,7 @@ impl Collector {
             };
             self.cpu_smooth.insert(pid, smoothed);
 
-            let rss_bytes = stat.rss_pages * proc_::PAGE_SIZE;
+            let rss_bytes = stat.rss_pages.saturating_mul(proc_::page_size());
             let started_at_sec = self.boot_time
                 .saturating_add(stat.starttime / proc_::CLK_TCK);
             let now_sec = now / 1000;
@@ -356,6 +500,8 @@ impl Collector {
                 cost_basis: "unknown".into(),
                 context_used: 0,
                 context_limit: 0,
+                time_to_compaction_secs: None,
+                ctx_growth_per_min: None,
                 loaded_skills: Vec::new(),
                 loaded_plugins: Vec::new(),
                 tool_counts: Vec::new(),
@@ -396,7 +542,7 @@ impl Collector {
                 children: proc_::read_children(pid, 8).into_iter()
                     .map(|(p, c)| (p, crate::format::sanitize_control(&c)))
                     .collect(),
-                net_established: proc_::count_net_established(pid),
+                net_established: net_established_by_ns(pid, &mut net_by_ns),
                 read_rate_bps: 0,    // filled in below from the per-pid prev snapshot
                 write_rate_bps: 0,
                 gpu_pct: 0.0,
@@ -553,10 +699,17 @@ impl Collector {
     /// universal CPU% override, fills in cost from the price table, and
     /// returns the merged sessions block ready to put on the snapshot.
     fn enrich_and_score(&mut self, agents: &mut [Agent], now: u64) -> crate::model::Sessions {
-        // GPU usage table built once per snapshot from nvidia-smi.
-        // Empty (no allocations beyond the empty HashMap) when the
-        // host has no NVIDIA GPU or nvidia-smi isn't on PATH.
-        let gpu_by_pid = read_gpu_usage();
+        // GPU usage table.  Only re-query nvidia-smi when there is at
+        // least one agent to attribute usage to, and only every
+        // GPU_REFRESH_EVERY-th tick — the query is the priciest thing in
+        // the loop and the numbers move slowly.  Between refreshes we
+        // reuse the cached table.  On non-NVIDIA hosts `read_gpu_usage`
+        // short-circuits without spawning anything.
+        if !agents.is_empty() && self.gpu_tick % GPU_REFRESH_EVERY == 0 {
+            self.gpu_cache = read_gpu_usage();
+        }
+        self.gpu_tick = self.gpu_tick.wrapping_add(1);
+        let gpu_by_pid = &self.gpu_cache;
 
         // Compute per-pid IO rates against the previous tick's
         // (read_bytes, write_bytes, ts).  First sample for any pid
@@ -577,6 +730,14 @@ impl Collector {
                 a.gpu_mem_bytes = *mem;
             }
         }
+
+        // Claude Code skills/plugins are re-derived per Claude row below.
+        // Plugin enumeration is host-global (identical for every Claude
+        // agent in a snapshot) and skills are cwd-scoped, so memoize both
+        // for the duration of this tick instead of re-reading settings.json
+        // and re-scanning skill dirs once per Claude agent.
+        let mut plugins_cache: Option<Vec<String>> = None;
+        let mut skills_cache: HashMap<String, Vec<String>> = HashMap::new();
 
         let live_refs: Vec<LiveAgentRef> = agents.iter()
             .map(|a| LiveAgentRef {
@@ -608,6 +769,7 @@ impl Collector {
                 a.tokens_total       = s.tokens_total;
                 a.tokens_cache_read  = s.tokens_cache_read;
                 a.tokens_cache_write = s.tokens_cache_write;
+                a.cost_usd           = s.cost_usd;
                 a.session_started_ms = s.session_started_ms;
                 a.tool_counts        = s.tool_counts.clone();
                 a.model = s.model.clone();
@@ -630,10 +792,17 @@ impl Collector {
             // at Anthropic's discounted rate (0.1× for reads, 1.25×
             // for writes) instead of full input rate.
             if let Some(model) = &a.model {
-                a.cost_usd = self.pricing.cost_with_cache(
-                    model, a.tokens_input, a.tokens_output,
-                    a.tokens_cache_read, a.tokens_cache_write,
-                );
+                // Vendors that price at parse time (claude's per-model
+                // accumulation) already set cost_usd via the session copy
+                // above; recompute only when the parse side left it unset,
+                // otherwise last-seen-model pricing would clobber the
+                // mixed-model sum.
+                if a.cost_usd == 0.0 {
+                    a.cost_usd = self.pricing.cost_with_cache(
+                        model, a.tokens_input, a.tokens_output,
+                        a.tokens_cache_read, a.tokens_cache_write,
+                    );
+                }
                 a.cost_basis = match crate::pricing::cost_basis(&self.pricing, model) {
                     crate::pricing::CostBasis::Api     => "api".into(),
                     crate::pricing::CostBasis::Local   => "local".into(),
@@ -668,27 +837,48 @@ impl Collector {
                 ring.push_back((now, a.context_used));
                 while ring.len() > PER_AGENT_HISTORY { ring.pop_front(); }
             }
+            // Fold the compaction extrapolation into the agent now, while we
+            // still hold the collector, so the render side (which runs on a
+            // different thread once collection is off the UI thread) needs no
+            // live handle back to the collector's per-pid history.
+            a.time_to_compaction_secs = self.time_to_compaction_secs(a.pid, a.context_limit);
+            a.ctx_growth_per_min = self.context_growth_per_min(a.pid);
             // Claude Code skills loaded for this session — scan the
-            // project-local + user-global skill roots.  Cheap (one
-            // readdir per scope, no recursion) so safe to do every
-            // tick; also gracefully empty for non-Claude vendors.
-            if a.label == "claude" {
-                a.loaded_skills = crate::skills::skills_for_cwd(&a.cwd);
-                // Plugin enumeration is host-global (not cwd-scoped),
-                // so the result is identical for every Claude row in
-                // a snapshot.  Caching it would save a tiny amount of
-                // JSON parsing per tick — not worth the invalidation
-                // complexity (settings.json can change while agtop
-                // runs).
-                a.loaded_plugins = crate::plugins::enabled_plugins();
+            // project-local + user-global skill roots.  npm-installed
+            // Claude Code classifies as "claude-code", not "claude"
+            // (the scoped-path matcher), and must get skills/plugins too.
+            // Memoized per-tick (see caches above) so N Claude rows don't
+            // trigger N readdirs + N settings.json parses.
+            if a.label == "claude" || a.label == "claude-code" {
+                a.loaded_skills = skills_cache.entry(a.cwd.clone())
+                    .or_insert_with(|| crate::skills::skills_for_cwd(&a.cwd))
+                    .clone();
+                a.loaded_plugins = plugins_cache
+                    .get_or_insert_with(crate::plugins::enabled_plugins)
+                    .clone();
             }
         }
 
+        // Per-pid token-rate history — must run now that a.tokens_total
+        // has been populated by the enrichment loop above.
+        self.refresh_agent_token_history(agents);
+
         // Mutate session entries inline so JSON output carries cost too.
+        // Use the cache-aware variant so a session's cache-read tokens
+        // (typically 90%+ of the input bucket) are billed at 0.1× rather
+        // than full input rate — otherwise the sessions pane / --json
+        // reported ~5-10× the per-agent cost for the same session.
         let mut sessions_block = merged.sessions;
         for s in sessions_block.sessions.iter_mut() {
+            // Skip sessions already priced per-model at parse time —
+            // recomputing from the grand totals with the last-seen model
+            // would undo the mixed-model accounting.
+            if s.cost_usd != 0.0 { continue; }
             if let Some(model) = &s.model {
-                s.cost_usd = self.pricing.cost(model, s.tokens_input, s.tokens_output);
+                s.cost_usd = self.pricing.cost_with_cache(
+                    model, s.tokens_input, s.tokens_output,
+                    s.tokens_cache_read, s.tokens_cache_write,
+                );
             }
         }
         sessions_block
@@ -702,15 +892,26 @@ impl Collector {
             if entry.len() >= PER_AGENT_HISTORY { entry.pop_front(); }
             entry.push_back(a.cpu);
             a.cpu_history = entry.iter().copied().collect();
+        }
+        // Drop entries for processes that disappeared.
+        self.agent_cpu_hist.retain(|pid, _| live.contains(pid));
+    }
 
-            // Token-rate history: delta vs previous total for this
-            // pid.  First observation seeds with 0 so the sparkline
-            // doesn't spike on initial sample.  Saturating_sub
-            // defends against vendor enrichers that occasionally
-            // re-emit a smaller running total (Codex resumes a
-            // session, header total is the new session only).
-            let prev = self.prev_tokens_per_pid.get(&a.pid).copied();
-            let delta = match prev {
+    /// Per-pid token-rate history for the detail popup sparkline.  Must
+    /// run *after* `enrich_and_score` has populated `a.tokens_total` —
+    /// running it in `refresh_agent_cpu_history` (which executes before
+    /// enrichment) computed every delta against a zero total, leaving the
+    /// history permanently flat and the sparkline dead.
+    fn refresh_agent_token_history(&mut self, agents: &mut [Agent]) {
+        let live: std::collections::HashSet<u32> = agents.iter().map(|a| a.pid).collect();
+        for a in agents.iter_mut() {
+            // Delta vs the previous total for this pid.  First observation
+            // seeds with 0 so the sparkline doesn't spike on the initial
+            // sample.  saturating_sub defends against vendor enrichers
+            // that occasionally re-emit a smaller running total (Codex
+            // resumes a session; the header total is the new session
+            // only).
+            let delta = match self.prev_tokens_per_pid.get(&a.pid).copied() {
                 Some(p) => a.tokens_total.saturating_sub(p) as f64,
                 None    => 0.0,
             };
@@ -721,8 +922,6 @@ impl Collector {
             tok_entry.push_back(delta);
             a.tokens_history = tok_entry.iter().copied().collect();
         }
-        // Drop entries for processes that disappeared.
-        self.agent_cpu_hist.retain(|pid, _| live.contains(pid));
         self.agent_tokens_hist.retain(|pid, _| live.contains(pid));
         self.prev_tokens_per_pid.retain(|pid, _| live.contains(pid));
     }
@@ -899,6 +1098,17 @@ fn push_bounded(v: &mut VecDeque<f64>, x: f64, max: usize) {
     v.push_back(x);
 }
 
+/// Established-connection count for `pid`, memoized per network
+/// namespace within one snapshot.  Keyed on the `/proc/<pid>/ns/net`
+/// symlink target (`net:[inode]`); a pid whose ns link is unreadable
+/// gets a private key so it still resolves without polluting the cache.
+fn net_established_by_ns(pid: u32, cache: &mut HashMap<String, u32>) -> u32 {
+    let key = std::fs::read_link(format!("/proc/{pid}/ns/net"))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| format!("pid:{pid}"));
+    *cache.entry(key).or_insert_with(|| proc_::count_net_established(pid))
+}
+
 fn dedupe(it: impl Iterator<Item = String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -909,4 +1119,52 @@ fn dedupe(it: impl Iterator<Item = String>) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(all(test, unix))]
+mod run_capped_tests {
+    use super::{run_capped, run_capped_max};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn returns_stdout_on_clean_exit() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "printf hi"]);
+        assert_eq!(run_capped(cmd, Duration::from_secs(5)), Some(b"hi".to_vec()));
+    }
+
+    #[test]
+    fn kills_overrunning_child_within_deadline() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "sleep 30"]);
+        let t0 = Instant::now();
+        assert_eq!(run_capped(cmd, Duration::from_millis(200)), None);
+        // Deadline + residual grace + reap poll, with generous CI slack.
+        assert!(t0.elapsed() < Duration::from_secs(3),
+            "run_capped blocked past its deadline: {:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn descendant_holding_pipe_cannot_block_past_deadline() {
+        // The shell exits immediately but its backgrounded child inherits
+        // the stdout write end, so the pipe never reaches EOF — the
+        // residual wait must give up instead of recv()ing forever.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "sleep 30 & exit 0"]);
+        let t0 = Instant::now();
+        assert_eq!(run_capped(cmd, Duration::from_millis(300)), None);
+        assert!(t0.elapsed() < Duration::from_secs(3),
+            "residual pipe wait blocked past the deadline: {:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn output_over_cap_is_rejected() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "printf '0123456789'"]);
+        assert_eq!(run_capped_max(cmd, Duration::from_secs(5), 4), None);
+        let mut ok = Command::new("/bin/sh");
+        ok.args(["-c", "printf '0123'"]);
+        assert_eq!(run_capped_max(ok, Duration::from_secs(5), 4), Some(b"0123".to_vec()));
+    }
 }

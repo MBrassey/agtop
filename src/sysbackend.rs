@@ -188,6 +188,8 @@ impl SysBackend {
                 cost_basis: "unknown".into(),
                 context_used: 0,
                 context_limit: 0,
+                time_to_compaction_secs: None,
+                ctx_growth_per_min: None,
                 loaded_skills: Vec::new(),
                 loaded_plugins: Vec::new(),
                 tool_counts: Vec::new(),

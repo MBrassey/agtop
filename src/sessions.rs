@@ -47,8 +47,8 @@ pub fn merge(parts: Vec<SessionsResult>) -> SessionsResult {
         all_sessions.extend(p.sessions.sessions);
         all_recent_tasks.extend(p.sessions.recent_tasks);
     }
-    all_sessions.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
-    all_recent_tasks.sort_by(|a, b| b.mtime_ms.cmp(&a.mtime_ms));
+    all_sessions.sort_by_key(|x| std::cmp::Reverse(x.mtime_ms));
+    all_recent_tasks.sort_by_key(|x| std::cmp::Reverse(x.mtime_ms));
     if all_recent_tasks.len() > 30 { all_recent_tasks.truncate(30); }
 
     let waiting   = all_sessions.iter().filter(|s| s.status == Status::Waiting).count() as u32;
