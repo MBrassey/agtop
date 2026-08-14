@@ -889,7 +889,6 @@ release workflow fans out to all three primary registries in parallel.
 | Homebrew tap   | `homebrew/agtop.rb` → `MBrassey/homebrew-tap` | ✓                |
 | apt repo (deb) | `packages/deb/build.sh` → `MBrassey/apt` (gh-pages) | ✓                |
 | winget         | `~/code/agtop-winget-port/` → `microsoft/winget-pkgs`    | ✓ (one-line bump per release) |
-| FreeBSD ports  | `~/code/agtop-freebsd-port/` → `freebsd/freebsd-ports`   | ✓ (one-line bump per release) |
 
 > **Snap Store** was retired in 2.4.2 — the `snap install lxd`
 > bootstrap inside `snapcore/action-build` repeatedly failed with
